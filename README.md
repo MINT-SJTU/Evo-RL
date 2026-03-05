@@ -29,6 +29,15 @@
 
 - **[2026-02-26]** First SO101 real-world RL baseline and reproducible CLI workflow are released.
 
+## 🧭 Table of Contents
+
+| Getting Started | Training Pipeline | Project Info |
+| --- | --- | --- |
+| [⚡ Quick Start](#quick-start) | [4) Value Function Training](#value-function-training) | [Model & Dataset](#model--dataset) |
+| [1) Installation](#installation) | [5) Value Inference](#value-inference) | [Community Channels](#community-channels) |
+| [2) Hardware Setup](#hardware-setup) | [6) Policy Training](#policy-training) | [Affiliations](#affiliations) |
+| [3) Data Collection](#data-collection) | [7) Closed-loop Rollout and Next Round](#closed-loop-rollout-and-next-round) | [Citation](#citation) / [License](#license) |
+
 <p align="center"><strong>Value Visual Results</strong></p>
 
 <p align="center"><small><strong>Success Case</strong></small></p>
@@ -57,10 +66,12 @@
   <img alt="Human-in-the-Loop Result 2" src="./website/assets/gifs/hitl_2.gif" width="48%"/>
 </p>
 
+<a id="quick-start"></a>
 ## ⚡ Quick Start
 
 **LeRobot-aligned foundation:** we use LeRobot as the base of this codebase because its inference and data-collection logic are highly aligned with real-world RL workflows.
 
+<a id="installation"></a>
 ### 1) Installation
 
 ```bash
@@ -73,13 +84,13 @@ pip install -e .
 
 For setup details and platform-specific dependencies, follow the official [LeRobot configuration guide](https://huggingface.co/docs/lerobot/installation).
 
+<a id="hardware-setup"></a>
 ### 2) Hardware Setup
 
-#### SO101
+#### SO Series (SO100/SO101)
 
-Due to hardware limitations, SO100 is **not supported** for real-world reinforcement learning.
-
-For SO101 setup, please follow the [official SO101 tutorial](https://wiki.seeedstudio.com/cn/lerobot_so100m/) in detail and complete all installation and configuration steps there before continuing.
+For SO-series setup, please follow the [official tutorial](https://wiki.seeedstudio.com/cn/lerobot_so100m/) in detail and complete all installation and configuration steps there before continuing.
+The examples below use **SO101** as the reference configuration.
 
 #### Device path recommendation
 
@@ -186,9 +197,55 @@ For dual-arm camera mapping, it is fine to attach `front` under either the left-
 
 If needed, you can also use temporary device paths (for example `/dev/ttyACM*` and `/dev/video*`) during initial debugging.
 
+<a id="agilex-piper-setup"></a>
+#### AgileX PiPER
+
+For PiPER setup, PiPER uses CAN interfaces instead of serial ports.
+So first run `lerobot-setup-can` to confirm CAN interfaces are available:
+
+```bash
+lerobot-setup-can --mode=setup --interfaces=can0,can1
+```
+
+PiPER calibration is required by default.
+If needed, you can disable it with
+`--robot.calibration_mode=off` and `--teleop.calibration_mode=off`.
+
+If you switch master/follower roles with the flags below, you must power-cycle both arms before enabling.
+
+```bash
+--teleop.set_leader_mode_on_connect=true
+--robot.set_follower_mode_on_connect=true
+```
+
+For single-arm users, run the command below to verify the system is ready:
+
+```bash
+lerobot-teleoperate \
+  --robot.type=piper_follower \
+  --robot.port=can0 \
+  --robot.id=my_piper_follower \
+  --teleop.type=piper_leader \
+  --teleop.port=can1 \
+  --teleop.id=my_piper_leader
+```
+
+Optional PiPER flags:
+
+```bash
+--robot.sync_gripper=true|false
+--robot.gripper_effort_default=1000
+--teleop.sync_gripper=true|false
+```
+
+<a id="data-collection"></a>
 ### 3) Data Collection
 
-Collect rollout data with `lerobot-human-inloop-record`. Bimanual template:
+Collect rollout data with `lerobot-human-inloop-record`.
+
+#### SO Series (SO100/SO101)
+
+Bimanual template:
 
 ```bash
 lerobot-human-inloop-record \
@@ -213,6 +270,32 @@ lerobot-human-inloop-record \
 
 Recommendation: use **`fourcc: "MJPG"`** for OpenCV and **`warmup_s`** for RealSense. In this example `front` uses RealSense, but you can switch it to OpenCV with the same structure.
 
+#### AgileX PiPER
+
+PiPER mode note (policy-sync / human-in-the-loop):
+
+- Leader/follower linkage is configured via `MasterSlaveConfig(linkage_config, feedback_offset, ctrl_offset, linkage_offset)`.
+- `linkage_config=0xFA`: teaching-input arm.
+- `linkage_config=0xFC`: motion-output arm.
+- `0xFA` is not suitable when the arm must accept external control commands. For policy execution + intervention switching, keep both teleop and robot arms in `0xFC`.
+- After switching role mode (`0xFA` <-> `0xFC`), perform a full power-cycle before validation.
+
+```bash
+lerobot-human-inloop-record \
+  --robot.type=piper_follower \
+  --robot.port=can0 \
+  --robot.id=my_piper_follower \
+  --teleop.type=piper_leader \
+  --teleop.port=can1 \
+  --teleop.id=my_piper_leader \
+  --dataset.repo_id=<HF_USERNAME_OR_ORG>/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=true
+```
+
 Hotkeys:
 
 - `i`: toggle intervention mode (policy <-> teleop takeover)
@@ -230,6 +313,7 @@ lerobot-dataset-report --dataset <HF_USERNAME_OR_ORG>/<DATASET_NAME>
 
 This prints: dataset meta, totals, episode-length stats/histogram, success/intervention metrics, task list, and full feature schema.
 
+<a id="value-function-training"></a>
 ### 4) Value Function Training
 
 Train the value function on the current dataset. Current default: [Pi\*0.6](https://www.pi.website/blog/pistar06) (`--value.type=pistar06`).
@@ -268,6 +352,7 @@ To plug in a different value function, minimal path in this repo:
 - Add `src/lerobot/values/<your_value>/processor_<your_value>.py` with `make_<your_value>_pre_post_processors(...)`.
 - Remove/replace the current `pistar06`-only type checks in `src/lerobot/configs/value_train.py` and `src/lerobot/scripts/lerobot_value_infer.py`.
 
+<a id="value-inference"></a>
 ### 5) Value Inference
 
 Infer value signals and write value/advantage/indicator back to the dataset:
@@ -307,32 +392,22 @@ CUDA_VISIBLE_DEVICES=<GPU_ID_LIST> accelerate launch \
 
 Parameter notes:
 
-- `--acp.n_step`: n-step advantage horizon.
-- `--acp.positive_ratio`: positive label ratio after advantage binarization (e.g., `0.3` = top 30% per task).
+```bash
+--acp.n_step: n-step advantage horizon.
+--acp.positive_ratio: positive label ratio after advantage binarization (e.g., 0.3 = top 30% per task).
+```
 
 Expected new columns:
 
-- `complementary_info.value_<TAG>`
-- `complementary_info.advantage_<TAG>`
-- `complementary_info.acp_indicator_<TAG>`
+```bash
+complementary_info.value_<TAG>
+complementary_info.advantage_<TAG>
+complementary_info.acp_indicator_<TAG>
+```
 
 These columns are written back to the original dataset specified by `--dataset.repo_id`.
 
-Visualization (optional):
-
-- Enable with `--viz.enable=true`.
-- Output videos are saved to `outputs/value_infer/<RUN_NAME>/value/viz/`.
-- Each video overlays a value curve and per-frame text (`advantage`, `acp_indicator`) on top of camera frames.
-- You can control scope with:
-  - `--viz.episodes=all` or ranges like `0-9,12`
-  - `--viz.video_key=<CAMERA_KEY>` (default picks `front` if available)
-  - `--viz.overwrite=true|false`
-  - `--viz.vcodec=<CODEC>` and `--viz.frame_storage_mode=memory|disk`
-
-Value overlay examples (SO101, smooth=11):
-
-- GIF assets are stored under `website/assets/gifs/`.
-
+<a id="policy-training"></a>
 ### 6) Policy Training
 
 Train the policy with advantage-conditioned tags.
@@ -377,6 +452,7 @@ CUDA_VISIBLE_DEVICES=<GPU_ID_LIST> accelerate launch \
   <POLICY_TRAIN_ARGS>
 ```
 
+<a id="closed-loop-rollout-and-next-round"></a>
 ### 7) Closed-loop Rollout and Next Round
 
 Deploy the trained policy in human-in-loop mode and collect the next dataset round:
