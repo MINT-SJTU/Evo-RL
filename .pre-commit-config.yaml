@@ -36,7 +36,9 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: end-of-file-fixer
+        exclude: ^src/lerobot/assets/(piper_description|piper_x_description)/
       - id: trailing-whitespace
+        exclude: ^src/lerobot/assets/(piper_description|piper_x_description)/
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.1

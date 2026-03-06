@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 
 from lerobot.cameras import CameraConfig
 
-
 from ..config import RobotConfig
 
 

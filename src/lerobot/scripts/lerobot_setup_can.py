@@ -141,7 +141,6 @@ def setup_interface_with_fallback(interface: str, cfg: CANSetupConfig) -> tuple[
     return False, None, " | ".join(attempt_msgs)
 
 
-
 def test_motor(bus, motor_id: int, timeout: float, use_fd: bool):
     """Test a single motor and return responses."""
     import can

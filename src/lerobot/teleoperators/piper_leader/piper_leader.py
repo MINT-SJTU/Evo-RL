@@ -25,10 +25,10 @@ from lerobot.processor import RobotAction
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.utils.piper_sdk import (
     PIPER_ACTION_KEYS,
-    guard_piper_ctrl_mode_on_connect,
     PIPER_JOINT_ACTION_KEYS,
     PIPER_JOINT_NAMES,
     get_piper_sdk,
+    guard_piper_ctrl_mode_on_connect,
     milli_to_unit,
     parse_piper_log_level,
     unit_to_milli,
@@ -55,8 +55,8 @@ def _ensure_not_lfs_pointer(path_obj: Any, relpath: str) -> None:
         raise RuntimeError(
             "Bundled PiPER assets are still Git LFS pointer files. "
             "Please run `git lfs pull --include="
-            "\"src/lerobot/assets/piper_description/**,src/lerobot/assets/piper_x_description/**\" "
-            "--exclude=\"*\"` and `git lfs checkout src/lerobot/assets/piper_description "
+            '"src/lerobot/assets/piper_description/**,src/lerobot/assets/piper_x_description/**" '
+            '--exclude="*"` and `git lfs checkout src/lerobot/assets/piper_description '
             "src/lerobot/assets/piper_x_description`, then retry. "
             f"(file: {relpath})"
         )
@@ -109,11 +109,7 @@ class PiperLeader(Teleoperator):
         self._manual_control_enabled = None
         try:
             self.configure()
-            if (
-                not self.is_calibrated
-                and calibrate
-                and self.config.require_calibration
-            ):
+            if not self.is_calibrated and calibrate and self.config.require_calibration:
                 logger.info(
                     "No piper-leader calibration file found for '%s'. Running lerobot-calibrate flow.",
                     self.id,
@@ -214,7 +210,9 @@ class PiperLeader(Teleoperator):
             return
         if enabled and self._manual_control_enabled is not True:
             if not self._wait_enable(self.config.enable_timeout_s):
-                logger.warning("Piper leader did not report enabled state before entering gravity compensation.")
+                logger.warning(
+                    "Piper leader did not report enabled state before entering gravity compensation."
+                )
             if self.config.sync_gripper:
                 self._set_gripper_enabled(False)
             self._ensure_gravity_comp_loop().start()

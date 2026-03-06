@@ -9,9 +9,19 @@ import lerobot.robots.piper_follower.piper_follower as piper_follower_module
 import lerobot.teleoperators.piper_leader.piper_leader as piper_leader_module
 import lerobot.utils.piper_sdk as piper_sdk_utils
 from lerobot.motors import MotorCalibration
-from lerobot.robots.piper_follower import PiperFollower, PiperFollowerConfig, PiperXFollower, PiperXFollowerConfig
+from lerobot.robots.piper_follower import (
+    PiperFollower,
+    PiperFollowerConfig,
+    PiperXFollower,
+    PiperXFollowerConfig,
+)
 from lerobot.robots.utils import make_robot_from_config
-from lerobot.teleoperators.piper_leader import PiperLeader, PiperLeaderConfig, PiperXLeader, PiperXLeaderConfig
+from lerobot.teleoperators.piper_leader import (
+    PiperLeader,
+    PiperLeaderConfig,
+    PiperXLeader,
+    PiperXLeaderConfig,
+)
 from lerobot.teleoperators.utils import make_teleoperator_from_config
 from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 
@@ -442,7 +452,9 @@ def test_piper_leader_gravity_comp_manual_control_uses_mit(monkeypatch):
     ("device_kind", "port", "robot_id"),
     [("leader", "can1", None), ("follower", "can0", "piper_role_guard")],
 )
-def test_piper_connect_fails_and_writes_follower_role_when_in_teach_mode(monkeypatch, device_kind, port, robot_id):
+def test_piper_connect_fails_and_writes_follower_role_when_in_teach_mode(
+    monkeypatch, device_kind, port, robot_id
+):
     patch_fake_sdk(monkeypatch)
 
     if device_kind == "leader":
@@ -459,11 +471,9 @@ def test_piper_connect_fails_and_writes_follower_role_when_in_teach_mode(monkeyp
 
 def test_piper_lfs_pointer_urdf_raises_actionable_error(tmp_path):
     pointer_file = tmp_path / "lfs_pointer.urdf"
-    pointer_file.write_text(
-        "version https://git-lfs.github.com/spec/v1\n"
-        "oid sha256:deadbeef\n"
-        "size 123\n"
-    )
+    pointer_file.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 123\n")
 
     with pytest.raises(RuntimeError, match="Git LFS pointer files"):
-        piper_leader_module._ensure_not_lfs_pointer(pointer_file, "assets/piper_description/urdf/pointer.urdf")
+        piper_leader_module._ensure_not_lfs_pointer(
+            pointer_file, "assets/piper_description/urdf/pointer.urdf"
+        )

@@ -24,10 +24,10 @@ from lerobot.processor import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.utils.piper_sdk import (
     PIPER_ACTION_KEYS,
-    guard_piper_ctrl_mode_on_connect,
     PIPER_JOINT_ACTION_KEYS,
     PIPER_JOINT_NAMES,
     get_piper_sdk,
+    guard_piper_ctrl_mode_on_connect,
     milli_to_unit,
     parse_piper_log_level,
     unit_to_milli,
@@ -93,11 +93,7 @@ class PiperFollower(Robot):
         connected_cameras = []
         try:
             self.configure()
-            should_auto_calibrate = (
-                not self.is_calibrated
-                and calibrate
-                and self.config.require_calibration
-            )
+            should_auto_calibrate = not self.is_calibrated and calibrate and self.config.require_calibration
             if should_auto_calibrate:
                 logger.info(
                     "No piper-follower calibration file found for '%s'. Running lerobot-calibrate flow.",
