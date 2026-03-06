@@ -65,11 +65,11 @@ class PiperLeader(Teleoperator):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return {key: float for key in PIPER_ACTION_KEYS}
+        return dict.fromkeys(PIPER_ACTION_KEYS, float)
 
     @cached_property
     def feedback_features(self) -> dict[str, type]:
-        return {key: float for key in PIPER_ACTION_KEYS}
+        return dict.fromkeys(PIPER_ACTION_KEYS, float)
 
     @property
     def is_connected(self) -> bool:
@@ -94,8 +94,15 @@ class PiperLeader(Teleoperator):
                 self.arm.MasterSlaveConfig(0xFC, 0x00, 0x00, 0x00)
                 time.sleep(0.05)
             self.configure()
-            if not self.is_calibrated and calibrate and should_require_piper_calibration(self.config.calibration_mode):
-                logger.info("No piper-leader calibration file found for '%s'. Running lerobot-calibrate flow.", self.id)
+            if (
+                not self.is_calibrated
+                and calibrate
+                and should_require_piper_calibration(self.config.calibration_mode)
+            ):
+                logger.info(
+                    "No piper-leader calibration file found for '%s'. Running lerobot-calibrate flow.",
+                    self.id,
+                )
                 self.calibrate()
         except Exception:
             self.arm.DisconnectPort()

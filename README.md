@@ -31,11 +31,11 @@
 
 ## 🧭 Table of Contents
 
-| Getting Started | Training Pipeline | Project Info |
-| --- | --- | --- |
-| [⚡ Quick Start](#quick-start) | [4) Value Function Training](#value-function-training) | [Model & Dataset](#model--dataset) |
-| [1) Installation](#installation) | [5) Value Inference](#value-inference) | [Community Channels](#community-channels) |
-| [2) Hardware Setup](#hardware-setup) | [6) Policy Training](#policy-training) | [Affiliations](#affiliations) |
+| Getting Started                        | Training Pipeline                                                            | Project Info                                |
+| -------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------- |
+| [⚡ Quick Start](#quick-start)         | [4) Value Function Training](#value-function-training)                       | [Model & Dataset](#model--dataset)          |
+| [1) Installation](#installation)       | [5) Value Inference](#value-inference)                                       | [Community Channels](#community-channels)   |
+| [2) Hardware Setup](#hardware-setup)   | [6) Policy Training](#policy-training)                                       | [Affiliations](#affiliations)               |
 | [3) Data Collection](#data-collection) | [7) Closed-loop Rollout and Next Round](#closed-loop-rollout-and-next-round) | [Citation](#citation) / [License](#license) |
 
 <p align="center"><strong>Value Visual Results</strong></p>
@@ -67,11 +67,13 @@
 </p>
 
 <a id="quick-start"></a>
+
 ## ⚡ Quick Start
 
 **LeRobot-aligned foundation:** we use LeRobot as the base of this codebase because its inference and data-collection logic are highly aligned with real-world RL workflows.
 
 <a id="installation"></a>
+
 ### 1) Installation
 
 ```bash
@@ -85,6 +87,7 @@ pip install -e .
 For setup details and platform-specific dependencies, follow the official [LeRobot configuration guide](https://huggingface.co/docs/lerobot/installation).
 
 <a id="hardware-setup"></a>
+
 ### 2) Hardware Setup
 
 #### SO Series (SO100/SO101)
@@ -198,6 +201,7 @@ For dual-arm camera mapping, it is fine to attach `front` under either the left-
 If needed, you can also use temporary device paths (for example `/dev/ttyACM*` and `/dev/video*`) during initial debugging.
 
 <a id="agilex-piper-setup"></a>
+
 #### AgileX PiPER
 
 For PiPER setup, PiPER uses CAN interfaces instead of serial ports.
@@ -239,6 +243,7 @@ Optional PiPER flags:
 ```
 
 <a id="data-collection"></a>
+
 ### 3) Data Collection
 
 Collect rollout data with `lerobot-human-inloop-record`.
@@ -314,6 +319,7 @@ lerobot-dataset-report --dataset <HF_USERNAME_OR_ORG>/<DATASET_NAME>
 This prints: dataset meta, totals, episode-length stats/histogram, success/intervention metrics, task list, and full feature schema.
 
 <a id="value-function-training"></a>
+
 ### 4) Value Function Training
 
 Train the value function on the current dataset. Current default: [Pi\*0.6](https://www.pi.website/blog/pistar06) (`--value.type=pistar06`).
@@ -353,6 +359,7 @@ To plug in a different value function, minimal path in this repo:
 - Remove/replace the current `pistar06`-only type checks in `src/lerobot/configs/value_train.py` and `src/lerobot/scripts/lerobot_value_infer.py`.
 
 <a id="value-inference"></a>
+
 ### 5) Value Inference
 
 Infer value signals and write value/advantage/indicator back to the dataset:
@@ -408,6 +415,7 @@ complementary_info.acp_indicator_<TAG>
 These columns are written back to the original dataset specified by `--dataset.repo_id`.
 
 <a id="policy-training"></a>
+
 ### 6) Policy Training
 
 Train the policy with advantage-conditioned tags.
@@ -453,6 +461,7 @@ CUDA_VISIBLE_DEVICES=<GPU_ID_LIST> accelerate launch \
 ```
 
 <a id="closed-loop-rollout-and-next-round"></a>
+
 ### 7) Closed-loop Rollout and Next Round
 
 Deploy the trained policy in human-in-loop mode and collect the next dataset round:

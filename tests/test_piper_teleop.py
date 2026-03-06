@@ -1,10 +1,11 @@
+# ruff: noqa: N802
 from types import SimpleNamespace
 
 import pytest
 
-import lerobot.utils.piper_sdk as piper_sdk_utils
 import lerobot.robots.piper_follower.piper_follower as piper_follower_module
 import lerobot.teleoperators.piper_leader.piper_leader as piper_leader_module
+import lerobot.utils.piper_sdk as piper_sdk_utils
 from lerobot.motors import MotorCalibration
 from lerobot.robots.piper_follower import PiperFollower, PiperFollowerConfig
 from lerobot.robots.utils import make_robot_from_config
@@ -115,7 +116,9 @@ class FakePiperInterface:
 
 
 def patch_fake_sdk(monkeypatch):
-    fake_loader = lambda: (FakePiperInterface, FakeLogLevel)
+    def fake_loader():
+        return (FakePiperInterface, FakeLogLevel)
+
     monkeypatch.setattr(piper_sdk_utils, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
@@ -202,17 +205,10 @@ def test_piper_requires_calibration(monkeypatch):
     teleop.connect(calibrate=False)
     robot.connect(calibrate=False)
     try:
-        try:
+        with pytest.raises(RuntimeError, match="require calibration"):
             teleop.get_action()
-            assert False, "Expected teleop.get_action() to require calibration."
-        except RuntimeError:
-            pass
-
-        try:
+        with pytest.raises(RuntimeError, match="require calibration"):
             robot.send_action({"joint_1.pos": 0.0})
-            assert False, "Expected robot.send_action() to require calibration."
-        except RuntimeError:
-            pass
     finally:
         teleop.disconnect()
         robot.disconnect()

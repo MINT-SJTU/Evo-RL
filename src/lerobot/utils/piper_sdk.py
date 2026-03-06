@@ -69,7 +69,4 @@ def should_require_piper_calibration(calibration_mode: str) -> bool:
         return True
     if calibration_mode == "off":
         return False
-    raise ValueError(
-        f"Invalid Piper calibration mode '{calibration_mode}'. "
-        "Expected one of: required, off."
-    )
+    raise ValueError(f"Invalid Piper calibration mode '{calibration_mode}'. Expected one of: required, off.")

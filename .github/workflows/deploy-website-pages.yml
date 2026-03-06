@@ -15,7 +15,7 @@ concurrency:
 jobs:
   deploy:
     # Temporarily disabled to keep the website non-public.
-    if: ${{ false }}
+    if: false
     runs-on: ubuntu-latest
     environment:
       name: github-pages

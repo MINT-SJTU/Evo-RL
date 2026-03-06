@@ -17,7 +17,6 @@
 import logging
 import time
 from functools import cached_property
-from typing import Any
 
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.motors import MotorCalibration
@@ -72,11 +71,11 @@ class PiperFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {**{key: float for key in PIPER_ACTION_KEYS}, **self._cameras_ft}
+        return {**dict.fromkeys(PIPER_ACTION_KEYS, float), **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return {key: float for key in PIPER_ACTION_KEYS}
+        return dict.fromkeys(PIPER_ACTION_KEYS, float)
 
     @property
     def is_connected(self) -> bool:
@@ -97,10 +96,15 @@ class PiperFollower(Robot):
 
             self.configure()
             should_auto_calibrate = (
-                not self.is_calibrated and calibrate and should_require_piper_calibration(self.config.calibration_mode)
+                not self.is_calibrated
+                and calibrate
+                and should_require_piper_calibration(self.config.calibration_mode)
             )
             if should_auto_calibrate:
-                logger.info("No piper-follower calibration file found for '%s'. Running lerobot-calibrate flow.", self.id)
+                logger.info(
+                    "No piper-follower calibration file found for '%s'. Running lerobot-calibrate flow.",
+                    self.id,
+                )
                 self.calibrate()
             # Enable behavior should be controlled by enable_on_connect, independent from calibrate flag.
             # This keeps connect(calibrate=False) commandable for callers that only want to skip interactive calibration.
@@ -272,7 +276,9 @@ class PiperFollower(Robot):
                 joint_targets = [self._offset_to_target(key, action[key]) for key in joint_keys]
             joint_commands = [unit_to_milli(value) for value in joint_targets]
             self.arm.JointCtrl(*joint_commands)
-            sent_action.update({key: milli_to_unit(raw) for key, raw in zip(joint_keys, joint_commands, strict=True)})
+            sent_action.update(
+                {key: milli_to_unit(raw) for key, raw in zip(joint_keys, joint_commands, strict=True)}
+            )
         elif any(key in action for key in joint_keys):
             logger.debug("Ignoring partial Piper joint action. Need all six joint keys to send command.")
 
