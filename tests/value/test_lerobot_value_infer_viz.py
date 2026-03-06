@@ -3,11 +3,8 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 from PIL import Image
-
-pytest.importorskip("scipy")
 
 from lerobot.configs.value import (
     ValueInferenceACPConfig,
