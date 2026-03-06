@@ -502,3 +502,15 @@ def test_piper_connect_fails_and_writes_follower_role_when_in_teach_mode(monkeyp
         device.connect(calibrate=False)
 
     assert device.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
+
+
+def test_piper_lfs_pointer_urdf_raises_actionable_error(tmp_path):
+    pointer_file = tmp_path / "lfs_pointer.urdf"
+    pointer_file.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:deadbeef\n"
+        "size 123\n"
+    )
+
+    with pytest.raises(RuntimeError, match="Git LFS pointer files"):
+        piper_leader_module._ensure_not_lfs_pointer(pointer_file, "assets/piper_description/urdf/pointer.urdf")

@@ -45,6 +45,21 @@ PIPER_CALIB_KEYS = list(PIPER_ACTION_KEYS)
 PIPER_CALIB_IDS = {key: idx for idx, key in enumerate(PIPER_CALIB_KEYS)}
 DEFAULT_PIPER_GRAVITY_URDF = "assets/piper_description/urdf/piper_no_gripper_description.urdf"
 DEFAULT_PIPERX_GRAVITY_URDF = "assets/piper_x_description/urdf/piper_x_description_no_gripper.urdf"
+GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+
+
+def _ensure_not_lfs_pointer(path_obj: Any, relpath: str) -> None:
+    with path_obj.open("rb") as f:
+        head = f.read(128)
+    if head.startswith(GIT_LFS_POINTER_PREFIX):
+        raise RuntimeError(
+            "Bundled PiPER assets are still Git LFS pointer files. "
+            "Please run `git lfs pull --include="
+            "\"src/lerobot/assets/piper_description/**,src/lerobot/assets/piper_x_description/**\" "
+            "--exclude=\"*\"` and `git lfs checkout src/lerobot/assets/piper_description "
+            "src/lerobot/assets/piper_x_description`, then retry. "
+            f"(file: {relpath})"
+        )
 
 
 class PiperLeader(Teleoperator):
@@ -220,6 +235,7 @@ class PiperLeader(Teleoperator):
                 "Bundled gravity compensation URDF is missing: "
                 f"{self.gravity_comp_urdf_relpath}. Reinstall the package."
             )
+        _ensure_not_lfs_pointer(default_urdf, self.gravity_comp_urdf_relpath)
         urdf_path = str(default_urdf)
         if self._gravity_comp_loop is None:
             self._gravity_comp_loop = PiperGravityCompensationLoop(
