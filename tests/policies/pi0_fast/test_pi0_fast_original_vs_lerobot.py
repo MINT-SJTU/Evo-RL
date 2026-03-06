@@ -29,8 +29,10 @@ import torch
 pytest.importorskip("transformers")
 pytest.importorskip("scipy")
 pytestmark = pytest.mark.skipif(
-    os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true",
-    reason="This test requires accepting the model license",
+    os.environ.get("CI") == "true"
+    or os.environ.get("GITHUB_ACTIONS") == "true"
+    or not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")),
+    reason="This test requires accepted model license and authenticated HF access token",
 )
 
 from lerobot.policies.pi0_fast.configuration_pi0_fast import PI0FastConfig

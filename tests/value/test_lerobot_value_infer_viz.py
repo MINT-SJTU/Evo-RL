@@ -96,6 +96,7 @@ def test_export_overlay_videos_uses_episode_index_for_subset_alignment(monkeypat
         video_backend,
         frame_storage_mode,
         temp_dir_root,
+        smooth_window=1,
     ):
         assert isinstance(src, Path)
         assert isinstance(dst, Path)
@@ -108,17 +109,19 @@ def test_export_overlay_videos_uses_episode_index_for_subset_alignment(monkeypat
         assert isinstance(ep_values, np.ndarray)
         assert isinstance(ep_advantages, np.ndarray)
         assert isinstance(ep_indicators, np.ndarray)
+        assert smooth_window == 1
         return dst
 
     monkeypatch.setattr(value_infer_viz, "_export_single_episode", _fake_export_single_episode)
 
-    written = value_infer._export_overlay_videos(
+    written = value_infer_viz._export_overlay_videos(
         dataset=dataset,
         value_field="complementary_info.value",
         advantage_field="complementary_info.advantage",
         indicator_field="complementary_info.acp_indicator",
         viz_episodes="all",
         video_key=None,
+        video_keys=None,
         output_dir=tmp_path,
         overwrite=True,
         vcodec="libsvtav1",
@@ -146,22 +149,25 @@ def test_export_overlay_videos_passes_disk_storage_mode(monkeypatch, tmp_path: P
         video_backend,
         frame_storage_mode,
         temp_dir_root,
+        smooth_window=1,
     ):
         assert isinstance(episode_timestamps_s, np.ndarray)
         assert tolerance_s > 0
         assert frame_storage_mode == "disk"
         assert temp_dir_root == tmp_path
+        assert smooth_window == 1
         return dst
 
     monkeypatch.setattr(value_infer_viz, "_export_single_episode", _fake_export_single_episode)
 
-    written = value_infer._export_overlay_videos(
+    written = value_infer_viz._export_overlay_videos(
         dataset=dataset,
         value_field="complementary_info.value",
         advantage_field="complementary_info.advantage",
         indicator_field="complementary_info.acp_indicator",
         viz_episodes="all",
         video_key=None,
+        video_keys=None,
         output_dir=tmp_path,
         overwrite=True,
         vcodec="h264",
@@ -172,7 +178,7 @@ def test_export_overlay_videos_passes_disk_storage_mode(monkeypatch, tmp_path: P
 
 
 def test_get_video_encode_options_for_h264_nvenc():
-    options, pix_fmt = value_infer._get_video_encode_options("h264_nvenc")
+    options, pix_fmt = value_infer_viz._get_video_encode_options("h264_nvenc")
     assert pix_fmt == "yuv420p"
     assert options["preset"] == "p4"
     assert options["rc"] == "vbr"
@@ -183,7 +189,7 @@ def test_get_video_encode_options_for_h264_nvenc():
 
 
 def test_get_episode_value_bounds_returns_episode_min_max():
-    y_min, y_max = value_infer._get_episode_value_bounds(np.array([-0.7, -0.3, -0.5], dtype=np.float32))
+    y_min, y_max = value_infer_viz._get_episode_value_bounds(np.array([-0.7, -0.3, -0.5], dtype=np.float32))
     assert np.isclose(y_min, -0.7)
     assert np.isclose(y_max, -0.3)
 

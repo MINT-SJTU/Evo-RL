@@ -61,6 +61,8 @@ jobs:
       MUJOCO_GL: egl
       HF_HOME: /mnt/cache/.cache/huggingface
       HF_LEROBOT_HOME: /mnt/cache/.cache/huggingface/lerobot
+      # Keep dataset/model downloads on the regular Hub path in CI to avoid hf_xet flakiness.
+      HF_HUB_DISABLE_XET: "1"
     steps:
       - uses: actions/checkout@v6
         with:

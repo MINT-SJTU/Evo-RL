@@ -205,9 +205,9 @@ def test_piper_requires_calibration(monkeypatch):
     teleop.connect(calibrate=False)
     robot.connect(calibrate=False)
     try:
-        with pytest.raises(RuntimeError, match="require calibration"):
+        with pytest.raises(RuntimeError, match="is not calibrated"):
             teleop.get_action()
-        with pytest.raises(RuntimeError, match="require calibration"):
+        with pytest.raises(RuntimeError, match="is not calibrated"):
             robot.send_action({"joint_1.pos": 0.0})
     finally:
         teleop.disconnect()
