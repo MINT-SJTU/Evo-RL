@@ -18,7 +18,12 @@
 
 
 import logging
-import traceback
+import os
+import select
+import sys
+import termios
+import threading
+import tty
 from contextlib import nullcontext
 from copy import copy
 from functools import cache
@@ -53,16 +58,115 @@ def is_headless():
         import pynput  # noqa
 
         return False
-    except Exception:
-        print(
-            "Error trying to import pynput. Switching to headless mode. "
-            "As a result, the video stream from the cameras won't be shown, "
-            "and you won't be able to change the control flow with keyboards. "
-            "For more info, see traceback below.\n"
-        )
-        traceback.print_exc()
-        print()
+    except Exception as e:
+        logging.info("pynput unavailable; using headless controls instead: %s", e)
         return True
+
+
+class TTYKeyboardListener:
+    """Read control keys directly from the current TTY for SSH/headless sessions."""
+
+    def __init__(
+        self,
+        events: dict[str, Any],
+        intervention_toggle_key: str,
+        episode_success_key: str | None,
+        episode_failure_key: str | None,
+    ):
+        self.events = events
+        self.intervention_toggle_key = intervention_toggle_key.lower()
+        self.episode_success_key = episode_success_key.lower() if episode_success_key else None
+        self.episode_failure_key = episode_failure_key.lower() if episode_failure_key else None
+        self._fd = sys.stdin.fileno()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._old_attrs = None
+
+    def start(self):
+        self._old_attrs = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+        self._thread = threading.Thread(target=self._run, name="tty-keyboard-listener", daemon=True)
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        if self._old_attrs is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
+            self._old_attrs = None
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            ready, _, _ = select.select([self._fd], [], [], 0.1)
+            if not ready:
+                continue
+
+            try:
+                key = self._read_key()
+                if key is not None:
+                    self._handle_key(key)
+            except Exception as e:
+                logging.warning("TTY keyboard listener stopped after read error: %s", e)
+                self._stop_event.set()
+
+    def _read_key(self) -> str | None:
+        chunk = os.read(self._fd, 1)
+        if not chunk:
+            return None
+
+        if chunk == b"\x1b":
+            sequence = bytearray(chunk)
+            while True:
+                ready, _, _ = select.select([self._fd], [], [], 0.01)
+                if not ready:
+                    break
+                sequence.extend(os.read(self._fd, 1))
+                last_byte = bytes(sequence[-1:])
+                if len(sequence) >= 3 and last_byte in {b"A", b"B", b"C", b"D", b"~"}:
+                    break
+
+            sequence_bytes = bytes(sequence)
+            if sequence_bytes in {b"\x1b[C", b"\x1bOC"}:
+                return "RIGHT"
+            if sequence_bytes in {b"\x1b[D", b"\x1bOD"}:
+                return "LEFT"
+            if sequence_bytes == b"\x1b":
+                return "ESC"
+            return None
+
+        try:
+            return chunk.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+
+    def _handle_key(self, key: str):
+        normalized = key.lower() if len(key) == 1 else key
+        if normalized == "RIGHT":
+            print("Right arrow key pressed. Exiting loop...")
+            self.events["exit_early"] = True
+        elif normalized == "LEFT":
+            print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+            self.events["rerecord_episode"] = True
+            self.events["exit_early"] = True
+        elif normalized == "ESC":
+            print("Escape key pressed. Stopping data recording...")
+            self.events["stop_recording"] = True
+            self.events["exit_early"] = True
+        elif normalized == self.intervention_toggle_key:
+            print(f"'{self.intervention_toggle_key}' key pressed. Toggling intervention mode...")
+            self.events["toggle_intervention"] = True
+        elif self.episode_success_key and normalized == self.episode_success_key:
+            print(f"'{self.episode_success_key}' key pressed. Marking episode as success and exiting loop...")
+            self.events["episode_outcome"] = EPISODE_SUCCESS
+            self.events["exit_early"] = True
+        elif self.episode_failure_key and normalized == self.episode_failure_key:
+            print(f"'{self.episode_failure_key}' key pressed. Marking episode as failure and exiting loop...")
+            self.events["episode_outcome"] = EPISODE_FAILURE
+            self.events["exit_early"] = True
 
 
 def predict_action(
@@ -144,55 +248,68 @@ def init_keyboard_listener(
     events["toggle_intervention"] = False
     events["episode_outcome"] = None
 
-    if is_headless():
-        logging.warning(
-            "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
-        )
-        listener = None
+    listener = None
+    if not is_headless():
+        # Only import pynput if not in a headless environment
+        from pynput import keyboard
+
+        def on_press(key):
+            try:
+                if key == keyboard.Key.right:
+                    print("Right arrow key pressed. Exiting loop...")
+                    events["exit_early"] = True
+                elif key == keyboard.Key.left:
+                    print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+                    events["rerecord_episode"] = True
+                    events["exit_early"] = True
+                elif key == keyboard.Key.esc:
+                    print("Escape key pressed. Stopping data recording...")
+                    events["stop_recording"] = True
+                    events["exit_early"] = True
+                elif hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower():
+                    print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
+                    events["toggle_intervention"] = True
+                elif (
+                    episode_success_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == episode_success_key.lower()
+                ):
+                    print(f"'{episode_success_key}' key pressed. Marking episode as success and exiting loop...")
+                    events["episode_outcome"] = EPISODE_SUCCESS
+                    events["exit_early"] = True
+                elif (
+                    episode_failure_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == episode_failure_key.lower()
+                ):
+                    print(f"'{episode_failure_key}' key pressed. Marking episode as failure and exiting loop...")
+                    events["episode_outcome"] = EPISODE_FAILURE
+                    events["exit_early"] = True
+            except Exception as e:
+                print(f"Error handling key press: {e}")
+
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
         return listener, events
 
-    # Only import pynput if not in a headless environment
-    from pynput import keyboard
+    if sys.stdin.isatty():
+        listener = TTYKeyboardListener(
+            events=events,
+            intervention_toggle_key=intervention_toggle_key,
+            episode_success_key=episode_success_key,
+            episode_failure_key=episode_failure_key,
+        )
+        listener.start()
+        logging.warning(
+            "Headless environment detected. Using terminal keyboard controls over the current TTY; on-screen camera display remains unavailable."
+        )
+        return listener, events
 
-    def on_press(key):
-        try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
-                events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
-            elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
-            elif hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower():
-                print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
-                events["toggle_intervention"] = True
-            elif (
-                episode_success_key
-                and hasattr(key, "char")
-                and key.char
-                and key.char.lower() == episode_success_key.lower()
-            ):
-                print(f"'{episode_success_key}' key pressed. Marking episode as success and exiting loop...")
-                events["episode_outcome"] = EPISODE_SUCCESS
-                events["exit_early"] = True
-            elif (
-                episode_failure_key
-                and hasattr(key, "char")
-                and key.char
-                and key.char.lower() == episode_failure_key.lower()
-            ):
-                print(f"'{episode_failure_key}' key pressed. Marking episode as failure and exiting loop...")
-                events["episode_outcome"] = EPISODE_FAILURE
-                events["exit_early"] = True
-        except Exception as e:
-            print(f"Error handling key press: {e}")
-
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+    logging.warning(
+        "Headless environment detected without an interactive TTY. On-screen cameras display and keyboard inputs will not be available."
+    )
 
     return listener, events
 

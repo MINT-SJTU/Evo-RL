@@ -546,7 +546,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if teleop and teleop.is_connected:
             teleop.disconnect()
 
-        if not is_headless() and listener:
+        if listener and hasattr(listener, "stop"):
             listener.stop()
 
         if cfg.dataset.push_to_hub:
