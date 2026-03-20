@@ -393,7 +393,7 @@ def train(
         shuffle=shuffle and not cfg.dataset.streaming,
         sampler=sampler,
         pin_memory=device.type == "cuda",
-        drop_last=False,
+        drop_last=getattr(cfg.policy, "drop_last", False),
         prefetch_factor=2 if cfg.num_workers > 0 else None,
     )
 
