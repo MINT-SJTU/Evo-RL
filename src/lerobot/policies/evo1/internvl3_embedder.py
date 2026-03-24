@@ -1,29 +1,34 @@
 import logging
-from typing import Union
 
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
+import torchvision.transforms as transforms
 from PIL import Image
-from torchvision.transforms.functional import InterpolationMode
-from torchvision.transforms.functional import to_pil_image
+from torchvision.transforms.functional import InterpolationMode, to_pil_image
 from transformers import AutoModel, AutoTokenizer
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"  # nosec B105
+IMG_START_TOKEN = "<img>"  # nosec B105
+IMG_END_TOKEN = "</img>"  # nosec B105
+
 
 # === Image Transformations ===
 def build_transform(input_size):
-    return T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    ])
+    return transforms.Compose(
+        [
+            transforms.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            transforms.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
 
 # === Aspect Ratio Handling ===
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
-    best_ratio_diff = float('inf')
+    best_ratio_diff = float("inf")
     best_ratio = (1, 1)
     area = width * height
     for ratio in target_ratios:
@@ -36,15 +41,21 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
             best_ratio = ratio
     return best_ratio
 
+
 def dynamic_preprocess(image, min_num=1, max_num=1, image_size=448, use_thumbnail=False):
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
-    target_ratios = set(
-        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
-        i * j <= max_num and i * j >= min_num)
+    target_ratios = {
+        (i, j)
+        for n in range(min_num, max_num + 1)
+        for i in range(1, n + 1)
+        for j in range(1, n + 1)
+        if i * j <= max_num and i * j >= min_num
+    }
     target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
     target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size
+    )
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
@@ -55,7 +66,7 @@ def dynamic_preprocess(image, min_num=1, max_num=1, image_size=448, use_thumbnai
             (i % (target_width // image_size)) * image_size,
             (i // (target_width // image_size)) * image_size,
             ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size
+            ((i // (target_width // image_size)) + 1) * image_size,
         )
         split_img = resized_img.crop(box)
         processed_images.append(split_img)
@@ -64,6 +75,7 @@ def dynamic_preprocess(image, min_num=1, max_num=1, image_size=448, use_thumbnai
         thumbnail_img = image.resize((image_size, image_size))
         processed_images.append(thumbnail_img)
     return processed_images
+
 
 class InternVL3Embedder(nn.Module):
     def __init__(self, model_name="OpenGVLab/InternVL3-1B", image_size=448, device="cuda"):
@@ -80,16 +92,16 @@ class InternVL3Embedder(nn.Module):
             use_flash_attn=True,
             low_cpu_mem_usage=True,
             _fast_init=False,
-        ).to(self.device) 
-        
-        if hasattr(self.model.language_model, 'model'):
+        ).to(self.device)
+
+        if hasattr(self.model.language_model, "model"):
             layers = self.model.language_model.model.layers
 
         else:
             layers = self.model.language_model.layers
         layers = layers[:14]
 
-        if hasattr(self.model.language_model, 'model'):
+        if hasattr(self.model.language_model, "model"):
             self.model.language_model.model.layers = torch.nn.ModuleList(layers)
         else:
             self.model.language_model.layers = torch.nn.ModuleList(layers)
@@ -97,15 +109,12 @@ class InternVL3Embedder(nn.Module):
 
         if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "encoder"):
             self.model.vision_model.encoder.gradient_checkpointing = False
-        
 
     def _preprocess_images(
-        self,
-        image_tensors: list[Union[Image.Image, torch.Tensor]]
+        self, image_tensors: list[Image.Image | torch.Tensor]
     ) -> tuple[torch.Tensor, list[int]]:
-
         pixel_values_list = []
-        for i, image in enumerate(image_tensors):
+        for image in image_tensors:
             if isinstance(image, torch.Tensor):
                 image = to_pil_image(image)
             tiles = dynamic_preprocess(image, image_size=self.image_size)
@@ -117,20 +126,11 @@ class InternVL3Embedder(nn.Module):
 
         return pixel_values, num_tiles_list
 
-    def _build_multimodal_prompt(
-        self,
-        num_tiles_list: list[int],
-        text_prompt: str
-    ) -> str:
-
-        prompt = ''
+    def _build_multimodal_prompt(self, num_tiles_list: list[int], text_prompt: str) -> str:
+        prompt = ""
         for i in range(len(num_tiles_list)):
-            prompt += f"Image-{i+1}: <image>\n"
+            prompt += f"Image-{i + 1}: <image>\n"
         prompt += text_prompt.strip()
-
-        IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
-        IMG_START_TOKEN = "<img>"
-        IMG_END_TOKEN = "</img>"
 
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         for tile_count in num_tiles_list:
@@ -139,15 +139,10 @@ class InternVL3Embedder(nn.Module):
             prompt = prompt.replace("<image>", image_tokens, 1)
 
         return prompt
-    
+
     def _prepare_and_fuse_embeddings(
-        self,
-        prompt: str,
-        vit_embeds: torch.Tensor,
-        image_mask: torch.Tensor,
-        num_tiles_list: list[int]
+        self, prompt: str, vit_embeds: torch.Tensor, image_mask: torch.Tensor, num_tiles_list: list[int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-   
         untruncated_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
         true_sequence_length = untruncated_ids.shape[1]
 
@@ -159,26 +154,29 @@ class InternVL3Embedder(nn.Module):
                 prompt[:100],
             )
 
-        model_inputs = self.tokenizer(prompt, return_tensors="pt", padding='max_length', truncation=True, max_length=self.max_text_length).to(self.device)
+        model_inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_text_length,
+        ).to(self.device)
         input_ids = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
 
-       
-        img_token_mask = (input_ids == self.img_context_token_id)
-     
-        img_token_locations = torch.where(img_token_mask)[1]
+        img_token_mask = input_ids == self.img_context_token_id
 
+        img_token_locations = torch.where(img_token_mask)[1]
 
         input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
 
-        B, N, C = input_embeds.shape
-        input_embeds = input_embeds.reshape(B * N, C)
-        input_ids = input_ids.reshape(B * N)
+        batch_size, seq_len, channels = input_embeds.shape
+        input_embeds = input_embeds.reshape(batch_size * seq_len, channels)
+        input_ids = input_ids.reshape(batch_size * seq_len)
 
-        selected = (input_ids == self.img_context_token_id)
+        selected = input_ids == self.img_context_token_id
 
-            
-        vit_embeds = vit_embeds.reshape(-1, C).to(device=input_embeds.device, dtype=input_embeds.dtype)
+        vit_embeds = vit_embeds.reshape(-1, channels).to(device=input_embeds.device, dtype=input_embeds.dtype)
         n_token = int(selected.sum().item())
         if vit_embeds.shape[0] < n_token:
             raise ValueError(
@@ -186,49 +184,43 @@ class InternVL3Embedder(nn.Module):
             )
         input_embeds[selected] = vit_embeds[:n_token]
 
- 
-        tokens_per_tile = self.model.num_image_token 
- 
+        tokens_per_tile = self.model.num_image_token
+
         current_token_idx = 0
         for i in range(len(image_mask)):
-           
             num_tiles_for_this_image = num_tiles_list[i]
             num_tokens_for_this_image = num_tiles_for_this_image * tokens_per_tile
-       
+
             if not image_mask[i]:
-                
                 start_idx = img_token_locations[current_token_idx]
                 end_idx = start_idx + num_tokens_for_this_image
-               
+
                 attention_mask[0, start_idx:end_idx] = 0
-    
+
             current_token_idx += num_tokens_for_this_image
 
-        input_embeds = input_embeds.reshape(B, N, C)
-    
-        return input_embeds, attention_mask
+        input_embeds = input_embeds.reshape(batch_size, seq_len, channels)
 
+        return input_embeds, attention_mask
 
     def get_fused_image_text_embedding_from_tensor_images(
         self,
-        image_tensors: list[Union[Image.Image, torch.Tensor]],
+        image_tensors: list[Image.Image | torch.Tensor],
         image_mask: torch.Tensor,
         text_prompt: str,
         return_cls_only: bool = True,
     ):
-
-   
         pixel_values, num_tiles_list = self._preprocess_images(image_tensors)
 
-       
         if pixel_values.shape[0] == 0:
-           
             logging.warning("InternVL3 received an empty image batch after preprocessing.")
 
         vit_embeds = self.model.extract_feature(pixel_values)
-        fused_embeds = vit_embeds  
+        fused_embeds = vit_embeds
         prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
-        inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(prompt, fused_embeds, image_mask, num_tiles_list)
+        inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(
+            prompt, fused_embeds, image_mask, num_tiles_list
+        )
 
         outputs = self.model.language_model(
             inputs_embeds=inputs_embeds,

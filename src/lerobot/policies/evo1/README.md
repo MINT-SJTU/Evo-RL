@@ -27,8 +27,6 @@ Validated in this repo / recent experiments:
   - `torchvision==0.20.1`
   - `transformers==4.39.0`
   - `flash-attn==2.8.3`
-  
-
 ## Training Notes
 
 - `training_stage=stage1` freezes the VLM and trains the action head.
