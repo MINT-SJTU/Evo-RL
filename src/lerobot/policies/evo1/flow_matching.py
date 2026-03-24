@@ -289,7 +289,7 @@ class FlowmatchingActionHead(nn.Module):
         x = self.norm_out(x)
 
         if self.horizon > 1:
-            x_flat = x.reshape(B, -1)
+            x_flat = x.reshape(batch_size, -1)
 
             if not hasattr(self, "seq_pool_proj"):
                 self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
@@ -370,7 +370,7 @@ class FlowmatchingActionHead(nn.Module):
             x = self.norm_out(x)
 
             if self.horizon > 1:
-                x_flat = x.reshape(B, -1)
+                x_flat = x.reshape(batch_size, -1)
                 if hasattr(self, "seq_pool_proj"):
                     x_pooled = self.seq_pool_proj(x_flat)
                 else:
