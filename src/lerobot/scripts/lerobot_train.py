@@ -267,6 +267,12 @@ def train(
 
     if is_main_process:
         logging.info("Creating policy")
+        if cfg.resume_pretrain:
+            logging.info(
+                "resume_pretrain=true: policy weights will be initialized from %s, while optimizer,"
+                " scheduler, and global step will start fresh.",
+                cfg.policy.pretrained_path,
+            )
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
@@ -282,7 +288,9 @@ def train(
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()
 
-    # Create processors - only provide dataset_stats if not resuming from saved processors
+    # Create processors. `resume_pretrain` intentionally follows the fresh-start path:
+    # load policy weights from `pretrained_path`, but rebuild processor state from the
+    # current dataset and do not restore optimizer / scheduler / global step.
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
