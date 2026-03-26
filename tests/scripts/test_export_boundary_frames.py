@@ -56,3 +56,22 @@ def test_select_camera_key_falls_back_to_largest_resolution():
     }
 
     assert select_camera_key(info, None) == "observation.images.right_wrist"
+
+
+def test_select_camera_key_handles_chw_shape_with_names():
+    info = {
+        "features": {
+            "observation.images.small": {
+                "dtype": "image",
+                "shape": [3, 240, 320],
+                "names": ["channels", "height", "width"],
+            },
+            "observation.images.large": {
+                "dtype": "image",
+                "shape": [3, 720, 1280],
+                "names": ["channels", "height", "width"],
+            },
+        }
+    }
+
+    assert select_camera_key(info, None) == "observation.images.large"

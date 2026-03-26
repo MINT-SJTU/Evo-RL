@@ -39,58 +39,26 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    import torch
-    from PIL import Image
+from torchvision.transforms.functional import to_pil_image
 
+from lerobot.datasets.utils import load_info
+from lerobot.scripts.lerobot_dataset_report import resolve_dataset_root
+from lerobot.utils.constants import HF_LEROBOT_HOME
+
+if TYPE_CHECKING:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
-def get_default_hf_lerobot_home() -> Path:
-    hf_home = Path(os.getenv("HF_HOME", "~/.cache/huggingface")).expanduser()
-    return Path(os.getenv("HF_LEROBOT_HOME", hf_home / "lerobot")).expanduser()
-
-
-def resolve_dataset_root(dataset: str, root: Path | None) -> Path:
-    dataset_path = Path(dataset).expanduser()
-    if dataset_path.exists():
-        return dataset_path.resolve()
-
-    base_root = root.expanduser().resolve() if root is not None else get_default_hf_lerobot_home().resolve()
-    candidates = [base_root / dataset]
-    if "/" not in dataset.strip("/"):
-        candidates.append(base_root / "local" / dataset)
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-
-    searched = "\n".join(f"- {candidate}" for candidate in candidates)
-    raise FileNotFoundError(f"Dataset path not found. Searched:\n{searched}")
-
-
-def resolve_repo_id(dataset: str, dataset_root: Path, root: Path | None) -> str:
-    dataset_path = Path(dataset).expanduser()
-    if not dataset_path.exists():
-        return dataset.strip("/")
-
-    base_root = root.expanduser().resolve() if root is not None else get_default_hf_lerobot_home().resolve()
+def resolve_repo_id(dataset_root: Path, root: Path | None) -> str:
+    base_root = root.expanduser().resolve() if root is not None else HF_LEROBOT_HOME.resolve()
     if dataset_root.is_relative_to(base_root):
         return dataset_root.relative_to(base_root).as_posix()
-
     return f"local/{dataset_root.name}"
-
-
-def load_info(dataset_root: Path) -> dict:
-    info_path = dataset_root / "meta" / "info.json"
-    with info_path.open() as f:
-        return json.load(f)
 
 
 def get_camera_keys(info: dict) -> list[str]:
@@ -100,6 +68,19 @@ def get_camera_keys(info: dict) -> list[str]:
         for key, value in sorted(features.items())
         if key.startswith("observation.images.") and value.get("dtype") in {"image", "video"}
     ]
+
+
+def _get_pixel_count(feature: dict) -> int:
+    shape = feature.get("shape", (0, 0, 0))
+    names = feature.get("names", [])
+    if names:
+        name_list = list(names)
+        h_idx = name_list.index("height") if "height" in name_list else None
+        w_idx = name_list.index("width") if "width" in name_list else None
+        if h_idx is not None and w_idx is not None:
+            return int(shape[h_idx]) * int(shape[w_idx])
+    # Fallback: assume HWC if no names
+    return int(shape[0]) * int(shape[1]) if len(shape) >= 2 else 0
 
 
 def select_camera_key(info: dict, camera_key: str | None) -> str:
@@ -116,12 +97,9 @@ def select_camera_key(info: dict, camera_key: str | None) -> str:
     features = info["features"]
 
     def sort_key(key: str) -> tuple[int, int, str]:
-        shape = features[key].get("shape", [0, 0, 0])
-        height = int(shape[0]) if len(shape) > 0 else 0
-        width = int(shape[1]) if len(shape) > 1 else 0
-        pixel_count = height * width
-        prefers_front = 0 if "front" in key else 1
-        return (prefers_front, -pixel_count, key)
+        is_front = 0 if "front" in key else 1
+        pixel_count = _get_pixel_count(features[key])
+        return (is_front, -pixel_count, key)
 
     return sorted(camera_keys, key=sort_key)[0]
 
@@ -166,14 +144,6 @@ def parse_episode_indices(spec: str, total_episodes: int) -> list[int]:
     return episode_indices
 
 
-def tensor_to_pil_image(image: "torch.Tensor") -> "Image.Image":
-    from PIL import Image
-    import torch
-
-    array = image.detach().cpu().clamp(0, 1).mul(255).to(torch.uint8).permute(1, 2, 0).numpy()
-    return Image.fromarray(array)
-
-
 def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
     if output_dir.exists() and overwrite:
         shutil.rmtree(output_dir)
@@ -182,6 +152,23 @@ def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
         raise FileExistsError(f"Output directory already exists and is not empty: {output_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _format_episode_spec(episode_indices: list[int]) -> str:
+    if not episode_indices:
+        return ""
+    groups: list[str] = []
+    start = episode_indices[0]
+    prev = start
+    for idx in episode_indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+        else:
+            groups.append(str(start) if start == prev else f"{start}-{prev}")
+            start = idx
+            prev = idx
+    groups.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(groups)
 
 
 def export_episode_boundary_frames(
@@ -198,13 +185,13 @@ def export_episode_boundary_frames(
         from_idx = int(episodes["dataset_from_index"][episode_index])
         to_idx = int(episodes["dataset_to_index"][episode_index])
         length = int(episodes["length"][episode_index])
-        success = str(episodes["episode_success"][episode_index]) if "episode_success" in episodes else ""
+        success = str(episodes["episode_success"][episode_index]) if "episode_success" in episodes.column_names else ""
 
         first_name = f"episode_{episode_index:0{pad_width}d}_first.png"
         last_name = f"episode_{episode_index:0{pad_width}d}_last.png"
 
-        tensor_to_pil_image(dataset[from_idx][camera_key]).save(output_dir / first_name)
-        tensor_to_pil_image(dataset[to_idx - 1][camera_key]).save(output_dir / last_name)
+        to_pil_image(dataset[from_idx][camera_key]).save(output_dir / first_name)
+        to_pil_image(dataset[to_idx - 1][camera_key]).save(output_dir / last_name)
 
         manifest_rows.append(
             {
@@ -235,11 +222,12 @@ def export_episode_boundary_frames(
         writer.writeheader()
         writer.writerows(manifest_rows)
 
+    episode_spec = _format_episode_spec(episode_indices)
     (output_dir / "README.txt").write_text(
         f"Dataset root: {dataset.root}\n"
         f"Dataset repo_id: {dataset.repo_id}\n"
         f"Camera: {camera_key}\n"
-        f"Episodes exported: {episode_indices[0]}-{episode_indices[-1]} ({len(episode_indices)} total)\n"
+        f"Episodes exported: {episode_spec} ({len(episode_indices)} total)\n"
         "Files per episode: episode_XXX_first.png, episode_XXX_last.png\n"
     )
 
@@ -290,16 +278,17 @@ def main() -> None:
     args = build_parser().parse_args()
 
     dataset_root = resolve_dataset_root(args.dataset, args.root)
-    repo_id = resolve_repo_id(args.dataset, dataset_root, args.root)
+    repo_id = resolve_repo_id(dataset_root, args.root)
     info = load_info(dataset_root)
     camera_key = select_camera_key(info, args.camera_key)
     episode_indices = parse_episode_indices(args.episodes, int(info["total_episodes"]))
 
-    prepare_output_dir(args.output_dir, args.overwrite)
-
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     dataset = LeRobotDataset(repo_id=repo_id, root=dataset_root)
+
+    prepare_output_dir(args.output_dir, args.overwrite)
+
     manifest_path = export_episode_boundary_frames(
         dataset=dataset,
         output_dir=args.output_dir,

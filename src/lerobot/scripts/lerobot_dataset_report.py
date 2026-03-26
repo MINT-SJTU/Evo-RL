@@ -350,11 +350,10 @@ def main():
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(format_text_report(report))
-
-    print(
-        "\nTip: To visually inspect episode boundaries, run:\n"
-        f"  lerobot-export-boundary-frames --dataset {args.dataset} --episodes all --output-dir <output_dir>"
-    )
+        print(
+            "\nTip: To visually inspect episode boundaries, run:\n"
+            f"  lerobot-export-boundary-frames --dataset {args.dataset} --episodes all --output-dir <output_dir>"
+        )
 
 
 if __name__ == "__main__":
