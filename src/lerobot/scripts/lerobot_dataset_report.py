@@ -351,6 +351,11 @@ def main():
     else:
         print(format_text_report(report))
 
+    print(
+        "\nTip: To visually inspect episode boundaries, run:\n"
+        f"  lerobot-export-boundary-frames --dataset {args.dataset} --episodes all --output-dir <output_dir>"
+    )
+
 
 if __name__ == "__main__":
     main()
