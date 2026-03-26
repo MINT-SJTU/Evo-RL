@@ -313,6 +313,18 @@ def main() -> None:
     print(f"episodes_exported={len(episode_indices)}")
     print(f"manifest={manifest_path}")
 
+    ssh_connection = os.environ.get("SSH_CONNECTION")
+    if ssh_connection:
+        parts = ssh_connection.split()
+        client_ip = parts[0]
+        abs_output = args.output_dir.resolve()
+        hostname = os.uname().nodename
+        print(
+            f"\nTip: You are in an SSH session (client {client_ip}).\n"
+            f"To pull these files to your local machine, run on your local terminal:\n"
+            f"  scp -r {hostname}:{abs_output} ~/Downloads/"
+        )
+
 
 if __name__ == "__main__":
     main()
