@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 import logging
 from collections.abc import Iterator
 
@@ -156,12 +155,16 @@ def make_demo_loader(
         pin_memory=(device != "cpu"),
     )
 
-    def _to_device(iterator: Iterator) -> Iterator:
-        for obs, expert_actions in iterator:
-            obs_device = Observation(
-                images={k: v.to(device) for k, v in obs.images.items()},
-                proprio=obs.proprio.to(device),
-            )
-            yield obs_device, expert_actions.to(device)
+    def _cycle_with_cleanup() -> Iterator[tuple[Observation, torch.Tensor]]:
+        """Restart the DataLoader each epoch to avoid memory accumulation."""
+        import gc
+        while True:
+            for obs, expert_actions in loader:
+                obs_device = Observation(
+                    images={k: v.to(device) for k, v in obs.images.items()},
+                    proprio=obs.proprio.to(device),
+                )
+                yield obs_device, expert_actions.to(device)
+            gc.collect()
 
-    return _to_device(itertools.cycle(loader))
+    return _cycle_with_cleanup()
