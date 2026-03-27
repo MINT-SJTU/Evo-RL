@@ -27,12 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None, help="Path to an RLT YAML config.")
     parser.add_argument("--output-dir", default="outputs/rlt_demo_adapt")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--steps", type=int, default=5000)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--vla-ft-weight", type=float, default=0.0)
     parser.add_argument("--task-instruction", default="pick up the object")
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--save-every", type=int, default=2000)
     return parser.parse_args()
 
 
@@ -51,9 +53,12 @@ def main() -> None:
     config.vla_horizon = 50
     config.chunk_length = 10
     config.cameras = ["left_wrist", "right_wrist", "right_front"]
-    config.demo_adaptation.steps = args.steps
-    config.demo_adaptation.batch_size = args.batch_size
-    config.demo_adaptation.lr = args.lr
+    if args.steps is not None:
+        config.demo_adaptation.steps = args.steps
+    if args.batch_size is not None:
+        config.demo_adaptation.batch_size = args.batch_size
+    if args.lr is not None:
+        config.demo_adaptation.lr = args.lr
     config.demo_adaptation.vla_ft_weight = args.vla_ft_weight
 
     logger.info("Loading pi0.5 from %s", args.model_path)
@@ -74,9 +79,19 @@ def main() -> None:
         sum(param.numel() for param in agent.rl_token.parameters()) / 1e6,
     )
 
+    # Resume from checkpoint if specified
+    start_step = 0
+    prior_losses = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=args.device, weights_only=False)
+        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        start_step = ckpt.get("step", 0)
+        prior_losses = ckpt.get("losses", [])
+        logger.info("Resumed from step %d (loss=%.4f)", start_step, prior_losses[-1] if prior_losses else 0)
+
     demo_loader = make_demo_loader(
         dataset_path=args.dataset_path,
-        batch_size=args.batch_size,
+        batch_size=config.demo_adaptation.batch_size,
         chunk_length=config.vla_horizon,
         num_workers=args.num_workers,
         device=args.device,
@@ -87,32 +102,23 @@ def main() -> None:
         params = list(agent.rl_token.parameters()) + list(agent.vla.parameters())
     else:
         params = list(agent.rl_token.parameters())
-    optimizer = torch.optim.Adam(params, lr=args.lr)
+    optimizer = torch.optim.Adam(params, lr=config.demo_adaptation.lr)
 
-    logger.info("Starting demo adaptation for %d steps", args.steps)
+    logger.info(
+        "Starting demo adaptation: steps=%d, lr=%.2e, grad_clip=%.1f, warmup=%d",
+        config.demo_adaptation.steps, config.demo_adaptation.lr,
+        config.demo_adaptation.grad_clip_norm, config.demo_adaptation.warmup_steps,
+    )
     start_time = time.time()
-    losses = demo_adaptation(agent, config, demo_loader, optimizer)
+    losses = demo_adaptation(
+        agent, config, demo_loader, optimizer,
+        save_dir=args.output_dir, save_every=args.save_every,
+        start_step=start_step, prior_losses=prior_losses,
+    )
     elapsed = time.time() - start_time
     final_loss = losses[-1] if losses else 0.0
-    logger.info("Demo adaptation finished in %.1fs. Final loss: %.4f", elapsed, final_loss)
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpoint = {
-        "rl_token_state_dict": agent.rl_token.state_dict(),
-        "actor_state_dict": agent.actor.state_dict(),
-        "critic_state_dict": agent.critic.state_dict(),
-        "losses": losses,
-        "steps": args.steps,
-        "args": vars(args),
-    }
-    torch.save(checkpoint, output_dir / "demo_adapt_checkpoint.pt")
-
-    with open(output_dir / "losses.json", "w") as handle:
-        json.dump(losses, handle)
-
-    logger.info("Saved checkpoint to %s", output_dir)
+    avg_last_100 = sum(losses[-100:]) / min(len(losses), 100) if losses else 0
+    logger.info("Done in %.1fs. Final loss: %.4f, Avg last 100: %.4f", elapsed, final_loss, avg_last_100)
 
 
 if __name__ == "__main__":

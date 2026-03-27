@@ -39,12 +39,18 @@ def demo_adaptation(
     config: RLTConfig,
     demo_loader,
     demo_optimizer: torch.optim.Optimizer | None = None,
+    save_dir: str | None = None,
+    save_every: int = 2000,
+    start_step: int = 0,
+    prior_losses: list[float] | None = None,
 ) -> list[float]:
     """Demo adaptation phase: L_ro + alpha * L_vla.
 
     After adaptation, freezes VLA and RL token encoder.
-    Includes gradient clipping and cosine LR schedule with warmup.
+    Includes gradient clipping, cosine LR schedule, periodic checkpointing.
     """
+    import gc
+
     if demo_optimizer is None:
         demo_params = list(agent.rl_token.parameters()) + list(agent.vla.parameters())
         demo_optimizer = torch.optim.Adam(demo_params, lr=config.demo_adaptation.lr)
@@ -55,10 +61,10 @@ def demo_adaptation(
     total_steps = config.demo_adaptation.steps
     peak_lr = config.demo_adaptation.lr
     min_lr = config.demo_adaptation.min_lr
-    losses: list[float] = []
+    losses: list[float] = list(prior_losses) if prior_losses else []
     agent.train()
 
-    step = 0
+    step = start_step
     for obs, expert_actions in demo_loader:
         if step >= total_steps:
             break
@@ -88,15 +94,46 @@ def demo_adaptation(
         losses.append(loss_val)
 
         if step % 100 == 0:
-            logger.info("Step %d/%d loss=%.4f lr=%.2e", step, total_steps, loss_val, lr)
+            avg_100 = sum(losses[-100:]) / min(len(losses), 100)
+            logger.info("Step %d/%d loss=%.4f avg100=%.4f lr=%.2e", step, total_steps, loss_val, avg_100, lr)
+
+        # Periodic checkpoint
+        if save_dir and step > 0 and step % save_every == 0:
+            _save_checkpoint(agent, losses, step, save_dir)
+
+        # Periodic memory cleanup
+        if step % 500 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
 
         step += 1
+
+    # Final save
+    if save_dir:
+        _save_checkpoint(agent, losses, step, save_dir)
 
     agent.freeze_vla()
     agent.freeze_rl_token_encoder()
     logger.info("Demo adaptation complete (%d steps). VLA and RL token encoder frozen.", step)
 
     return losses
+
+
+def _save_checkpoint(agent: RLTAgent, losses: list[float], step: int, save_dir: str) -> None:
+    """Save training checkpoint."""
+    import json
+    from pathlib import Path
+
+    path = Path(save_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "rl_token_state_dict": agent.rl_token.state_dict(),
+        "step": step,
+        "losses": losses,
+    }, path / "demo_adapt_checkpoint.pt")
+    with open(path / "losses.json", "w") as f:
+        json.dump(losses, f)
+    logger.info("Checkpoint saved at step %d to %s (loss=%.4f)", step, save_dir, losses[-1] if losses else 0)
 
 
 def _do_critic_update(
