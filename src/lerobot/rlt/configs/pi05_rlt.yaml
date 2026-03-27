@@ -1,0 +1,51 @@
+seed: 0
+control_hz: 30
+action_dim: 12
+proprio_dim: 12
+vla_horizon: 50
+chunk_length: 10
+
+cameras:
+  - left_wrist
+  - right_wrist
+  - right_front
+
+rl_token:
+  token_dim: 2048
+  nhead: 8
+  enc_layers: 4
+  dec_layers: 4
+
+demo_adaptation:
+  steps: 5000
+  batch_size: 4
+  lr: 1.0e-4
+  vla_ft_weight: 0.0
+
+actor:
+  hidden_dim: 256
+  num_layers: 2
+  fixed_std: 0.05
+  lr: 3.0e-4
+  ref_dropout_p: 0.5
+
+critic:
+  hidden_dim: 256
+  num_layers: 2
+  lr: 3.0e-4
+
+training:
+  gamma: 0.99
+  beta: 1.0
+  tau: 0.005
+  batch_size: 256
+  utd_ratio: 5
+  actor_update_interval: 2
+
+replay:
+  capacity: 200000
+
+collector:
+  warmup_steps: 5000
+  total_env_steps: 100000
+  chunk_subsample_stride: 2
