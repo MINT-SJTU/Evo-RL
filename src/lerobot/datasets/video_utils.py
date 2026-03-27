@@ -68,6 +68,9 @@ def decode_video_frames(
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
     elif backend in ["pyav", "video_reader"]:
+        # Fall back to pure pyav if torchvision.io.VideoReader is missing (nightly torchvision)
+        if not hasattr(torchvision.io, "VideoReader"):
+            return decode_video_frames_pure_pyav(video_path, timestamps, tolerance_s)
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
@@ -168,6 +171,50 @@ def decode_video_frames_torchvision(
     closest_frames = closest_frames.type(torch.float32) / 255
 
     assert len(timestamps) == len(closest_frames)
+    return closest_frames
+
+
+def decode_video_frames_pure_pyav(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+) -> torch.Tensor:
+    """Decode video frames using pyav directly (fallback when torchvision.io.VideoReader is unavailable)."""
+    import av
+
+    container = av.open(str(video_path))
+    stream = container.streams.video[0]
+
+    # Seek to slightly before first requested timestamp
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+    time_base = float(stream.time_base)
+    if first_ts > 0:
+        seek_ts = int(first_ts / time_base)
+        container.seek(seek_ts, stream=stream, any_frame=False)
+
+    # Decode frames and collect timestamps
+    loaded_frames = []
+    loaded_ts = []
+    for frame in container.decode(video=0):
+        pts = frame.pts * time_base
+        rgb = frame.to_ndarray(format="rgb24")
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1)  # (C, H, W)
+        loaded_frames.append(tensor)
+        loaded_ts.append(pts)
+        if pts >= last_ts:
+            break
+
+    container.close()
+
+    query_ts = torch.tensor(timestamps)
+    loaded_ts_t = torch.tensor(loaded_ts)
+    dist = torch.cdist(query_ts[:, None], loaded_ts_t[:, None], p=1)
+    _, argmin_ = dist.min(1)
+
+    closest_frames = torch.stack([loaded_frames[idx] for idx in argmin_])
+    closest_frames = closest_frames.float() / 255.0
+
     return closest_frames
 
 
