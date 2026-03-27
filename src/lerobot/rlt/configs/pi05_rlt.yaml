@@ -13,9 +13,10 @@ cameras:
 rl_token:
   token_dim: 2048
   nhead: 8
-  enc_layers: 3
-  dec_layers: 3
-  num_rl_tokens: 8
+  enc_layers: 2
+  dec_layers: 2
+  ff_dim: 2048
+  num_rl_tokens: 4
 
 demo_adaptation:
   steps: 40000
