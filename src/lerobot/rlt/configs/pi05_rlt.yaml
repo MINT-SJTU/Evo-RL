@@ -13,12 +13,12 @@ cameras:
 rl_token:
   token_dim: 2048
   nhead: 8
-  enc_layers: 4
-  dec_layers: 4
+  enc_layers: 2
+  dec_layers: 2
 
 demo_adaptation:
   steps: 5000
-  batch_size: 4
+  batch_size: 2
   lr: 1.0e-4
   vla_ft_weight: 0.0
 
