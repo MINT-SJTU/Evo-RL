@@ -37,6 +37,7 @@ class RLTAgent(nn.Module):
             num_enc_layers=config.rl_token.enc_layers,
             num_dec_layers=config.rl_token.dec_layers,
             ff_dim=config.rl_token.ff_dim,
+            num_rl_tokens=config.rl_token.num_rl_tokens,
         )
 
         self.actor = ChunkActor(

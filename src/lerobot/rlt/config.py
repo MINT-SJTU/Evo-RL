@@ -13,6 +13,7 @@ class RLTokenConfig:
     enc_layers: int = 4
     dec_layers: int = 4
     ff_dim: int | None = None  # defaults to 4 * token_dim if None
+    num_rl_tokens: int = 1  # number of RL tokens (>1 reduces compression ratio)
 
     def __post_init__(self):
         if self.ff_dim is None:

@@ -5,13 +5,14 @@ import torch.nn as nn
 
 
 class RLTokenModule(nn.Module):
-    """RL Token encoder-decoder.
+    """RL Token encoder-decoder with configurable number of RL tokens.
 
-    Encoder appends a learned <rl> embedding to VLA tokens, runs a transformer,
-    and reads out the last position as z_rl (B, D).
+    Encoder appends N learned <rl> embeddings to VLA tokens, runs a transformer,
+    and reads out the last N positions as z_rl (B, N, D). For downstream RL,
+    z_rl is mean-pooled to (B, D).
 
-    Decoder autoregressively reconstructs VLA embeddings from the bottleneck
-    using teacher forcing and causal masking.
+    Decoder autoregressively reconstructs VLA embeddings from the multi-token
+    bottleneck using teacher forcing and causal masking.
     """
 
     def __init__(
@@ -21,13 +22,15 @@ class RLTokenModule(nn.Module):
         num_enc_layers: int = 4,
         num_dec_layers: int = 4,
         ff_dim: int | None = None,
+        num_rl_tokens: int = 1,
     ):
         super().__init__()
         if ff_dim is None:
             ff_dim = 4 * token_dim
 
         self.token_dim = token_dim
-        self.rl_token_embed = nn.Parameter(torch.randn(1, 1, token_dim) * 0.02)
+        self.num_rl_tokens = num_rl_tokens
+        self.rl_token_embed = nn.Parameter(torch.randn(1, num_rl_tokens, token_dim) * 0.02)
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=token_dim,
@@ -49,34 +52,48 @@ class RLTokenModule(nn.Module):
         self.out_proj = nn.Linear(token_dim, token_dim)
 
     def encode(self, vla_tokens: torch.Tensor) -> torch.Tensor:
-        """Encode VLA tokens into a single RL token.
+        """Encode VLA tokens into RL token(s).
 
         Args:
             vla_tokens: (B, M, D) -- final VLA token embeddings (should be detached)
 
         Returns:
-            z_rl: (B, D) -- the RL token
+            z_rl: (B, D) -- mean-pooled RL token for downstream RL state
+        """
+        z_rl_multi = self.encode_multi(vla_tokens)
+        return z_rl_multi.mean(dim=1)  # (B, D)
+
+    def encode_multi(self, vla_tokens: torch.Tensor) -> torch.Tensor:
+        """Encode VLA tokens into multiple RL tokens (for decoder).
+
+        Returns:
+            z_rl: (B, N, D) where N = num_rl_tokens
         """
         B = vla_tokens.shape[0]
-        rl = self.rl_token_embed.expand(B, -1, -1)
-        x = torch.cat([vla_tokens, rl], dim=1)  # (B, M+1, D)
+        rl = self.rl_token_embed.expand(B, -1, -1)  # (B, N, D)
+        x = torch.cat([vla_tokens, rl], dim=1)  # (B, M+N, D)
         out = self.encoder(x)
-        return out[:, -1, :]  # (B, D)
+        return out[:, -self.num_rl_tokens:, :]  # (B, N, D)
 
     def decode(self, z_rl: torch.Tensor, teacher_tokens: torch.Tensor) -> torch.Tensor:
         """Autoregressive reconstruction with teacher forcing.
 
         Args:
-            z_rl: (B, D)
+            z_rl: (B, D) single token or (B, N, D) multi-token
             teacher_tokens: (B, M, D) -- stop-gradiented VLA embeddings
 
         Returns:
             pred: (B, M, D)
         """
         M = teacher_tokens.shape[1]
-        memory = z_rl.unsqueeze(1)  # (B, 1, D)
-        # Shifted input: [z_rl, z_1, ..., z_{M-1}]
-        dec_input = torch.cat([memory, teacher_tokens[:, :-1]], dim=1)  # (B, M, D)
+        # Handle both single and multi-token z_rl
+        if z_rl.dim() == 2:
+            memory = z_rl.unsqueeze(1)  # (B, 1, D)
+        else:
+            memory = z_rl  # (B, N, D)
+        N = memory.shape[1]
+        # Shifted input: [rl_tokens..., z_1, ..., z_{M-N}]
+        dec_input = torch.cat([memory, teacher_tokens[:, :M - N]], dim=1)  # (B, M, D)
         causal_mask = nn.Transformer.generate_square_subsequent_mask(
             M, device=z_rl.device
         )
@@ -86,6 +103,6 @@ class RLTokenModule(nn.Module):
     def reconstruction_loss(self, vla_tokens: torch.Tensor) -> torch.Tensor:
         """L_ro = E[sum_i || pred_i - z_bar_i ||^2]"""
         z_bar = vla_tokens.detach()
-        z_rl = self.encode(z_bar)
-        pred = self.decode(z_rl, z_bar)
+        z_rl_multi = self.encode_multi(z_bar)
+        pred = self.decode(z_rl_multi, z_bar)
         return ((pred - z_bar) ** 2).mean()

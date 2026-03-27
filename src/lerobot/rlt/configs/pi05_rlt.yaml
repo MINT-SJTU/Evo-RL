@@ -15,11 +15,12 @@ rl_token:
   nhead: 8
   enc_layers: 3
   dec_layers: 3
+  num_rl_tokens: 8
 
 demo_adaptation:
-  steps: 20000
+  steps: 30000
   batch_size: 2
-  lr: 3.0e-4
+  lr: 5.0e-4
   vla_ft_weight: 0.0
   grad_clip_norm: 1.0
   warmup_steps: 1000
