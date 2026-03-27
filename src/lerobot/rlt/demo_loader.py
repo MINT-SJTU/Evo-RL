@@ -40,6 +40,7 @@ class RLTDemoDataset(Dataset):
             repo_id=repo_id,
             root=dataset_path,
             delta_timestamps=delta_timestamps,
+            video_backend="pyav",
         )
 
         self._camera_keys = camera_keys or self._detect_camera_keys()
