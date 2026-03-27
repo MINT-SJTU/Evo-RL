@@ -15,17 +15,16 @@ rl_token:
   nhead: 8
   enc_layers: 2
   dec_layers: 2
-  ff_dim: 2048
-  num_rl_tokens: 4
+  num_rl_tokens: 1
 
 demo_adaptation:
-  steps: 40000
+  steps: 50000
   batch_size: 2
   lr: 1.0e-4
   vla_ft_weight: 0.0
-  grad_clip_norm: 0.5
+  grad_clip_norm: 1.0
   warmup_steps: 2000
-  min_lr: 1.0e-6
+  min_lr: 5.0e-6
 
 actor:
   hidden_dim: 256
