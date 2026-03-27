@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import torch
+import pytest
+
+from lerobot.rlt.agent import RLTAgent
+from lerobot.rlt.config import RLTConfig
+from lerobot.rlt.vla_adapter import DummyVLAAdapter
+from lerobot.rlt.interfaces import Observation
+from lerobot.rlt.phase_controller import PhaseController, Phase, HandoverClassifier
+from lerobot.rlt.utils import soft_update
+
+
+TOKEN_DIM = 64
+ACTION_DIM = 7
+PROPRIO_DIM = 7
+C = 4
+
+
+@pytest.fixture
+def agent():
+    cfg = RLTConfig(
+        action_dim=ACTION_DIM,
+        proprio_dim=PROPRIO_DIM,
+        chunk_length=C,
+        vla_horizon=10,
+    )
+    cfg.rl_token.token_dim = TOKEN_DIM
+    cfg.rl_token.nhead = 4
+    cfg.rl_token.enc_layers = 1
+    cfg.rl_token.dec_layers = 1
+    cfg.rl_token.ff_dim = 128
+    cfg.actor.hidden_dim = 32
+    cfg.actor.num_layers = 1
+    cfg.critic.hidden_dim = 32
+    cfg.critic.num_layers = 1
+
+    vla = DummyVLAAdapter(token_dim=TOKEN_DIM, num_tokens=8, action_dim=ACTION_DIM, horizon=10)
+    return RLTAgent(cfg, vla)
+
+
+@pytest.fixture
+def obs():
+    return Observation(
+        images={"base": torch.randn(2, 3, 64, 64)},
+        proprio=torch.randn(2, PROPRIO_DIM),
+    )
+
+
+def test_get_rl_state_shape(agent, obs):
+    state = agent.get_rl_state(obs)
+    assert state.shape == (2, TOKEN_DIM + PROPRIO_DIM)
+
+
+def test_get_reference_chunk_shape(agent, obs):
+    ref = agent.get_reference_chunk(obs)
+    assert ref.shape == (2, C, ACTION_DIM)
+
+
+def test_select_action_shape(agent, obs):
+    action, mu, state_vec, ref_chunk = agent.select_action(obs)
+    assert action.shape == (2, C, ACTION_DIM)
+    assert mu.shape == (2, C, ACTION_DIM)
+    assert state_vec.shape[0] == 2
+    assert ref_chunk.shape == (2, C, ACTION_DIM)
+
+
+def test_freeze_vla(agent):
+    agent.freeze_vla()
+    for p in agent.vla.parameters():
+        assert not p.requires_grad
+
+
+def test_freeze_rl_token_encoder(agent):
+    agent.freeze_rl_token_encoder()
+    assert not agent.rl_token.rl_token_embed.requires_grad
+    for p in agent.rl_token.encoder.parameters():
+        assert not p.requires_grad
+    # Decoder should still be trainable
+    for p in agent.rl_token.decoder.parameters():
+        assert p.requires_grad
+
+
+def test_soft_update_correctness():
+    """Verify soft_update computes correct Polyak average."""
+    from lerobot.rlt.critic import ChunkCritic
+
+    source = ChunkCritic(state_dim=10, chunk_dim=10, hidden_dim=8, num_layers=1)
+    target = ChunkCritic(state_dim=10, chunk_dim=10, hidden_dim=8, num_layers=1)
+
+    # Store original target params
+    orig_params = [p.data.clone() for p in target.parameters()]
+
+    tau = 0.1
+    soft_update(target, source, tau)
+
+    for orig, tp, sp in zip(orig_params, target.parameters(), source.parameters()):
+        expected = (1.0 - tau) * orig + tau * sp.data
+        assert torch.allclose(tp.data, expected, atol=1e-6)
+
+
+class TestPhaseController:
+    def test_initial_phase(self):
+        pc = PhaseController(mode="manual")
+        assert pc.phase == Phase.VLA_PHASE
+        assert not pc.is_critical
+
+    def test_manual_trigger(self):
+        pc = PhaseController(mode="manual")
+        pc.trigger_critical()
+        assert pc.is_critical
+        pc.trigger_vla()
+        assert not pc.is_critical
+
+    def test_reset(self):
+        pc = PhaseController(mode="manual")
+        pc.trigger_critical()
+        pc.reset()
+        assert pc.phase == Phase.VLA_PHASE
+
+    def test_learned_mode(self):
+        classifier = HandoverClassifier(input_dim=64, hidden_dim=32)
+        pc = PhaseController(mode="learned", classifier=classifier)
+
+        # Force classifier to predict critical
+        z_rl = torch.randn(1, 64)
+        # Just test that update runs without error
+        phase = pc.update(z_rl)
+        assert isinstance(phase, Phase)
+
+    def test_classifier_training(self):
+        classifier = HandoverClassifier(input_dim=64, hidden_dim=32)
+        pc = PhaseController(mode="learned", classifier=classifier)
+        optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+
+        z_rl = torch.randn(8, 64)
+        labels = torch.randint(0, 2, (8,))
+        loss = pc.train_classifier(z_rl, labels, optimizer)
+        assert isinstance(loss, float)
+        assert loss > 0
