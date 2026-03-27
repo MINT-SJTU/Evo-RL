@@ -77,7 +77,7 @@ class Pi05VLAAdapter(VLAAdapter):
         self.pi05: PI05Pytorch = policy.model
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            "google/paligemma-3b-pt-224",
+            "leo009/paligemma-3b-pt-224",
             cache_dir=cache_dir,
         )
         self.tokenizer.padding_side = "right"
