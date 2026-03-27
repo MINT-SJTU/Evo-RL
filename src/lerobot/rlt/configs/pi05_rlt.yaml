@@ -17,10 +17,13 @@ rl_token:
   dec_layers: 2
 
 demo_adaptation:
-  steps: 5000
+  steps: 20000
   batch_size: 2
-  lr: 1.0e-4
+  lr: 3.0e-4
   vla_ft_weight: 0.0
+  grad_clip_norm: 1.0
+  warmup_steps: 1000
+  min_lr: 1.0e-6
 
 actor:
   hidden_dim: 256

@@ -25,6 +25,15 @@ class TrainingMetrics:
     env_steps: int = 0
 
 
+def _cosine_lr(step: int, warmup: int, total: int, peak_lr: float, min_lr: float) -> float:
+    """Cosine LR schedule with linear warmup."""
+    import math
+    if step < warmup:
+        return peak_lr * step / max(warmup, 1)
+    progress = (step - warmup) / max(total - warmup, 1)
+    return min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + math.cos(math.pi * progress))
+
+
 def demo_adaptation(
     agent: RLTAgent,
     config: RLTConfig,
@@ -34,19 +43,30 @@ def demo_adaptation(
     """Demo adaptation phase: L_ro + alpha * L_vla.
 
     After adaptation, freezes VLA and RL token encoder.
+    Includes gradient clipping and cosine LR schedule with warmup.
     """
     if demo_optimizer is None:
         demo_params = list(agent.rl_token.parameters()) + list(agent.vla.parameters())
         demo_optimizer = torch.optim.Adam(demo_params, lr=config.demo_adaptation.lr)
 
     alpha = config.demo_adaptation.vla_ft_weight
+    grad_clip = config.demo_adaptation.grad_clip_norm
+    warmup = config.demo_adaptation.warmup_steps
+    total_steps = config.demo_adaptation.steps
+    peak_lr = config.demo_adaptation.lr
+    min_lr = config.demo_adaptation.min_lr
     losses: list[float] = []
     agent.train()
 
     step = 0
     for obs, expert_actions in demo_loader:
-        if step >= config.demo_adaptation.steps:
+        if step >= total_steps:
             break
+
+        # Update learning rate
+        lr = _cosine_lr(step, warmup, total_steps, peak_lr, min_lr)
+        for pg in demo_optimizer.param_groups:
+            pg["lr"] = lr
 
         vla_out = agent.vla.forward_vla(obs)
         l_ro = agent.rl_token.reconstruction_loss(vla_out.final_tokens)
@@ -55,9 +75,21 @@ def demo_adaptation(
 
         demo_optimizer.zero_grad()
         loss.backward()
+
+        # Gradient clipping
+        trainable_params = [p for p in agent.rl_token.parameters() if p.requires_grad]
+        if alpha > 0:
+            trainable_params += [p for p in agent.vla.parameters() if p.requires_grad]
+        torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
+
         demo_optimizer.step()
 
-        losses.append(loss.item())
+        loss_val = loss.item()
+        losses.append(loss_val)
+
+        if step % 100 == 0:
+            logger.info("Step %d/%d loss=%.4f lr=%.2e", step, total_steps, loss_val, lr)
+
         step += 1
 
     agent.freeze_vla()

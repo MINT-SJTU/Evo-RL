@@ -41,6 +41,9 @@ class DemoAdaptConfig:
     batch_size: int = 32
     lr: float = 1e-4
     vla_ft_weight: float = 1.0
+    grad_clip_norm: float = 1.0
+    warmup_steps: int = 500
+    min_lr: float = 1e-6
 
 
 @dataclass
