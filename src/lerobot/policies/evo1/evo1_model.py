@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from typing import Union
 
 import torch
 import torch.nn as nn
@@ -16,7 +15,14 @@ class EVO1(nn.Module):
         self._device = config.get("device", "cuda")
         self.return_cls_only = config.get("return_cls_only", False)
         vlm_name = config.get("vlm_name", "OpenGVLab/InternVL3-1B")
-        self.embedder = InternVL3Embedder(model_name=vlm_name, device=self._device)
+        self.embedder = InternVL3Embedder(
+            model_name=vlm_name,
+            image_size=config.get("image_size", 448),
+            device=self._device,
+            num_language_layers=config.get("vlm_num_layers", 14),
+            model_dtype=config.get("vlm_dtype", "bfloat16"),
+            use_flash_attn=config.get("use_flash_attn", True),
+        )
 
         action_head_type = config.get("action_head", "flowmatching").lower()
         if action_head_type != "flowmatching":
@@ -29,11 +35,6 @@ class EVO1(nn.Module):
         config["horizon"] = horizon
         config["per_action_dim"] = per_action_dim
         config["action_dim"] = action_dim
-
-        if action_dim != horizon * per_action_dim:
-            raise ValueError(
-                f"action_dim ({action_dim}) must equal horizon ({horizon}) * per_action_dim ({per_action_dim})"
-            )
 
         self.horizon = horizon
         self.per_action_dim = per_action_dim
@@ -56,7 +57,7 @@ class EVO1(nn.Module):
 
     def get_vl_embeddings(
         self,
-        images: list[Union[Image.Image, torch.Tensor]],
+        images: list[Image.Image | torch.Tensor],
         image_mask: torch.Tensor,
         prompt: str = "",
         return_cls_only: bool | None = None,
@@ -72,7 +73,7 @@ class EVO1(nn.Module):
             return_cls_only=return_cls_only,
         )
 
-    def prepare_state(self, state_input: Union[list, torch.Tensor]) -> torch.Tensor:
+    def prepare_state(self, state_input: list | torch.Tensor) -> torch.Tensor:
         if isinstance(state_input, list):
             state_tensor = torch.tensor(state_input)
         elif isinstance(state_input, torch.Tensor):
@@ -111,10 +112,10 @@ class EVO1(nn.Module):
     @torch.no_grad()
     def run_inference(
         self,
-        images: list[Union[Image.Image, torch.Tensor]],
+        images: list[Image.Image | torch.Tensor],
         image_mask: torch.Tensor,
         prompt: str,
-        state_input: Union[list, torch.Tensor],
+        state_input: list | torch.Tensor,
         return_cls_only: bool | None = None,
         action_mask: torch.Tensor | None = None,
         embodiment_ids: torch.Tensor | None = None,

@@ -1,12 +1,13 @@
 import math
 from dataclasses import dataclass, field
 
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
+
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 
@@ -52,6 +53,9 @@ class Evo1Config(PreTrainedConfig):
     )
 
     vlm_model_name: str = "OpenGVLab/InternVL3-1B"
+    vlm_num_layers: int | None = 14
+    vlm_dtype: str = "bfloat16"
+    use_flash_attn: bool = True
     action_head: str = "flowmatching"
     embed_dim: int = 896
     hidden_dim: int = 1024

@@ -78,28 +78,43 @@ def dynamic_preprocess(image, min_num=1, max_num=1, image_size=448, use_thumbnai
 
 
 class InternVL3Embedder(nn.Module):
-    def __init__(self, model_name="OpenGVLab/InternVL3-1B", image_size=448, device="cuda"):
+    def __init__(
+        self,
+        model_name="OpenGVLab/InternVL3-1B",
+        image_size=448,
+        device="cuda",
+        num_language_layers: int | None = 14,
+        model_dtype: str | torch.dtype = "bfloat16",
+        use_flash_attn: bool = True,
+    ):
         super().__init__()
-        self.device = device
+        self._requested_device = device
         self.image_size = image_size
+        self.num_language_layers = num_language_layers
         self.max_text_length = 1024  # InternVL3 supports up to 1024 tokens
         self.transform = build_transform(image_size)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
+        if isinstance(model_dtype, str):
+            try:
+                model_dtype = getattr(torch, model_dtype)
+            except AttributeError as exc:
+                raise ValueError(f"Unsupported EVO1 vlm_dtype '{model_dtype}'") from exc
         self.model = AutoModel.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
             trust_remote_code=True,
-            use_flash_attn=True,
+            use_flash_attn=use_flash_attn,
             low_cpu_mem_usage=True,
             _fast_init=False,
-        ).to(self.device)
+        ).to(self._requested_device)
 
         if hasattr(self.model.language_model, "model"):
             layers = self.model.language_model.model.layers
 
         else:
             layers = self.model.language_model.layers
-        layers = layers[:14]
+        if self.num_language_layers is not None:
+            layers = layers[: self.num_language_layers]
 
         if hasattr(self.model.language_model, "model"):
             self.model.language_model.model.layers = torch.nn.ModuleList(layers)
@@ -109,6 +124,8 @@ class InternVL3Embedder(nn.Module):
 
         if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "encoder"):
             self.model.vision_model.encoder.gradient_checkpointing = False
+
+        self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
 
     def _preprocess_images(
         self, image_tensors: list[Image.Image | torch.Tensor]
@@ -132,7 +149,6 @@ class InternVL3Embedder(nn.Module):
             prompt += f"Image-{i + 1}: <image>\n"
         prompt += text_prompt.strip()
 
-        self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         for tile_count in num_tiles_list:
             token_count = self.model.num_image_token * tile_count
             image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * token_count + IMG_END_TOKEN
@@ -231,3 +247,7 @@ class InternVL3Embedder(nn.Module):
         fused_hidden = outputs.hidden_states[-1].to(torch.float32)
 
         return fused_hidden[:, 0, :] if return_cls_only else fused_hidden
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.model.parameters()).device

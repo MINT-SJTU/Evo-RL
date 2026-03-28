@@ -212,6 +212,7 @@ class FlowmatchingActionHead(nn.Module):
             )
 
         self.action_encoder = None
+        self.single_action_proj = None
         if horizon > 1:
             per_action_dim = getattr(self.config, "per_action_dim", None)
             if per_action_dim is None:
@@ -223,6 +224,8 @@ class FlowmatchingActionHead(nn.Module):
                 horizon=horizon,
                 num_categories=num_categories,
             )
+        else:
+            self.single_action_proj = nn.Linear(self.per_action_dim, self.embed_dim)
 
     def forward(
         self,
@@ -261,9 +264,9 @@ class FlowmatchingActionHead(nn.Module):
 
         if action_mask is not None:
             action_mask = action_mask.to(dtype=noise.dtype, device=noise.device)
-            assert action_mask.shape == noise.shape, (
-                f"action_mask shape {action_mask.shape} != noise shape {noise.shape}"
-            )
+            if action_mask.shape != noise.shape:
+                raise ValueError(f"action_mask shape {action_mask.shape} != noise shape {noise.shape}")
+            actions_gt_seq = actions_gt_seq * action_mask
             noise = noise * action_mask
 
         if self.horizon > 1:
@@ -278,8 +281,8 @@ class FlowmatchingActionHead(nn.Module):
         if self.horizon > 1 and self.action_encoder is not None:
             action_tokens = self.action_encoder(action_intermediate_seq, embodiment_id)
         else:
-            if not hasattr(self, "single_action_proj"):
-                self.single_action_proj = nn.Linear(self.per_action_dim, self.embed_dim).to(device)
+            if self.single_action_proj is None:
+                raise RuntimeError("single_action_proj is not initialized for single-step inference/training.")
             action_tokens = self.single_action_proj(action_intermediate_seq)
 
         x = action_tokens
@@ -290,9 +293,6 @@ class FlowmatchingActionHead(nn.Module):
 
         if self.horizon > 1:
             x_flat = x.reshape(batch_size, -1)
-
-            if not hasattr(self, "seq_pool_proj"):
-                self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
             x_pooled = self.seq_pool_proj(x_flat)
         else:
             x_pooled = x.squeeze(1)
@@ -308,6 +308,9 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id: torch.LongTensor = None,
         action_mask: torch.Tensor = None,
     ):
+        if action_mask is None:
+            raise ValueError("action_mask must be provided for inference with flow matching.")
+
         batch_size = fused_tokens.size(0)
         device = fused_tokens.device
         if embodiment_id is None:
@@ -335,15 +338,10 @@ class FlowmatchingActionHead(nn.Module):
             action_seq = action.view(batch_size, 1, per_action_dim)
 
         action_mask = action_mask.view(batch_size, 1, per_action_dim).repeat(1, self.horizon, 1)
-
-        if action_mask is not None:
-            action_mask = action_mask.to(dtype=action_seq.dtype, device=action_seq.device)
-            assert action_mask.shape == action_seq.shape, (
-                f"action_mask shape {action_mask.shape} != noise shape {action_seq.shape}"
-            )
-            action_seq = action_seq * action_mask
-        else:
-            raise ValueError("action_mask must be provided for inference with flow matching.")
+        action_mask = action_mask.to(dtype=action_seq.dtype, device=action_seq.device)
+        if action_mask.shape != action_seq.shape:
+            raise ValueError(f"action_mask shape {action_mask.shape} != noise shape {action_seq.shape}")
+        action_seq = action_seq * action_mask
 
         num_steps = int(getattr(self.config, "num_inference_timesteps", 32))
         dt = 1.0 / num_steps
@@ -358,11 +356,9 @@ class FlowmatchingActionHead(nn.Module):
                 action_seq = action_seq * action_mask
                 action_tokens = self.action_encoder(action_seq, embodiment_id)
             else:
-                if hasattr(self, "single_action_proj"):
-                    action_tokens = self.single_action_proj(action_seq)
-                else:
-                    self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
-                    action_tokens = self.single_action_proj(action_seq)
+                if self.single_action_proj is None:
+                    raise RuntimeError("single_action_proj is not initialized for single-step inference/training.")
+                action_tokens = self.single_action_proj(action_seq)
 
             x = action_tokens
             for block in self.transformer_blocks:
@@ -382,6 +378,7 @@ class FlowmatchingActionHead(nn.Module):
             pred = self.mlp_head(x_pooled, embodiment_id)
 
             action = action + dt * pred
+            action = action * action_mask.view(batch_size, -1)
 
             if self.horizon > 1:
                 action_seq = action.view(batch_size, self.horizon, per_action_dim)

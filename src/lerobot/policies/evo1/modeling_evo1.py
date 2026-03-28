@@ -67,6 +67,9 @@ class EVO1Policy(PreTrainedPolicy):
             "device": config.device,
             "return_cls_only": config.return_cls_only,
             "vlm_name": config.vlm_model_name,
+            "vlm_num_layers": config.vlm_num_layers,
+            "vlm_dtype": config.vlm_dtype,
+            "use_flash_attn": config.use_flash_attn,
             "action_head": config.action_head,
             "action_horizon": config.chunk_size,
             "per_action_dim": config.max_action_dim,
@@ -85,10 +88,7 @@ class EVO1Policy(PreTrainedPolicy):
 
     @property
     def _camera_keys(self) -> list[str]:
-        keys = list(self.config.image_features)
-        if keys:
-            return keys
-        return []
+        return list(self.config.image_features)
 
     @property
     def _env_action_dim(self) -> int:
@@ -323,7 +323,7 @@ class EVO1Policy(PreTrainedPolicy):
         reduction: str,
     ) -> Tensor:
         flat_mask = action_mask.view(action_mask.shape[0], -1).to(dtype=pred_velocity.dtype)
-        sq_error = ((pred_velocity * flat_mask) - target_velocity).pow(2)
+        sq_error = ((pred_velocity - target_velocity) * flat_mask).pow(2)
         active = flat_mask.sum(dim=1).clamp_min(1.0)
         per_sample_loss = sq_error.sum(dim=1) / active
         if reduction == "none":
@@ -350,7 +350,8 @@ class EVO1Policy(PreTrainedPolicy):
             action_mask=action_mask.to(device=self.config.device, dtype=self._compute_dtype),
             embodiment_ids=embodiment_ids,
         )
-        target_velocity = (actions_gt - noise).view(actions_gt.shape[0], -1)
+        flat_action_mask = action_mask.view(action_mask.shape[0], -1).to(dtype=actions_gt.dtype)
+        target_velocity = (actions_gt - noise).view(actions_gt.shape[0], -1) * flat_action_mask
         loss = self._compute_masked_loss(pred_velocity, target_velocity, action_mask, reduction)
         loss_mean = loss.mean().item() if loss.ndim > 0 else loss.item()
         return loss, {
@@ -371,7 +372,11 @@ class EVO1Policy(PreTrainedPolicy):
         embodiment_ids = self._get_embodiment_ids(batch, states.shape[0])
         action_mask = self._prepare_inference_action_mask(states.shape[0])
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16) if self.config.use_amp and str(self.config.device).startswith("cuda") else nullcontext():
+        with (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if self.config.use_amp and str(self.config.device).startswith("cuda")
+            else nullcontext()
+        ):
             actions = self.model(
                 fused_tokens,
                 state=states,
