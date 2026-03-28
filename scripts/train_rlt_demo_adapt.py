@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--save-every", type=int, default=2000)
+    parser.add_argument("--token-pool-size", type=int, default=0, help="Pool prefix tokens (0=no pool)")
     return parser.parse_args()
 
 
@@ -70,6 +71,7 @@ def main() -> None:
         dtype="bfloat16",
         device=args.device,
         cache_dir=args.cache_dir,
+        token_pool_size=args.token_pool_size,
     )
     logger.info("pi0.5 loaded")
 

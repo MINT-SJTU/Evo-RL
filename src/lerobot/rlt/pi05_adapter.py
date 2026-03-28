@@ -29,6 +29,7 @@ class Pi05VLAAdapter(VLAAdapter):
         device: str = "cuda",
         num_inference_steps: int = 10,
         cache_dir: str | None = None,
+        token_pool_size: int = 0,  # 0 = no pooling, >0 = pool prefix tokens to this size
     ):
         super().__init__()
         if num_inference_steps <= 0:
@@ -37,6 +38,7 @@ class Pi05VLAAdapter(VLAAdapter):
         self.actual_action_dim = actual_action_dim
         self.actual_proprio_dim = actual_proprio_dim
         self.task_instruction = self._clean_task(task_instruction)
+        self.token_pool_size = token_pool_size
 
         self.camera_name_map = camera_name_map or {
             "left_wrist": "observation.images.left_wrist_0_rgb",
@@ -214,8 +216,17 @@ class Pi05VLAAdapter(VLAAdapter):
             x_t = x_t + dt * v_t
 
         sampled_actions = x_t[:, :, : self.actual_action_dim]
+
+        # Optional pooling: reduce ~968 tokens to pool_size for RL token encoder
+        final_tokens = prefix_output.to(dtype=torch.float32)
+        if self.token_pool_size > 0 and final_tokens.shape[1] > self.token_pool_size:
+            # Adaptive average pooling along token dim: (B, M, D) -> (B, pool_size, D)
+            final_tokens = final_tokens.permute(0, 2, 1)  # (B, D, M)
+            final_tokens = torch.nn.functional.adaptive_avg_pool1d(final_tokens, self.token_pool_size)
+            final_tokens = final_tokens.permute(0, 2, 1)  # (B, pool_size, D)
+
         return VLAOutput(
-            final_tokens=prefix_output.to(dtype=torch.float32),
+            final_tokens=final_tokens,
             sampled_action_chunk=sampled_actions.to(dtype=torch.float32),
         )
 
