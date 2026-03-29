@@ -129,11 +129,13 @@ def evaluate_offline(
     total_q_expert = 0.0
     total_td_error = 0.0
 
+    device = next(agent.parameters()).device
+
     for _ in range(num_batches):
         batch = val_buffer.sample(config.training.batch_size)
-        state_vec = batch[STATE_VEC]
-        exec_chunk_flat = batch[EXEC_CHUNK_FLAT]
-        ref_chunk_flat = batch[REF_CHUNK_FLAT]
+        state_vec = batch[STATE_VEC].to(device)
+        exec_chunk_flat = batch[EXEC_CHUNK_FLAT].to(device)
+        ref_chunk_flat = batch[REF_CHUNK_FLAT].to(device)
 
         with torch.no_grad():
             mu, _ = agent.actor.forward(state_vec, ref_chunk_flat)
@@ -144,9 +146,10 @@ def evaluate_offline(
             total_q_policy += agent.critic.min_q(state_vec, mu).mean().item()
             total_q_expert += agent.critic.min_q(state_vec, exec_chunk_flat).mean().item()
 
+            batch_on_device = {k: v.to(device) for k, v in batch.items()}
             td_err = critic_loss(
                 agent.critic, agent.target_critic, agent.actor,
-                batch, config.training.gamma, config.chunk_length,
+                batch_on_device, config.training.gamma, config.chunk_length,
             )
             total_td_error += td_err.item()
 
