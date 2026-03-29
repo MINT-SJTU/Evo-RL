@@ -40,19 +40,36 @@
 - 删除了原始 Evo1 里永假的 `action_dim != horizon * per_action_dim` 检查。
 - `InternVL3Embedder` 不再把 `device` 固定保存成字符串语义，而是运行时从模型参数读取实际 device。
 
+## 相较原始 Evo1 的性能优化（已落地）
+
+### 1. VLM 图文融合改为 batch 处理（主要收益）
+
+- 由逐样本循环调用改为整批处理，减少 Python 循环和重复前向开销，提升吞吐。
+- 优化位置：
+  - `src/lerobot/policies/evo1/modeling_evo1.py`：`_compute_fused_tokens`
+  - `src/lerobot/policies/evo1/evo1_model.py`：`get_vl_embeddings`
+  - `src/lerobot/policies/evo1/internvl3_embedder.py`：`_build_multimodal_prompt`、`_prepare_and_fuse_embeddings`、`get_fused_image_text_embedding_from_tensor_images`
+
+### 2. 图像预处理避免不必要的 PIL 转换（主要收益）
+
+- 对已是 `[3, image_size, image_size]` 的 Tensor 走纯 Tensor 快路径，直接归一化，不再强制 Tensor->PIL->Tensor。
+- 优化位置：
+  - `src/lerobot/policies/evo1/internvl3_embedder.py`：`_preprocess_images`
+
+### 3. 次要优化（收益次于以上两项）
+
+- `repeat` 改 `expand`/广播，减少中间张量分配。
+  - 位置：`src/lerobot/policies/evo1/flow_matching.py`：`MultiEmbodimentActionEncoder.forward`
+- 推理阶段时间嵌入预计算，减少循环内重复计算。
+  - 位置：`src/lerobot/policies/evo1/flow_matching.py`：`FlowmatchingActionHead.get_action`
+- 强化 dtype/device 对齐，减少隐式 cast。
+  - 位置：`src/lerobot/policies/evo1/flow_matching.py`、`src/lerobot/policies/evo1/internvl3_embedder.py`
+
 ## 当前仍保留的原始 Evo1 遗留问题
 
 下面这些问题在当前 Evo-RL 端口里仍然基本沿用原始 Evo1 的实现，后续如果要继续打磨，建议由 Evo1 本体维护侧统一评估：
 
-### 1. VLM forward 仍为逐 sample 串行
-
-- 现象：batch 内逐样本调用 VLM。
-- 影响：
-  - 训练吞吐较低，尤其 stage2 更明显。
-- 归因：原始 Evo1 即如此实现。
-- 建议：后续如有性能优化需求，可考虑 batched VLM forward。
-
-### 2. 配置链较绕
+### 1. 配置链较绕
 
 - 现象：`dict -> SimpleNamespace` 形式在模型层继续传递配置。
 - 影响：

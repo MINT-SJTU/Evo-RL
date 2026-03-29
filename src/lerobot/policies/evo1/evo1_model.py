@@ -57,15 +57,34 @@ class EVO1(nn.Module):
 
     def get_vl_embeddings(
         self,
-        images: list[Image.Image | torch.Tensor],
+        images: list[list[Image.Image | torch.Tensor]],
         image_mask: torch.Tensor,
-        prompt: str = "",
+        prompt: str | list[str] = "",
         return_cls_only: bool | None = None,
     ) -> torch.Tensor:
         if return_cls_only is None:
             return_cls_only = self.return_cls_only
+
         if not images:
-            raise ValueError("EVO1 expects at least one image per sample.")
+            raise ValueError("EVO1 expects at least one batch item.")
+        if not isinstance(images[0], list):
+            raise TypeError("EVO1 expects batched images as list[list[Image|Tensor]].")
+
+        batch_size = len(images)
+        if image_mask.ndim == 1:
+            image_mask = image_mask.unsqueeze(0)
+        if image_mask.ndim != 2:
+            raise ValueError(f"EVO1 expects image_mask with shape [B, V], got {tuple(image_mask.shape)}")
+        if image_mask.shape[0] != batch_size:
+            raise ValueError(
+                f"EVO1 batch mismatch: num_images_batch={batch_size} image_mask_batch={image_mask.shape[0]}"
+            )
+
+        if isinstance(prompt, list) and len(prompt) != batch_size:
+            raise ValueError(
+                f"EVO1 batch mismatch: num_prompts={len(prompt)} num_images_batch={batch_size}"
+            )
+
         return self.embedder.get_fused_image_text_embedding_from_tensor_images(
             image_tensors=images,
             image_mask=image_mask,
@@ -83,17 +102,40 @@ class EVO1(nn.Module):
 
         if state_tensor.ndim == 1:
             state_tensor = state_tensor.unsqueeze(0)
+        elif state_tensor.ndim == 3:
+            state_tensor = state_tensor[:, -1]
+        elif state_tensor.ndim != 2:
+            raise ValueError(f"EVO1 expects state tensor with shape [B, D], got {tuple(state_tensor.shape)}")
 
         return state_tensor.to(self._device)
 
     def predict_action(
         self,
         fused_tokens: torch.Tensor,
-        state: torch.Tensor,
+        state: torch.Tensor | None,
         actions_gt: torch.Tensor | None = None,
         action_mask: torch.Tensor | None = None,
         embodiment_ids: torch.Tensor | None = None,
     ):
+        batch_size = fused_tokens.shape[0]
+
+        if state is not None and state.shape[0] != batch_size:
+            raise ValueError(f"EVO1 batch mismatch: state_batch={state.shape[0]} fused_batch={batch_size}")
+        if actions_gt is not None and actions_gt.shape[0] != batch_size:
+            raise ValueError(f"EVO1 batch mismatch: actions_gt_batch={actions_gt.shape[0]} fused_batch={batch_size}")
+        if action_mask is not None and action_mask.shape[0] != batch_size:
+            raise ValueError(f"EVO1 batch mismatch: action_mask_batch={action_mask.shape[0]} fused_batch={batch_size}")
+
+        if embodiment_ids is not None:
+            if embodiment_ids.ndim == 0:
+                embodiment_ids = embodiment_ids.unsqueeze(0)
+            elif embodiment_ids.ndim > 1:
+                embodiment_ids = embodiment_ids[:, -1]
+            if embodiment_ids.shape[0] != batch_size:
+                raise ValueError(
+                    f"EVO1 batch mismatch: embodiment_ids_batch={embodiment_ids.shape[0]} fused_batch={batch_size}"
+                )
+
         if actions_gt is None:
             return self.action_head.get_action(
                 fused_tokens,
@@ -112,9 +154,9 @@ class EVO1(nn.Module):
     @torch.no_grad()
     def run_inference(
         self,
-        images: list[Image.Image | torch.Tensor],
+        images: list[list[Image.Image | torch.Tensor]],
         image_mask: torch.Tensor,
-        prompt: str,
+        prompt: str | list[str],
         state_input: list | torch.Tensor,
         return_cls_only: bool | None = None,
         action_mask: torch.Tensor | None = None,
@@ -127,6 +169,10 @@ class EVO1(nn.Module):
             return_cls_only=return_cls_only,
         )
         state_tensor = self.prepare_state(state_input)
+        if state_tensor.shape[0] != fused_tokens.shape[0]:
+            raise ValueError(
+                f"EVO1 batch mismatch: state_batch={state_tensor.shape[0]} fused_batch={fused_tokens.shape[0]}"
+            )
         return self.predict_action(
             fused_tokens,
             state_tensor,

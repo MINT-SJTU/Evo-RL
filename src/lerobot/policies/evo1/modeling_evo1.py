@@ -272,7 +272,15 @@ class EVO1Policy(PreTrainedPolicy):
         camera_keys = self._camera_keys or sorted(key for key in batch if key.startswith(f"{OBS_IMAGES}."))
         if not camera_keys:
             raise ValueError("EVO1 requires at least one visual observation feature.")
-        batch_size = batch[camera_keys[0]].shape[0]
+        first_image = batch[camera_keys[0]]
+        if first_image.dim() == 3:
+            batch_size = 1
+        elif first_image.dim() in (4, 5):
+            batch_size = first_image.shape[0]
+        else:
+            raise ValueError(
+                f"Unsupported image tensor shape for EVO1: key={camera_keys[0]} shape={tuple(first_image.shape)}"
+            )
         image_batches: list[list[Tensor]] = []
         image_masks = torch.zeros(batch_size, self.config.max_views, dtype=torch.bool)
 
@@ -287,6 +295,10 @@ class EVO1Policy(PreTrainedPolicy):
                 elif image.dim() != 4:
                     raise ValueError(
                         f"Unsupported image tensor shape for EVO1: key={camera_key} shape={tuple(image.shape)}"
+                    )
+                if image.shape[0] != batch_size:
+                    raise ValueError(
+                        f"EVO1 batch mismatch across cameras: key={camera_key} batch={image.shape[0]} expected={batch_size}"
                     )
                 sample_images.append(image[batch_index].detach().cpu())
             if not sample_images:
@@ -304,16 +316,13 @@ class EVO1Policy(PreTrainedPolicy):
         image_batches: list[list[Tensor]],
         image_masks: Tensor,
     ) -> Tensor:
-        fused_tokens = []
-        for prompt, images, image_mask in zip(prompts, image_batches, image_masks, strict=True):
-            fused = self.model.get_vl_embeddings(
-                images=images,
-                image_mask=image_mask,
-                prompt=prompt,
-                return_cls_only=self.config.return_cls_only,
-            )
-            fused_tokens.append(fused.to(device=self.config.device, dtype=self._compute_dtype))
-        return torch.cat(fused_tokens, dim=0)
+        fused_tokens = self.model.get_vl_embeddings(
+            images=image_batches,
+            image_mask=image_masks,
+            prompt=prompts,
+            return_cls_only=self.config.return_cls_only,
+        )
+        return fused_tokens.to(device=self.config.device, dtype=self._compute_dtype)
 
     def _compute_masked_loss(
         self,

@@ -128,50 +128,94 @@ class InternVL3Embedder(nn.Module):
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
 
     def _preprocess_images(
-        self, image_tensors: list[Image.Image | torch.Tensor]
-    ) -> tuple[torch.Tensor, list[int]]:
+        self, image_tensors_batch: list[list[Image.Image | torch.Tensor]]
+    ) -> tuple[torch.Tensor, list[list[int]]]:
         pixel_values_list = []
-        for image in image_tensors:
-            if isinstance(image, torch.Tensor):
-                image = to_pil_image(image)
-            tiles = dynamic_preprocess(image, image_size=self.image_size)
-            tile_tensors = torch.stack([self.transform(t) for t in tiles])  # (T_i, 3, 448, 448)
-            pixel_values_list.append(tile_tensors)
+        batch_num_tiles_list = []
+        model_dtype = next(self.model.parameters()).dtype
+        mean = torch.tensor(IMAGENET_MEAN, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor(IMAGENET_STD, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
 
-        pixel_values = torch.cat(pixel_values_list, dim=0).to(dtype=torch.bfloat16, device=self.device)
-        num_tiles_list = [pv.shape[0] for pv in pixel_values_list]
+        for image_tensors in image_tensors_batch:
+            num_tiles_list = []
+            for image in image_tensors:
+                if isinstance(image, torch.Tensor):
+                    if image.ndim == 3 and image.shape[0] == 3 and image.shape[1] == self.image_size and image.shape[2] == self.image_size:
+                        image_t = image.to(device=self.device)
+                        if not torch.is_floating_point(image_t):
+                            image_t = image_t.to(torch.float32) / 255.0
+                        else:
+                            image_t = image_t.to(torch.float32)
+                            if float(image_t.max().item()) > 1.0:
+                                image_t = image_t / 255.0
+                        tile_tensors = (image_t.unsqueeze(0) - mean) / std
+                    else:
+                        image = to_pil_image(image.detach().cpu())
+                        tiles = dynamic_preprocess(image, image_size=self.image_size)
+                        tile_tensors = torch.stack([self.transform(t) for t in tiles]).to(device=self.device)
+                else:
+                    tiles = dynamic_preprocess(image, image_size=self.image_size)
+                    tile_tensors = torch.stack([self.transform(t) for t in tiles]).to(device=self.device)
 
-        return pixel_values, num_tiles_list
+                tile_tensors = tile_tensors.to(dtype=model_dtype)
+                pixel_values_list.append(tile_tensors)
+                num_tiles_list.append(tile_tensors.shape[0])
+            batch_num_tiles_list.append(num_tiles_list)
 
-    def _build_multimodal_prompt(self, num_tiles_list: list[int], text_prompt: str) -> str:
-        prompt = ""
-        for i in range(len(num_tiles_list)):
-            prompt += f"Image-{i + 1}: <image>\n"
-        prompt += text_prompt.strip()
+        if pixel_values_list:
+            pixel_values = torch.cat(pixel_values_list, dim=0)
+        else:
+            pixel_values = torch.empty(
+                0,
+                3,
+                self.image_size,
+                self.image_size,
+                dtype=model_dtype,
+                device=self.device,
+            )
 
-        for tile_count in num_tiles_list:
-            token_count = self.model.num_image_token * tile_count
-            image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * token_count + IMG_END_TOKEN
-            prompt = prompt.replace("<image>", image_tokens, 1)
+        return pixel_values, batch_num_tiles_list
 
-        return prompt
+    def _build_multimodal_prompt(
+        self,
+        batch_num_tiles_list: list[list[int]],
+        text_prompts: list[str],
+    ) -> list[str]:
+        if len(batch_num_tiles_list) != len(text_prompts):
+            raise ValueError(
+                f"InternVL3 batch mismatch: num_image_batches={len(batch_num_tiles_list)} num_text_prompts={len(text_prompts)}"
+            )
+
+        prompts = []
+        for num_tiles_list, text_prompt in zip(batch_num_tiles_list, text_prompts, strict=True):
+            prompt_segments = []
+            for i, tile_count in enumerate(num_tiles_list):
+                token_count = self.model.num_image_token * tile_count
+                image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * token_count + IMG_END_TOKEN
+                prompt_segments.append(f"Image-{i + 1}: {image_tokens}\n")
+            prompts.append("".join(prompt_segments) + text_prompt.strip())
+
+        return prompts
 
     def _prepare_and_fuse_embeddings(
-        self, prompt: str, vit_embeds: torch.Tensor, image_mask: torch.Tensor, num_tiles_list: list[int]
+        self,
+        prompts: list[str],
+        vit_embeds: torch.Tensor,
+        image_masks: torch.Tensor,
+        batch_num_tiles_list: list[list[int]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        untruncated_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
-        true_sequence_length = untruncated_ids.shape[1]
+        untruncated_ids = self.tokenizer(prompts, padding=False, truncation=False)["input_ids"]
+        true_sequence_length = max((len(ids) for ids in untruncated_ids), default=0)
 
         if true_sequence_length > self.max_text_length:
             logging.warning(
-                "InternVL3 prompt truncated: max_length=%s actual_length=%s prompt_prefix=%r",
+                "InternVL3 prompt truncated in batch: max_length=%s actual_max_length=%s",
                 self.max_text_length,
                 true_sequence_length,
-                prompt[:100],
             )
 
         model_inputs = self.tokenizer(
-            prompt,
+            prompts,
             return_tensors="pt",
             padding="max_length",
             truncation=True,
@@ -181,61 +225,113 @@ class InternVL3Embedder(nn.Module):
         attention_mask = model_inputs["attention_mask"]
 
         img_token_mask = input_ids == self.img_context_token_id
-
-        img_token_locations = torch.where(img_token_mask)[1]
-
         input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
-
-        batch_size, seq_len, channels = input_embeds.shape
-        input_embeds = input_embeds.reshape(batch_size * seq_len, channels)
-        input_ids = input_ids.reshape(batch_size * seq_len)
-
-        selected = input_ids == self.img_context_token_id
-
+        batch_size, _, channels = input_embeds.shape
         vit_embeds = vit_embeds.reshape(-1, channels).to(device=input_embeds.device, dtype=input_embeds.dtype)
-        n_token = int(selected.sum().item())
-        if vit_embeds.shape[0] < n_token:
-            raise ValueError(
-                f"InternVL3 produced fewer image tokens than expected: got {vit_embeds.shape[0]}, need {n_token}"
-            )
-        input_embeds[selected] = vit_embeds[:n_token]
 
         tokens_per_tile = self.model.num_image_token
+        vit_idx = 0
+        actual_vis_tokens_list = img_token_mask.sum(dim=1).tolist()
 
-        current_token_idx = 0
-        for i in range(len(image_mask)):
-            num_tiles_for_this_image = num_tiles_list[i]
-            num_tokens_for_this_image = num_tiles_for_this_image * tokens_per_tile
+        for batch_idx in range(batch_size):
+            expected_vis_tokens = sum(batch_num_tiles_list[batch_idx]) * tokens_per_tile
+            actual_vis_tokens = int(actual_vis_tokens_list[batch_idx])
+            if actual_vis_tokens > expected_vis_tokens:
+                raise ValueError(
+                    "InternVL3 detected more image placeholder tokens than expected in prompt construction: "
+                    f"batch_idx={batch_idx}, actual={actual_vis_tokens}, expected={expected_vis_tokens}"
+                )
 
-            if not image_mask[i]:
-                start_idx = img_token_locations[current_token_idx]
-                end_idx = start_idx + num_tokens_for_this_image
+            if vit_idx + expected_vis_tokens > vit_embeds.shape[0]:
+                raise ValueError(
+                    "InternVL3 produced fewer image tokens than expected for batch fusion: "
+                    f"need_up_to={vit_idx + expected_vis_tokens}, got={vit_embeds.shape[0]}"
+                )
 
-                attention_mask[0, start_idx:end_idx] = 0
+            item_vit_embeds = vit_embeds[vit_idx : vit_idx + expected_vis_tokens]
+            vit_idx += expected_vis_tokens
 
-            current_token_idx += num_tokens_for_this_image
+            if actual_vis_tokens > 0:
+                input_embeds[batch_idx, img_token_mask[batch_idx]] = item_vit_embeds[:actual_vis_tokens]
 
-        input_embeds = input_embeds.reshape(batch_size, seq_len, channels)
+            current_token_idx = 0
+            img_token_locations = torch.where(img_token_mask[batch_idx])[0]
+            for image_idx, num_tiles_for_this_image in enumerate(batch_num_tiles_list[batch_idx]):
+                num_tokens_for_this_image = num_tiles_for_this_image * tokens_per_tile
+                if not bool(image_masks[batch_idx, image_idx].item()):
+                    start_offset = current_token_idx
+                    end_offset = min(
+                        current_token_idx + num_tokens_for_this_image,
+                        int(img_token_locations.shape[0]),
+                    )
+                    if start_offset < end_offset:
+                        masked_token_indices = img_token_locations[start_offset:end_offset]
+                        attention_mask[batch_idx, masked_token_indices] = 0
+                current_token_idx += num_tokens_for_this_image
 
         return input_embeds, attention_mask
 
     def get_fused_image_text_embedding_from_tensor_images(
         self,
-        image_tensors: list[Image.Image | torch.Tensor],
+        image_tensors: list[Image.Image | torch.Tensor] | list[list[Image.Image | torch.Tensor]],
         image_mask: torch.Tensor,
-        text_prompt: str,
+        text_prompt: str | list[str],
         return_cls_only: bool = True,
     ):
-        pixel_values, num_tiles_list = self._preprocess_images(image_tensors)
+        is_batched_input = bool(image_tensors) and isinstance(image_tensors[0], list)
+        if is_batched_input:
+            image_tensors_batch = image_tensors
+        else:
+            image_tensors_batch = [image_tensors]
+
+        batch_size = len(image_tensors_batch)
+        if batch_size == 0:
+            raise ValueError("InternVL3 expects at least one batch item.")
+
+        if isinstance(text_prompt, str):
+            text_prompts = [text_prompt] * batch_size
+        else:
+            text_prompts = text_prompt
+            if len(text_prompts) != batch_size:
+                raise ValueError(
+                    f"InternVL3 batch mismatch: num_text_prompts={len(text_prompts)} num_batches={batch_size}"
+                )
+
+        if image_mask.ndim == 1:
+            image_masks = image_mask.unsqueeze(0)
+        else:
+            image_masks = image_mask
+
+        if image_masks.shape[0] != batch_size:
+            raise ValueError(
+                f"InternVL3 batch mismatch: image_mask_batch={image_masks.shape[0]} num_batches={batch_size}"
+            )
+
+        for batch_idx, image_list in enumerate(image_tensors_batch):
+            if len(image_list) == 0:
+                raise ValueError(f"InternVL3 expects at least one image per batch item, got empty at batch_idx={batch_idx}")
+            if int(image_masks.shape[1]) != len(image_list):
+                raise ValueError(
+                    "InternVL3 mask/image count mismatch: "
+                    f"batch_idx={batch_idx}, num_masks={image_masks.shape[1]}, num_images={len(image_list)}"
+                )
+
+        image_masks = image_masks.to(device=self.device, dtype=torch.bool)
+        pixel_values, batch_num_tiles_list = self._preprocess_images(image_tensors_batch)
 
         if pixel_values.shape[0] == 0:
             logging.warning("InternVL3 received an empty image batch after preprocessing.")
+            hidden_size = self.model.language_model.get_input_embeddings().embedding_dim
+            vit_embeds = torch.empty(0, hidden_size, dtype=next(self.model.parameters()).dtype, device=self.device)
+        else:
+            vit_embeds = self.model.extract_feature(pixel_values)
 
-        vit_embeds = self.model.extract_feature(pixel_values)
-        fused_embeds = vit_embeds
-        prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
+        prompts = self._build_multimodal_prompt(batch_num_tiles_list, text_prompts)
         inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(
-            prompt, fused_embeds, image_mask, num_tiles_list
+            prompts,
+            vit_embeds,
+            image_masks,
+            batch_num_tiles_list,
         )
 
         outputs = self.model.language_model(

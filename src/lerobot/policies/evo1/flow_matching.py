@@ -46,7 +46,12 @@ class CategorySpecificLinear(nn.Module):
 
     def forward(self, x: torch.Tensor, category_id: torch.LongTensor):
         if self.num_categories <= 1:
+            if x.dtype != self.linear.weight.dtype:
+                x = x.to(dtype=self.linear.weight.dtype)
             return self.linear(x)
+
+        if x.dtype != self.weight.dtype:
+            x = x.to(dtype=self.weight.dtype)
 
         orig_shape = x.shape
         x_flat = x.reshape(-1, orig_shape[-1])
@@ -98,14 +103,14 @@ class MultiEmbodimentActionEncoder(nn.Module):
         x = action_seq.reshape(batch_size * horizon, action_dim)
 
         if category_id.dim() == 0:
-            cat_ids = category_id.repeat(horizon * batch_size)
+            cat_ids = category_id.expand(horizon * batch_size)
         else:
-            cat_ids = category_id.unsqueeze(1).repeat(1, horizon).reshape(batch_size * horizon)
+            cat_ids = category_id.unsqueeze(1).expand(batch_size, horizon).reshape(batch_size * horizon)
         out = self.activation(self.W1(x, cat_ids))
 
-        pos_enc = self.pos_encoding(horizon).to(out.device)
-        pos_enc = pos_enc.repeat(batch_size, 1, 1).reshape(batch_size * horizon, -1)
-        out = out + pos_enc
+        pos_enc = self.pos_encoding(horizon).to(device=out.device, dtype=out.dtype)
+        out = out.view(batch_size, horizon, -1) + pos_enc
+        out = out.view(batch_size * horizon, -1)
         out = self.activation(self.W2(out, cat_ids))
         out = self.W3(out, cat_ids)
         out = out.view(batch_size, horizon, self.embed_dim)
@@ -179,8 +184,8 @@ class FlowmatchingActionHead(nn.Module):
             )
         self.embed_dim = embed_dim
         self.horizon = horizon
-        self.per_action_dim = config.per_action_dim
-        self.action_dim = config.action_dim
+        self.per_action_dim = getattr(self.config, "per_action_dim", per_action_dim)
+        self.action_dim = getattr(self.config, "action_dim", action_dim)
 
         self.time_pos_enc = SinusoidalPositionalEncoding(embed_dim, max_len=1000)
 
@@ -237,7 +242,12 @@ class FlowmatchingActionHead(nn.Module):
         action_mask: torch.Tensor = None,
     ):
         if actions_gt is None:
-            return self.get_action(fused_tokens, state=state, embodiment_id=embodiment_id)
+            return self.get_action(
+                fused_tokens,
+                state=state,
+                embodiment_id=embodiment_id,
+                action_mask=action_mask,
+            )
         batch_size = fused_tokens.size(0)
         device = fused_tokens.device
 
@@ -256,7 +266,7 @@ class FlowmatchingActionHead(nn.Module):
         )
 
         time_index = (t * 1000).long()
-        time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0)
+        time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0).to(dtype=context_tokens.dtype)
 
         actions_gt_seq = actions_gt
 
@@ -271,11 +281,12 @@ class FlowmatchingActionHead(nn.Module):
 
         if self.horizon > 1:
             noise_seq = noise.view(batch_size, self.horizon, self.per_action_dim)
-
+            actions_gt_seq = actions_gt_seq.view(batch_size, self.horizon, self.per_action_dim)
         else:
-            noise_seq = noise.unsqueeze(1)
+            noise_seq = noise.view(batch_size, 1, self.per_action_dim)
+            actions_gt_seq = actions_gt_seq.view(batch_size, 1, self.per_action_dim)
 
-        t_broadcast = t.view(batch_size, 1, 1) if self.horizon > 1 else t.view(batch_size, 1)
+        t_broadcast = t.view(batch_size, 1, 1)
         action_intermediate_seq = (1 - t_broadcast) * noise_seq + t_broadcast * actions_gt_seq
 
         if self.horizon > 1 and self.action_encoder is not None:
@@ -330,7 +341,7 @@ class FlowmatchingActionHead(nn.Module):
         else:
             per_action_dim = action_dim_total
 
-        action = torch.rand(batch_size, action_dim_total, device=device) * 2 - 1
+        action = torch.rand(batch_size, action_dim_total, device=device, dtype=context_tokens.dtype) * 2 - 1
         if self.horizon > 1:
             action_seq = action.view(batch_size, self.horizon, per_action_dim)
 
@@ -341,19 +352,20 @@ class FlowmatchingActionHead(nn.Module):
         action_mask = action_mask.to(dtype=action_seq.dtype, device=action_seq.device)
         if action_mask.shape != action_seq.shape:
             raise ValueError(f"action_mask shape {action_mask.shape} != noise shape {action_seq.shape}")
+
+        flat_action_mask = action_mask.view(batch_size, -1)
         action_seq = action_seq * action_mask
 
         num_steps = int(getattr(self.config, "num_inference_timesteps", 32))
         dt = 1.0 / num_steps
-        for i in range(num_steps):
-            t = i / num_steps
+        t_vals = torch.arange(num_steps, device=device, dtype=torch.float32) / num_steps
+        time_indices = (t_vals * 1000).long()
+        all_time_embs = self.time_pos_enc(1000)[0, time_indices, :].to(device=device, dtype=context_tokens.dtype)
 
-            time_index = int(t * 1000)
-            time_emb = self.time_pos_enc(1000)[:, time_index, :].to(device).squeeze(0)
-            time_emb = time_emb.unsqueeze(0).repeat(batch_size, 1)
+        for i in range(num_steps):
+            time_emb = all_time_embs[i].unsqueeze(0).expand(batch_size, -1)
 
             if self.horizon > 1 and self.action_encoder is not None:
-                action_seq = action_seq * action_mask
                 action_tokens = self.action_encoder(action_seq, embodiment_id)
             else:
                 if self.single_action_proj is None:
@@ -378,7 +390,7 @@ class FlowmatchingActionHead(nn.Module):
             pred = self.mlp_head(x_pooled, embodiment_id)
 
             action = action + dt * pred
-            action = action * action_mask.view(batch_size, -1)
+            action = action * flat_action_mask
 
             if self.horizon > 1:
                 action_seq = action.view(batch_size, self.horizon, per_action_dim)
