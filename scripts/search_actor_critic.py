@@ -231,6 +231,7 @@ def run_experiment(
     config.rl_token.token_dim = 2048
     config.rl_token.enc_layers = 3
     config.rl_token.dec_layers = 3
+    config.rl_token.ff_dim = 4096
     config.rl_token.num_rl_tokens = 4
 
     config.actor.hidden_dim = exp.actor_hidden
