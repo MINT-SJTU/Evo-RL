@@ -278,6 +278,11 @@ def _save_rl_checkpoint(
     logger.info("RL checkpoint saved at step %d to %s", step, save_dir)
 
 
+def _batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+    """Move all tensors in a batch dict to the given device."""
+    return {k: v.to(device) for k, v in batch.items()}
+
+
 def offline_rl_loop(
     agent: RLTAgent,
     config: RLTConfig,
@@ -302,10 +307,11 @@ def offline_rl_loop(
     actor_interval = config.training.actor_update_interval
     batch_size = config.training.batch_size
     critic_update_count = 0
+    device = next(agent.parameters()).device
 
     agent.train()
     for step in range(1, off_cfg.num_gradient_steps + 1):
-        batch = replay_buffer.sample(batch_size)
+        batch = _batch_to_device(replay_buffer.sample(batch_size), device)
 
         c_loss = _do_critic_update(agent, batch, critic_optimizer, gamma, C)
         metrics.critic_losses.append(c_loss)
@@ -323,7 +329,7 @@ def offline_rl_loop(
             logger.info("Step %d/%d  critic=%.4f  actor=%s", step, off_cfg.num_gradient_steps, c_loss, a_str)
 
         if val_buffer is not None and step % off_cfg.eval_every == 0:
-            val_batch = val_buffer.sample(batch_size)
+            val_batch = _batch_to_device(val_buffer.sample(batch_size), device)
             with torch.no_grad():
                 val_c = critic_loss(agent.critic, agent.target_critic, agent.actor, val_batch, gamma, C)
             logger.info("Step %d  val_critic=%.4f", step, val_c.item())
