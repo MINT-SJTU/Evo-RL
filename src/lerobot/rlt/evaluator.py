@@ -5,10 +5,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 
 from lerobot.rlt.agent import RLTAgent
 from lerobot.rlt.collector import Environment, execute_chunk
 from lerobot.rlt.config import RLTConfig
+from lerobot.rlt.interfaces import EXEC_CHUNK_FLAT, REF_CHUNK_FLAT, STATE_VEC
+from lerobot.rlt.losses import critic_loss
+from lerobot.rlt.replay_buffer import ReplayBuffer
 from lerobot.rlt.utils import flatten_chunk
 
 
@@ -92,3 +96,66 @@ def evaluate(
     metrics.mean_ref_deviation = sum(ref_deviations) / max(len(ref_deviations), 1)
 
     return metrics
+
+
+@dataclass
+class OfflineEvalMetrics:
+    """Evaluation metrics for offline RL (no environment rollouts)."""
+
+    expert_action_mse: float = 0.0  # ||actor(state, ref) - expert||^2
+    ref_action_mse: float = 0.0  # ||actor(state, ref) - ref||^2
+    mean_q_policy: float = 0.0  # Q(state, actor_action)
+    mean_q_expert: float = 0.0  # Q(state, expert_action)
+    q_gap: float = 0.0  # mean_q_policy - mean_q_expert (should be <= 0)
+    mean_critic_td_error: float = 0.0
+
+
+def evaluate_offline(
+    agent: RLTAgent,
+    val_buffer: ReplayBuffer,
+    config: RLTConfig,
+    num_batches: int = 10,
+) -> OfflineEvalMetrics:
+    """Evaluate agent on a held-out replay buffer without environment rollouts.
+
+    Computes action quality metrics (MSE vs expert/reference), Q-value
+    diagnostics, and critic TD error on validation data.
+    """
+    agent.eval()
+
+    total_expert_mse = 0.0
+    total_ref_mse = 0.0
+    total_q_policy = 0.0
+    total_q_expert = 0.0
+    total_td_error = 0.0
+
+    for _ in range(num_batches):
+        batch = val_buffer.sample(config.training.batch_size)
+        state_vec = batch[STATE_VEC]
+        exec_chunk_flat = batch[EXEC_CHUNK_FLAT]
+        ref_chunk_flat = batch[REF_CHUNK_FLAT]
+
+        with torch.no_grad():
+            mu, _ = agent.actor.forward(state_vec, ref_chunk_flat)
+
+            total_expert_mse += F.mse_loss(mu, exec_chunk_flat).item()
+            total_ref_mse += F.mse_loss(mu, ref_chunk_flat).item()
+
+            total_q_policy += agent.critic.min_q(state_vec, mu).mean().item()
+            total_q_expert += agent.critic.min_q(state_vec, exec_chunk_flat).mean().item()
+
+            td_err = critic_loss(
+                agent.critic, agent.target_critic, agent.actor,
+                batch, config.training.gamma, config.chunk_length,
+            )
+            total_td_error += td_err.item()
+
+    n = max(num_batches, 1)
+    return OfflineEvalMetrics(
+        expert_action_mse=total_expert_mse / n,
+        ref_action_mse=total_ref_mse / n,
+        mean_q_policy=total_q_policy / n,
+        mean_q_expert=total_q_expert / n,
+        q_gap=(total_q_policy - total_q_expert) / n,
+        mean_critic_td_error=total_td_error / n,
+    )

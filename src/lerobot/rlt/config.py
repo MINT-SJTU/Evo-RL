@@ -70,6 +70,24 @@ class CollectorConfig:
 
 
 @dataclass
+class OfflineRLConfig:
+    """Configuration for offline RL training on demo data."""
+
+    num_gradient_steps: int = 100_000
+    eval_every: int = 5000
+    save_every: int = 10000
+    log_every: int = 100
+    reward_mode: str = "hybrid"
+    success_bonus: float = 10.0
+    progress_scale: float = 1.0
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    frame_stride: int = 1
+    cache_dir: str | None = None
+    demo_adapt_checkpoint: str | None = None
+
+
+@dataclass
 class RLTConfig:
     seed: int = 0
     control_hz: int = 50
@@ -86,6 +104,7 @@ class RLTConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
+    offline_rl: OfflineRLConfig = field(default_factory=OfflineRLConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> RLTConfig:
@@ -103,6 +122,7 @@ class RLTConfig:
             ("training", TrainingConfig),
             ("replay", ReplayConfig),
             ("collector", CollectorConfig),
+            ("offline_rl", OfflineRLConfig),
         ]:
             if key in raw:
                 sub_configs[key] = subcls(**raw.pop(key))

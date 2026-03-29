@@ -10,7 +10,7 @@ from lerobot.rlt.config import RLTConfig
 from lerobot.rlt.critic import TwinCritic
 from lerobot.rlt.interfaces import Observation, VLAOutput
 from lerobot.rlt.rl_token import RLTokenModule
-from lerobot.rlt.utils import flatten_chunk, unflatten_chunk
+from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
 from lerobot.rlt.vla_adapter import VLAAdapter
 
 
@@ -66,7 +66,7 @@ class RLTAgent(nn.Module):
         """Lazily compute subsample indices for H -> C."""
         C = self.config.chunk_length
         if self._subsample_indices is None or self._subsample_indices.shape[0] != C:
-            self._subsample_indices = torch.linspace(0, H - 1, C).long()
+            self._subsample_indices = subsample_indices(H, C)
         return self._subsample_indices
 
     def _extract_state_and_ref(
@@ -83,6 +83,21 @@ class RLTAgent(nn.Module):
         indices = self._get_subsample_indices(vla_out.sampled_action_chunk.shape[1])
         ref_chunk = vla_out.sampled_action_chunk[:, indices, :]
         return state_vec, ref_chunk
+
+    def encode_observation(
+        self, obs: Observation, vla_out: VLAOutput | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Public interface for extracting RL state and reference chunk.
+
+        Used by offline dataset building to precompute state_vec and ref_chunk.
+
+        Returns:
+            state_vec: (B, state_dim)
+            ref_chunk: (B, C, action_dim)
+        """
+        if vla_out is None:
+            vla_out = self.vla.forward_vla(obs)
+        return self._extract_state_and_ref(obs, vla_out)
 
     def get_rl_state(self, obs: Observation) -> torch.Tensor:
         """Compute RL state: VLA forward -> RL token encode -> concat proprio.
@@ -106,6 +121,7 @@ class RLTAgent(nn.Module):
 
     def select_action(
         self, obs: Observation, vla_out: VLAOutput | None = None,
+        deterministic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full action selection pipeline with single VLA forward.
 
@@ -120,6 +136,8 @@ class RLTAgent(nn.Module):
         state_vec, ref_chunk = self._extract_state_and_ref(obs, vla_out)
         ref_flat = flatten_chunk(ref_chunk)
         action_flat, mu_flat = self.actor.sample(state_vec, ref_flat)
+        if deterministic:
+            action_flat = mu_flat
         C = self.config.chunk_length
         action_chunk = unflatten_chunk(action_flat, C)
         mu_chunk = unflatten_chunk(mu_flat, C)
