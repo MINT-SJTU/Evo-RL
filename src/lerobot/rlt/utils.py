@@ -34,11 +34,32 @@ def compute_discount_vector(gamma: float, length: int, device: torch.device | No
     return gamma ** torch.arange(length, device=device, dtype=torch.float32)
 
 
-def build_mlp(in_dim: int, hidden_dim: int, out_dim: int, num_layers: int) -> nn.Sequential:
-    """Build a simple MLP: [Linear+ReLU]*num_layers + Linear."""
+def _get_activation(name: str) -> nn.Module:
+    """Return activation module by name."""
+    activations = {
+        "relu": nn.ReLU,
+        "gelu": nn.GELU,
+        "silu": nn.SiLU,
+        "tanh": nn.Tanh,
+    }
+    return activations[name]()
+
+
+def build_mlp(
+    in_dim: int,
+    hidden_dim: int,
+    out_dim: int,
+    num_layers: int,
+    activation: str = "relu",
+    layer_norm: bool = False,
+) -> nn.Sequential:
+    """Build an MLP with configurable activation and optional LayerNorm."""
     layers: list[nn.Module] = []
     for _ in range(num_layers):
-        layers.extend([nn.Linear(in_dim, hidden_dim), nn.ReLU()])
+        layers.append(nn.Linear(in_dim, hidden_dim))
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(_get_activation(activation))
         in_dim = hidden_dim
     layers.append(nn.Linear(hidden_dim, out_dim))
     return nn.Sequential(*layers)

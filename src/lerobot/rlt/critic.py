@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from lerobot.rlt.actor import ResidualMLP
 from lerobot.rlt.utils import build_mlp
 
 
@@ -15,9 +16,21 @@ class ChunkCritic(nn.Module):
         chunk_dim: int,
         hidden_dim: int = 256,
         num_layers: int = 2,
+        activation: str = "relu",
+        layer_norm: bool = False,
+        residual: bool = False,
     ):
         super().__init__()
-        self.net = build_mlp(state_dim + chunk_dim, hidden_dim, 1, num_layers)
+        if residual:
+            self.net = ResidualMLP(
+                state_dim + chunk_dim, hidden_dim, 1, num_layers,
+                activation=activation, layer_norm=layer_norm,
+            )
+        else:
+            self.net = build_mlp(
+                state_dim + chunk_dim, hidden_dim, 1, num_layers,
+                activation=activation, layer_norm=layer_norm,
+            )
 
     def forward(self, state_vec: torch.Tensor, action_flat: torch.Tensor) -> torch.Tensor:
         """Returns Q-value (B, 1)."""
@@ -33,10 +46,19 @@ class TwinCritic(nn.Module):
         chunk_dim: int,
         hidden_dim: int = 256,
         num_layers: int = 2,
+        activation: str = "relu",
+        layer_norm: bool = False,
+        residual: bool = False,
     ):
         super().__init__()
-        self.q1 = ChunkCritic(state_dim, chunk_dim, hidden_dim, num_layers)
-        self.q2 = ChunkCritic(state_dim, chunk_dim, hidden_dim, num_layers)
+        self.q1 = ChunkCritic(
+            state_dim, chunk_dim, hidden_dim, num_layers,
+            activation=activation, layer_norm=layer_norm, residual=residual,
+        )
+        self.q2 = ChunkCritic(
+            state_dim, chunk_dim, hidden_dim, num_layers,
+            activation=activation, layer_norm=layer_norm, residual=residual,
+        )
 
     def forward(
         self, state_vec: torch.Tensor, action_flat: torch.Tensor

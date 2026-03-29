@@ -27,6 +27,9 @@ class ActorConfig:
     fixed_std: float = 0.05
     lr: float = 3e-4
     ref_dropout_p: float = 0.5
+    activation: str = "relu"
+    layer_norm: bool = False
+    residual: bool = False
 
 
 @dataclass
@@ -34,6 +37,9 @@ class CriticConfig:
     hidden_dim: int = 256
     num_layers: int = 2
     lr: float = 3e-4
+    activation: str = "relu"
+    layer_norm: bool = False
+    residual: bool = False
 
 
 @dataclass

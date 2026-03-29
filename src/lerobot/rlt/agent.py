@@ -47,6 +47,9 @@ class RLTAgent(nn.Module):
             num_layers=config.actor.num_layers,
             fixed_std=config.actor.fixed_std,
             ref_dropout_p=config.actor.ref_dropout_p,
+            activation=config.actor.activation,
+            layer_norm=config.actor.layer_norm,
+            residual=config.actor.residual,
         )
 
         self.critic = TwinCritic(
@@ -54,6 +57,9 @@ class RLTAgent(nn.Module):
             chunk_dim=chunk_dim,
             hidden_dim=config.critic.hidden_dim,
             num_layers=config.critic.num_layers,
+            activation=config.critic.activation,
+            layer_norm=config.critic.layer_norm,
+            residual=config.critic.residual,
         )
 
         self.target_critic = copy.deepcopy(self.critic)
