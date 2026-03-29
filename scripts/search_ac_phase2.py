@@ -57,19 +57,147 @@ class ExperimentConfig:
 
 
 def build_phase2_experiments() -> list[ExperimentConfig]:
-    """Combine best factors from Phase 1."""
+    """Combine best factors from Phase 1.
+
+    Phase 1 rankings by ref_mse:
+    1. residual (3L): 0.0084
+    2. residual_ln (3L): 0.0086
+    3. layernorm: 0.0143
+    4. hidden_512: 0.0228
+    5. act_silu: 0.0254
+    6. beta_0.1: 0.0285
+
+    Priority: residual > layernorm > wide > silu > low beta
+    """
     experiments = []
 
-    # === Group A: SiLU + low beta (core combo) ===
-    for beta in [0.05, 0.1, 0.15, 0.2]:
+    # === Priority 1: Residual + low beta (highest impact combo) ===
+    for beta in [0.05, 0.1, 0.15, 0.2, 0.3, 0.5]:
         experiments.append(ExperimentConfig(
-            name=f"silu_b{beta}",
+            name=f"res_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=beta,
+        ))
+
+    # === Priority 2: Residual + SiLU + low beta ===
+    for beta in [0.05, 0.1, 0.2]:
+        experiments.append(ExperimentConfig(
+            name=f"res_silu_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
             actor_activation="silu", critic_activation="silu",
             beta=beta,
         ))
 
-    # === Group B: SiLU + wide + low beta ===
-    for beta in [0.05, 0.1, 0.15]:
+    # === Priority 3: Residual + wide + low beta ===
+    for beta in [0.05, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_w512_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_hidden=512, critic_hidden=512,
+            actor_layers=3, critic_layers=3,
+            beta=beta,
+        ))
+
+    # === Priority 4: Residual + wide + SiLU + low beta ===
+    for beta in [0.05, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_w512_silu_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_hidden=512, critic_hidden=512,
+            actor_layers=3, critic_layers=3,
+            actor_activation="silu", critic_activation="silu",
+            beta=beta,
+        ))
+
+    # === Priority 5: Residual + LN + SiLU + wide + low beta ===
+    for beta in [0.05, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_ln_silu_w512_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_layer_norm=True, critic_layer_norm=True,
+            actor_hidden=512, critic_hidden=512,
+            actor_layers=3, critic_layers=3,
+            actor_activation="silu", critic_activation="silu",
+            beta=beta,
+        ))
+
+    # === Priority 6: Residual + 1024 wide + low beta ===
+    for beta in [0.05, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_w1024_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_hidden=1024, critic_hidden=1024,
+            actor_layers=3, critic_layers=3,
+            beta=beta,
+        ))
+
+    # === Priority 7: Residual + 4 layers + low beta ===
+    for beta in [0.05, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_l4_b{beta}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=4, critic_layers=4,
+            beta=beta,
+        ))
+
+    # === Priority 8: LR sweep on best residual config ===
+    for lr in [1e-4, 5e-4, 1e-3]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_lr{lr}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, actor_lr=lr, critic_lr=lr,
+        ))
+
+    # === Priority 9: Tau sweep on best residual config ===
+    for tau in [0.001, 0.01, 0.02]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_tau{tau}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, tau=tau,
+        ))
+
+    # === Priority 10: Ref dropout on residual ===
+    for p in [0.0, 0.3, 0.7]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_rd{p}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, ref_dropout_p=p,
+        ))
+
+    # === Priority 11: Fixed std on residual ===
+    for std in [0.01, 0.02, 0.1]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_std{std}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, fixed_std=std,
+        ))
+
+    # === Priority 12: Actor update interval on residual ===
+    for interval in [1, 4]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_ai{interval}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, actor_update_interval=interval,
+        ))
+
+    # === Priority 13: Batch size on residual ===
+    for bs in [128, 512, 1024]:
+        experiments.append(ExperimentConfig(
+            name=f"res_b0.1_bs{bs}",
+            actor_residual=True, critic_residual=True,
+            actor_layers=3, critic_layers=3,
+            beta=0.1, batch_size=bs,
+        ))
+
+    # === Priority 14: SiLU variants without residual (for comparison) ===
+    for beta in [0.05, 0.1]:
         experiments.append(ExperimentConfig(
             name=f"silu_w512_b{beta}",
             actor_hidden=512, critic_hidden=512,
@@ -77,109 +205,7 @@ def build_phase2_experiments() -> list[ExperimentConfig]:
             beta=beta,
         ))
 
-    # === Group C: SiLU + wide + 3 layers + low beta ===
-    for beta in [0.05, 0.1]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_l3_b{beta}",
-            actor_hidden=512, actor_layers=3,
-            critic_hidden=512, critic_layers=3,
-            actor_activation="silu", critic_activation="silu",
-            beta=beta,
-        ))
-
-    # === Group D: SiLU + wide + LayerNorm + low beta ===
-    for beta in [0.05, 0.1]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_ln_b{beta}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            actor_layer_norm=True, critic_layer_norm=True,
-            beta=beta,
-        ))
-
-    # === Group E: SiLU + wide + Residual + LayerNorm + low beta ===
-    for beta in [0.05, 0.1]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_res_ln_b{beta}",
-            actor_hidden=512, actor_layers=3,
-            critic_hidden=512, critic_layers=3,
-            actor_activation="silu", critic_activation="silu",
-            actor_layer_norm=True, critic_layer_norm=True,
-            actor_residual=True, critic_residual=True,
-            beta=beta,
-        ))
-
-    # === Group F: 1024 wide + SiLU + low beta ===
-    for beta in [0.05, 0.1]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w1024_b{beta}",
-            actor_hidden=1024, critic_hidden=1024,
-            actor_activation="silu", critic_activation="silu",
-            beta=beta,
-        ))
-
-    # === Group G: Asymmetric (wide actor, moderate critic) ===
-    experiments.append(ExperimentConfig(
-        name="silu_a1024_c512_b0.1",
-        actor_hidden=1024, actor_layers=3,
-        critic_hidden=512, critic_layers=2,
-        actor_activation="silu", critic_activation="silu",
-        beta=0.1,
-    ))
-    experiments.append(ExperimentConfig(
-        name="silu_a512_c1024_b0.1",
-        actor_hidden=512, actor_layers=2,
-        critic_hidden=1024, critic_layers=3,
-        actor_activation="silu", critic_activation="silu",
-        beta=0.1,
-    ))
-
-    # === Group H: Learning rate variations on best arch ===
-    for lr in [1e-4, 5e-4, 1e-3]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_b0.1_lr{lr}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            beta=0.1, actor_lr=lr, critic_lr=lr,
-        ))
-
-    # === Group I: Ref dropout on best arch ===
-    for p in [0.0, 0.3, 0.7]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_b0.1_rd{p}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            beta=0.1, ref_dropout_p=p,
-        ))
-
-    # === Group J: Actor update interval on best arch ===
-    for interval in [1, 4]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_b0.1_ai{interval}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            beta=0.1, actor_update_interval=interval,
-        ))
-
-    # === Group K: Tau sweep on best arch ===
-    for tau in [0.001, 0.01]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_b0.1_tau{tau}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            beta=0.1, tau=tau,
-        ))
-
-    # === Group L: Fixed std sweep on best arch ===
-    for std in [0.01, 0.02, 0.1]:
-        experiments.append(ExperimentConfig(
-            name=f"silu_w512_b0.1_std{std}",
-            actor_hidden=512, critic_hidden=512,
-            actor_activation="silu", critic_activation="silu",
-            beta=0.1, fixed_std=std,
-        ))
-
-    # === Group M: Full kitchen sink (best everything) ===
+    # === Priority 15: Full best combo ===
     experiments.append(ExperimentConfig(
         name="best_combo_v1",
         actor_hidden=512, actor_layers=3,
@@ -187,8 +213,23 @@ def build_phase2_experiments() -> list[ExperimentConfig]:
         actor_activation="silu", critic_activation="silu",
         actor_layer_norm=True, critic_layer_norm=True,
         actor_residual=True, critic_residual=True,
-        beta=0.1, actor_lr=3e-4, critic_lr=3e-4,
-        ref_dropout_p=0.5, tau=0.005,
+        beta=0.1, tau=0.005,
+    ))
+
+    # === Priority 16: Asymmetric (wide actor, moderate critic) ===
+    experiments.append(ExperimentConfig(
+        name="res_a512_c256_b0.1",
+        actor_hidden=512, actor_layers=3,
+        critic_hidden=256, critic_layers=3,
+        actor_residual=True, critic_residual=True,
+        beta=0.1,
+    ))
+    experiments.append(ExperimentConfig(
+        name="res_a256_c512_b0.1",
+        actor_hidden=256, actor_layers=3,
+        critic_hidden=512, critic_layers=3,
+        actor_residual=True, critic_residual=True,
+        beta=0.1,
     ))
 
     return experiments
