@@ -28,6 +28,7 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 from ..robot import Robot
 from .arx5_client import ARX5ArmClient
 from .config_arx5_follower import ARX5FollowerConfig
+from .arx5_runtime import Arx5Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ class ARX5Follower(Robot):
         return
 
     @check_if_already_connected
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, *, reuse_arm_client: ARX5ArmClient | None = None) -> None:
         del calibrate
         connected_cameras = []
         try:
@@ -104,13 +105,17 @@ class ARX5Follower(Robot):
                 connected_cameras.append(camera)
                 logger.info("Camera '%s' connected.", name)
 
-            logger.info("Connecting ARX5 arm client (stub=%s).", self.config.use_stub)
-            self._arm_client = ARX5ArmClient(
-                can_port=self.config.port,
-                arm_type=self.config.arm_type,
-                use_stub=self.config.use_stub,
-                recorded_pose_path=self.recorded_pose_path,
-            )
+            if reuse_arm_client is not None:
+                logger.info("Reusing existing ARX5 arm client (infer↔VR handoff).")
+                self._arm_client = reuse_arm_client
+            else:
+                logger.info("Connecting ARX5 arm client (stub=%s).", self.config.use_stub)
+                self._arm_client = ARX5ArmClient(
+                    can_port=self.config.port,
+                    arm_type=self.config.arm_type,
+                    use_stub=self.config.use_stub,
+                    recorded_pose_path=self.recorded_pose_path,
+                )
             if self.config.startup_sleep_s > 0:
                 time.sleep(self.config.startup_sleep_s)
             self._last_joint = np.asarray(self._arm_client.get_state(), dtype=np.float64)
@@ -204,10 +209,27 @@ class ARX5Follower(Robot):
         return self._state_vector_to_dict(joint)
 
     @check_if_not_connected
-    def disconnect(self) -> None:
+    def disconnect(self, *, protect: bool | None = None, release_arm_to: Arx5Runtime | None = None) -> None:
+        """
+        Disconnect cameras and arm client.
+
+        Args:
+            protect: Override whether to call protect_mode before disconnecting.
+                - None: follow config.protect_on_disconnect (default behavior)
+                - True: force protect_mode
+                - False: skip protect_mode (useful for infer->VR CAN handoff)
+            release_arm_to: If set, move the arm client to this :class:`~.arx5_runtime.Arx5Runtime`
+                instead of dropping it (same CAN session for VR). ``protect_mode`` is not applied
+                to the arm in this path so torque is not dropped before handoff.
+        """
         try:
-            if self.config.protect_on_disconnect and self._arm_client is not None:
-                self._arm_client.protect_mode()
+            if release_arm_to is not None:
+                if self._arm_client is not None:
+                    release_arm_to.bind_client(self._arm_client)
+            else:
+                do_protect = self.config.protect_on_disconnect if protect is None else protect
+                if do_protect and self._arm_client is not None:
+                    self._arm_client.protect_mode()
         finally:
             for camera in self.cameras.values():
                 if camera.is_connected:
