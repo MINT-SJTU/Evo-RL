@@ -63,6 +63,10 @@ def build_cache(args) -> None:
     config.proprio_dim = 12
     config.vla_horizon = 50
     config.chunk_length = 10
+    config.rl_token.ff_dim = 4096
+    config.rl_token.enc_layers = 3
+    config.rl_token.dec_layers = 3
+    config.rl_token.num_rl_tokens = 4
     config.cameras = ["left_wrist", "right_wrist", "right_front"]
 
     logger.info("Loading SFT pi0.5 from %s", args.model_path)
