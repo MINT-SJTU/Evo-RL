@@ -27,14 +27,10 @@ from lerobot.rlt.deploy_config import DeployConfig
 
 log = logging.getLogger(__name__)
 
-# Default 12-DOF robot proprio and action key mapping
-DEFAULT_PROPRIO_KEYS = [
-    "observation.state.left_arm_pos",
-    "observation.state.right_arm_pos",
-]
-DEFAULT_ACTION_KEYS = [
-    f"action.joint_{i}" for i in range(12)
-]
+# SO101 bilateral: 6 joints per arm × 2 = 12 DOF
+_JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+DEFAULT_PROPRIO_KEYS = [f"left_{j}.pos" for j in _JOINT_NAMES] + [f"right_{j}.pos" for j in _JOINT_NAMES]
+DEFAULT_ACTION_KEYS = DEFAULT_PROPRIO_KEYS  # same joint names for action
 DEFAULT_CAMERA_KEYS = ["left_wrist", "right_wrist", "right_front"]
 
 
@@ -43,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vla-model", type=str, default="lerobot/pi05_base")
     p.add_argument("--rl-token-ckpt", type=str, default="")
     p.add_argument("--ac-ckpt", type=str, default="")
-    p.add_argument("--task", type=str, default="pick up the object")
+    p.add_argument("--task", type=str, default="Insert the copper screw into the black sleeve.")
     p.add_argument("--phase-mode", type=str, default="always_rl",
                     choices=["always_rl", "always_vla", "manual"])
     p.add_argument("--device", type=str, default="cuda")
@@ -55,6 +51,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=3000,
                     help="Max steps per episode before auto-reset")
     p.add_argument("--log-level", type=str, default="INFO")
+    # Robot hardware
+    p.add_argument("--left-port", type=str, default="/dev/ttyACM3")
+    p.add_argument("--right-port", type=str, default="/dev/ttyACM2")
+    p.add_argument("--left-cam", type=str,
+                    default="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:3:1.0-video-index0")
+    p.add_argument("--right-cam", type=str,
+                    default="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0")
+    p.add_argument("--front-cam-serial", type=str, default="152122079296",
+                    help="Intel RealSense serial number for front camera")
     return p.parse_args()
 
 
@@ -107,8 +112,10 @@ def run_control_loop(policy, robot, args: argparse.Namespace) -> None:
         action = policy.select_action(obs_dict)
         action_time_ms = (time.monotonic() - t_action_start) * 1000
 
-        # Send action to robot
-        robot.send_action(action.squeeze(0).cpu())
+        # Convert tensor to named action dict and send
+        from lerobot.rlt.obs_bridge import rlt_action_to_robot_action
+        robot_action = rlt_action_to_robot_action(action, DEFAULT_ACTION_KEYS)
+        robot.send_action(robot_action)
 
         step += 1
         total_steps += 1
@@ -163,13 +170,42 @@ def main() -> None:
     log.info("Building RLT deploy policy...")
     policy = load_rlt_deploy_policy(config)
 
-    # TODO: Wire up real robot initialization
-    # from lerobot.robots import make_robot
-    # robot = make_robot("aloha")
-    raise NotImplementedError(
-        "Robot initialization not yet wired. Replace this with "
-        "BiPiperFollower or the appropriate robot class for your setup."
+    from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
+    from lerobot.robots.so_follower import SOFollowerConfig
+
+    left_cfg = SOFollowerConfig(
+        port=args.left_port,
+        id="left",
+        cameras={
+            "wrist": {
+                "type": "opencv",
+                "index_or_path": args.left_cam,
+                "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG",
+            },
+        },
     )
+    right_cfg = SOFollowerConfig(
+        port=args.right_port,
+        id="right",
+        cameras={
+            "wrist": {
+                "type": "opencv",
+                "index_or_path": args.right_cam,
+                "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG",
+            },
+            "front": {
+                "type": "intelrealsense",
+                "serial_number_or_name": args.front_cam_serial,
+                "width": 640, "height": 480, "fps": 30, "warmup_s": 2,
+            },
+        },
+    )
+    robot_cfg = BiSOFollowerConfig(
+        left_arm_config=left_cfg,
+        right_arm_config=right_cfg,
+        id="bi_so101_follower",
+    )
+    robot = BiSOFollower(config=robot_cfg)
 
     log.info("Connecting to robot...")
     robot.connect()
