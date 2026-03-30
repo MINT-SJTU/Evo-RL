@@ -9,6 +9,7 @@ Branch `shuyuan/rlt` implements the **RLT (RL Token)** pipeline from the paper *
 - Final merged dev plan: `docs/rlt_final_dev_plan.md`
 - Implementation dev plan: `dev_plan.md` (repo root)
 - Full session log: `docs/session_log_rlt_implementation.md`
+- Paper vs implementation comparison: `docs/实现对比.md` (gitignored)
 
 ## Architecture (actual, post-iteration)
 
@@ -55,7 +56,7 @@ Full offline RL infrastructure implemented (24 parallel sub-agents: Claude + Cod
 - `scripts/search_ac_phase2.py`: Phase 2 architecture search (combinations)
 - `scripts/search_ac_phase3.py`: Phase 3 fine-tuning around winner
 
-### Actor-Critic Architecture Search: COMPLETE (v2, 30x improvement)
+### Actor-Critic Architecture Search: COMPLETE (v2, 42x improvement)
 
 3-phase search across 99 experiments on RTX 5090:
 - **Phase 1** (32 experiments, 50K steps): isolated individual factors
@@ -72,9 +73,32 @@ Full offline RL infrastructure implemented (24 parallel sub-agents: Claude + Cod
 Trained RL tokens with the screw-task SFT model (`pi05_evorl_screw_147_sft`).
 SFT final loss: 0.026 vs base model: 0.015. **Base model representations are more compressible.**
 
+### SFT Model Offline RL Cache + AC: COMPLETE
+
+Built SFT offline cache (101K train + 10K val transitions, 7743s) and trained best AC architecture on it.
+SFT AC result: ref_mse=0.043 (vs base model 0.011). Base model AC is 4x better.
+
+### Real Robot Deployment Framework: COMPLETE (code ready, blocked on GPU)
+
+Deployment code implemented and tested:
+- `obs_bridge.py`: robot observation dict ↔ RLT Observation conversion
+- `deploy_config.py`: deployment configuration (checkpoint paths, camera/joint mapping, phase mode)
+- `deploy.py`: `RLTDeployPolicy` with internal action queue (chunk→single-step), phase controller, timing stats
+- `scripts/deploy_rlt.py`: standalone deployment script with SO101 robot wiring, keyboard controls (q/r/v/c)
+
+**Deployment tested on bozhao 4060 machine**: pi0.5 (bf16 ~7GB) exceeds RTX 4060 8GB VRAM. Needs ≥16GB GPU.
+RL Token encoder + Actor only need ~403MB; the bottleneck is pi0.5 VLA.
+
+### HuggingFace Upload: COMPLETE
+
+All checkpoints uploaded to `Shiki42/rlt_pi0.5_screw`:
+- RL Token: v8_base (loss=0.015), v1_sft (loss=0.026)
+- Actor-Critic: v2_base (ref_mse=0.011), v2_sft (ref_mse=0.043), v1_baseline (ref_mse=0.334)
+- Architecture search results: Phase 1/2/3 JSON files
+
 ### Online RL Training: NOT STARTED
 
-Blocked by lack of real robot / simulation environment. `online_rl_loop()` is implemented and tested with DummyEnvironment.
+Blocked by lack of real robot with sufficient GPU. `online_rl_loop()` is implemented and tested with DummyEnvironment.
 
 ## Models & Checkpoints
 
@@ -87,19 +111,20 @@ Blocked by lack of real robot / simulation environment. `online_rl_loop()` is im
 
 ### RL Token Checkpoint (demo adaptation)
 
-| Checkpoint | Path on Coder Server | Description |
-|-----------|---------------------|-------------|
-| **v8 (best, base model)** | `outputs/rlt_demo_adapt_v8/demo_adapt_checkpoint.pt` | pi0.5 base, pool=64, 4 RL tokens, 3+3L, 50K steps, loss=0.015 |
-| SFT model | `outputs/rlt_demo_adapt_sft_v1/demo_adapt_checkpoint.pt` | pi0.5 SFT, same config, 50K steps, loss=0.026 |
+| Checkpoint | Path on Coder Server | HuggingFace | Description |
+|-----------|---------------------|-------------|-------------|
+| **v8 (best, base model)** | `outputs/rlt_demo_adapt_v8/demo_adapt_checkpoint.pt` | `rl_token/v8_base/` | pi0.5 base, pool=64, 4 RL tokens, 3+3L, 50K steps, loss=0.015 |
+| SFT model | `outputs/rlt_demo_adapt_sft_v1/demo_adapt_checkpoint.pt` | `rl_token/v1_sft/` | pi0.5 SFT, same config, 50K steps, loss=0.026 |
 
 Contains: `rl_token_state_dict`, `step`, `losses`. Config: `src/lerobot/rlt/configs/pi05_rlt.yaml`.
 
 ### Offline RL Checkpoint
 
-| Checkpoint | Path on Coder Server | Description |
-|-----------|---------------------|-------------|
-| **v2 (best)** | `outputs/ac_best_v2/rl_checkpoint_best.pt` | ResidualMLP 3L/256h, β=0.3, 50K steps, ref_mse=0.011 |
-| v1 (baseline) | `outputs/rlt_offline_rl_v1/rl_checkpoint.pt` | Plain MLP 2L/256h, β=1.0, 100K steps, ref_mse=0.334 |
+| Checkpoint | Path on Coder Server | HuggingFace | Description |
+|-----------|---------------------|-------------|-------------|
+| **v2 base (best)** | `outputs/ac_best_v2/rl_checkpoint_best.pt` | `actor_critic/v2_base/` | ResidualMLP 3L/256h, β=0.3, 50K steps, ref_mse=0.011 |
+| v2 SFT | `outputs/ac_best_sft/rl_checkpoint_best.pt` | `actor_critic/v2_sft/` | Same arch, SFT RL tokens, ref_mse=0.043 |
+| v1 (baseline) | `outputs/rlt_offline_rl_v1/rl_checkpoint.pt` | `actor_critic/v1_baseline/` | Plain MLP 2L/256h, β=1.0, 100K steps, ref_mse=0.334 |
 
 v2 contains: `actor_state_dict`, `critic_state_dict`, `target_critic_state_dict`, `rl_token_state_dict`, `config`, `metrics`.
 
@@ -115,11 +140,10 @@ v2 contains: `actor_state_dict`, `critic_state_dict`, `target_critic_state_dict`
 
 | Cache | Path on Coder Server | Description |
 |-------|---------------------|-------------|
-| **transitions_train.pt** | `outputs/rlt_offline_cache/transitions_train.pt` (1.1GB) | 101,438 transitions from 117 episodes |
-| **transitions_val.pt** | `outputs/rlt_offline_cache/transitions_val.pt` (110MB) | 10,391 transitions from 14 episodes |
-| **transitions_test.pt** | `outputs/rlt_offline_cache/transitions_test.pt` (144MB) | 13,644 transitions from 16 episodes |
+| **Base model cache** | `outputs/rlt_offline_cache/` (1.4GB) | 101K train + 10K val + 14K test transitions |
+| **SFT model cache** | `outputs/rlt_offline_cache_sft/` (1.4GB) | Same splits, built with SFT VLA + SFT RL token |
 
-Built from: pi0.5 base + v8 RL token checkpoint, reward_mode=hybrid, token_pool_size=64. Build time: 121 min.
+Built from: pi0.5 + RL token checkpoint, reward_mode=hybrid, token_pool_size=64.
 
 ## Training Results
 
@@ -132,25 +156,15 @@ Built from: pi0.5 base + v8 RL token checkpoint, reward_mode=hybrid, token_pool_
 | v3 | 3+3L, +checkpoint +resume | 20000 | 0.29 | Fixed memory leak, stable |
 | v7 | 2+2L, 1 tok, 50k steps | 50000 | 0.275 | 968:1 compression limit |
 | **v8** | **pool=64, 4 tok, 3+3L** | **50000** | **0.015** | **Token pooling breakthrough** |
-
-### Offline RL v1 (baseline, MLP)
-
-| Metric | Start | End | Notes |
-|--------|-------|-----|-------|
-| Actor loss | 1.2563 | 0.7066 | Plain MLP 2L/256h, β=1.0 |
-| ref_mse | — | 0.334 | Actor close to VLA reference |
-| Q_gap | — | -0.0087 | Correct sign |
+| SFT v1 | pool=64, 4 tok, 3+3L, SFT model | 50000 | 0.026 | Base model wins |
 
 ### Offline RL v2 (ResidualMLP, optimized)
 
-| Metric | v1 | **v2** | Improvement |
-|--------|-----|--------|-------------|
-| ref_mse | 0.334 | **0.008-0.011** | **30-42x** |
-| actor_loss | 0.707 | 0.242 | 3x lower |
-| q_gap | -0.009 | -0.011 | Healthy |
-| Architecture | MLP 2L | ResidualMLP 3L | +residual connections |
-| Beta | 1.0 | 0.3 | Lower BC regularization |
-| Steps | 100K | 50K | Shorter = better (overfitting) |
+| Metric | v1 | **v2 base** | v2 SFT | Improvement |
+|--------|-----|--------|--------|-------------|
+| ref_mse | 0.334 | **0.008-0.011** | 0.043 | **42x** (base) |
+| actor_loss | 0.707 | 0.242 | -0.554 | 3x lower |
+| q_gap | -0.009 | -0.011 | -0.046 | Healthy |
 
 ### Architecture Search Summary (99 total experiments)
 
@@ -165,15 +179,6 @@ Built from: pi0.5 base + v8 RL token checkpoint, reward_mode=hybrid, token_pool_
 
 Key finding: factors do NOT compound. Residual alone is optimal. Longer training (>100K) overfits on fixed buffer.
 
-### Demo Adaptation: SFT vs Base Model
-
-| Model | Steps | Final Loss | Avg100 |
-|-------|-------|------------|--------|
-| **pi0.5 base** | **50K** | **0.015** | **0.015** |
-| pi0.5 SFT | 50K | 0.028 | 0.026 |
-
-Base model representations are more compressible for RL token encoding.
-
 ## Repository layout
 
 ```
@@ -184,7 +189,7 @@ src/lerobot/rlt/
   vla_adapter.py           # VLAAdapter ABC + DummyVLAAdapter
   pi05_adapter.py          # Pi05VLAAdapter (real pi0.5 integration)
   rl_token.py              # RLTokenModule (multi-token encoder-decoder transformer)
-  actor.py                 # ChunkActor with reference dropout
+  actor.py                 # ChunkActor + ResidualMLP with reference dropout
   critic.py                # ChunkCritic + TwinCritic
   losses.py                # discounted_chunk_return, critic_loss, actor_loss
   utils.py                 # soft_update, build_mlp, flatten/unflatten_chunk, subsample_indices
@@ -197,6 +202,9 @@ src/lerobot/rlt/
   demo_loader.py           # RLTDemoDataset + make_demo_loader (gc-cleaning cycle)
   rewards.py               # build_reward_seq (terminal/action_matching/hybrid)
   offline_dataset.py       # split_episode_indices, build_transitions, cache save/load
+  deploy_config.py         # DeployConfig for real-robot deployment
+  obs_bridge.py            # robot_obs_to_rlt_obs + rlt_action_to_robot_action
+  deploy.py                # RLTDeployPolicy (chunk queue, phase controller, timing)
   envs/
     __init__.py            # make_env factory
     reaching.py            # ReachingEnvironment (12-DOF toy env for validation)
@@ -218,7 +226,38 @@ scripts/
   search_actor_critic.py           # Phase 1 architecture search (factor isolation, 50K steps)
   search_ac_phase2.py              # Phase 2 search (combinations, 100K steps)
   search_ac_phase3.py              # Phase 3 fine-tuning (200K-500K steps)
+  train_best_ac_on_sft.py          # One-shot: build SFT cache + train best AC
+  deploy_rlt.py                    # Real robot deployment with SO101 bilateral robot
 ```
+
+## Deployment
+
+### Hardware Requirements
+- **GPU**: ≥16GB VRAM (pi0.5 bf16 = ~7GB, RL Token + Actor = ~0.4GB)
+- **Robot**: SO101 bilateral follower (bi_so_follower), 6 DOF × 2 arms = 12 DOF
+- **Cameras**: 2× wrist USB camera + 1× Intel RealSense front camera
+
+### Deployment Machine: bozhao 4060 (192.168.31.10)
+- **Repo**: `~/code/hsy/Evo-RL-main`, branch `shuyuan/rlt`
+- **Checkpoints**: `checkpoints/rlt_pi0.5_screw/` (downloaded from HuggingFace)
+- **GPU**: RTX 4060 8GB — **TOO SMALL for pi0.5**. Need ≥16GB GPU.
+- **Robot ports**: left=/dev/ttyACM3, right=/dev/ttyACM2
+- **Camera paths**: left_wrist=pci-0000:00:14.0-usb-0:3, right_wrist=pci-0000:00:14.0-usb-0:4, front=RealSense 152122079296
+
+### Deployment Command (when GPU available)
+```bash
+cd ~/code/hsy/Evo-RL-main
+PYTHONPATH=src python scripts/deploy_rlt.py \
+  --vla-model lerobot/pi05_base \
+  --rl-token-ckpt checkpoints/rlt_pi0.5_screw/rl_token/v8_base/demo_adapt_checkpoint.pt \
+  --ac-ckpt checkpoints/rlt_pi0.5_screw/actor_critic/v2_base/rl_checkpoint_best.pt \
+  --task "Insert the copper screw into the black sleeve." \
+  --phase-mode always_rl --device cuda
+```
+
+### SO101 Joint Names
+Each arm: `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`
+Observation keys: `left_shoulder_pan.pos`, ..., `right_gripper.pos` (12 total)
 
 ## Remote server environment
 
@@ -242,7 +281,12 @@ scripts/
 
 1. ~~**Use SFT model**~~: DONE — base model wins (loss 0.015 vs SFT 0.026)
 2. ~~**Tune offline RL**~~: DONE — 99-experiment architecture search, ResidualMLP + β=0.3 gives 42x improvement
-3. **Investigate expert_mse**: The expert_mse=2715 is still high — likely a scale/normalization issue in how expert actions are stored vs computed
-4. **Online RL**: Integrate a real or simulated environment, run `online_rl_loop()` with the v2 actor/critic as initialization
-5. **Phase controller**: Train the `HandoverClassifier` on collected intervention data
-6. **Rebuild offline cache with SFT model**: Even though SFT RL tokens are worse, the SFT model's action chunks may be better for the screw task. Consider rebuilding cache with SFT VLA actions + base RL tokens
+3. ~~**SFT AC training**~~: DONE — SFT cache built, AC trained (ref_mse=0.043 vs base 0.011)
+4. ~~**Deployment framework**~~: DONE — deploy.py + obs_bridge.py + deploy_config.py + deploy_rlt.py
+5. ~~**HuggingFace upload**~~: DONE — `Shiki42/rlt_pi0.5_screw`
+6. ~~**Bozhao machine setup**~~: DONE — branch checked out, checkpoints downloaded, but GPU too small
+7. **Deploy on ≥16GB GPU machine**: pi0.5 needs ~7GB VRAM, 4060 (8GB) is insufficient
+8. **Optimize VRAM**: strip RL token decoder + critic for deployment (saves ~600MB), or try fp8/int8 quantization for pi0.5
+9. **Investigate expert_mse**: The expert_mse=2715 is still high — likely a scale/normalization issue
+10. **Online RL**: Integrate real robot environment, run `online_rl_loop()` with v2 actor/critic
+11. **Phase controller**: Train `HandoverClassifier` on collected intervention data
