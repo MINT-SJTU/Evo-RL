@@ -21,10 +21,11 @@ class RLTAgent(nn.Module):
     used by the collector and trainer.
     """
 
-    def __init__(self, config: RLTConfig, vla: VLAAdapter):
+    def __init__(self, config: RLTConfig, vla: VLAAdapter, inference_only: bool = False):
         super().__init__()
         self.config = config
         self.vla = vla
+        self.inference_only = inference_only
 
         token_dim = vla.token_dim
         action_dim = vla.action_dim
@@ -38,6 +39,7 @@ class RLTAgent(nn.Module):
             num_dec_layers=config.rl_token.dec_layers,
             ff_dim=config.rl_token.ff_dim,
             num_rl_tokens=config.rl_token.num_rl_tokens,
+            inference_only=inference_only,
         )
 
         self.actor = ChunkActor(
@@ -52,19 +54,20 @@ class RLTAgent(nn.Module):
             residual=config.actor.residual,
         )
 
-        self.critic = TwinCritic(
-            state_dim=state_dim,
-            chunk_dim=chunk_dim,
-            hidden_dim=config.critic.hidden_dim,
-            num_layers=config.critic.num_layers,
-            activation=config.critic.activation,
-            layer_norm=config.critic.layer_norm,
-            residual=config.critic.residual,
-        )
+        if not inference_only:
+            self.critic = TwinCritic(
+                state_dim=state_dim,
+                chunk_dim=chunk_dim,
+                hidden_dim=config.critic.hidden_dim,
+                num_layers=config.critic.num_layers,
+                activation=config.critic.activation,
+                layer_norm=config.critic.layer_norm,
+                residual=config.critic.residual,
+            )
 
-        self.target_critic = copy.deepcopy(self.critic)
-        for p in self.target_critic.parameters():
-            p.requires_grad = False
+            self.target_critic = copy.deepcopy(self.critic)
+            for p in self.target_critic.parameters():
+                p.requires_grad = False
 
         self._subsample_indices: torch.Tensor | None = None
 

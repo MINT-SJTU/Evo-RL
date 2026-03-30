@@ -42,7 +42,7 @@ class RLTDeployPolicy(nn.Module):
         )
 
         rlt_config = _build_rlt_config(config, self.vla.action_dim)
-        self.agent = RLTAgent(rlt_config, self.vla)
+        self.agent = RLTAgent(rlt_config, self.vla, inference_only=True)
         self.agent.to(config.device)
 
         _load_checkpoints(self.agent, config)
@@ -168,25 +168,47 @@ def _build_rlt_config(config: DeployConfig, action_dim: int) -> RLTConfig:
     )
 
 
+def _filter_encoder_only(state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], list[str]]:
+    """Keep only encoder keys, drop decoder.* and out_proj.* keys."""
+    filtered = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k.startswith("decoder.") or k.startswith("out_proj."):
+            skipped.append(k)
+        else:
+            filtered[k] = v
+    return filtered, skipped
+
+
 def _load_checkpoints(agent: RLTAgent, config: DeployConfig) -> None:
-    """Load RL token and actor-critic checkpoints into the agent."""
+    """Load RL token encoder and actor checkpoints (no decoder/critic for VRAM savings)."""
     device = config.device
 
     if config.rl_token_checkpoint:
         log.info("Loading RL token checkpoint: %s", config.rl_token_checkpoint)
-        ckpt = torch.load(config.rl_token_checkpoint, map_location=device, weights_only=True)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
-        log.info("RL token loaded (trained %d steps)", ckpt.get("step", -1))
+        ckpt = torch.load(config.rl_token_checkpoint, map_location="cpu", weights_only=True)
+        filtered, skipped = _filter_encoder_only(ckpt["rl_token_state_dict"])
+        unexpected = agent.rl_token.load_state_dict(filtered, strict=False)
+        assert not unexpected.unexpected_keys, f"Unexpected keys: {unexpected.unexpected_keys}"
+        log.info(
+            "RL token encoder loaded (trained %d steps, skipped %d decoder keys)",
+            ckpt.get("step", -1), len(skipped),
+        )
+        del ckpt
+        agent.rl_token.to(device)
 
     if config.ac_checkpoint:
         log.info("Loading actor-critic checkpoint: %s", config.ac_checkpoint)
-        ckpt = torch.load(config.ac_checkpoint, map_location=device, weights_only=True)
+        ckpt = torch.load(config.ac_checkpoint, map_location="cpu", weights_only=True)
         agent.actor.load_state_dict(ckpt["actor_state_dict"])
-        agent.critic.load_state_dict(ckpt["critic_state_dict"])
-        # Overwrite rl_token if checkpoint has it (v2 checkpoints include rl_token)
         if "rl_token_state_dict" in ckpt:
-            agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
-        log.info("Actor-critic loaded")
+            filtered, skipped = _filter_encoder_only(ckpt["rl_token_state_dict"])
+            unexpected = agent.rl_token.load_state_dict(filtered, strict=False)
+            assert not unexpected.unexpected_keys, f"Unexpected keys: {unexpected.unexpected_keys}"
+            log.info("RL token encoder overwritten from AC checkpoint (skipped %d decoder keys)", len(skipped))
+        log.info("Actor loaded (critic skipped for inference)")
+        del ckpt
+        agent.actor.to(device)
 
 
 def load_rlt_deploy_policy(config: DeployConfig) -> RLTDeployPolicy:

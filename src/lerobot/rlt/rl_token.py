@@ -23,6 +23,7 @@ class RLTokenModule(nn.Module):
         num_dec_layers: int = 4,
         ff_dim: int | None = None,
         num_rl_tokens: int = 1,
+        inference_only: bool = False,
     ):
         super().__init__()
         if ff_dim is None:
@@ -30,6 +31,7 @@ class RLTokenModule(nn.Module):
 
         self.token_dim = token_dim
         self.num_rl_tokens = num_rl_tokens
+        self.inference_only = inference_only
         self.rl_token_embed = nn.Parameter(torch.randn(1, num_rl_tokens, token_dim) * 0.02)
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -41,15 +43,16 @@ class RLTokenModule(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_enc_layers)
 
-        dec_layer = nn.TransformerDecoderLayer(
-            d_model=token_dim,
-            nhead=nhead,
-            dim_feedforward=ff_dim,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(dec_layer, num_layers=num_dec_layers)
-        self.out_proj = nn.Linear(token_dim, token_dim)
+        if not inference_only:
+            dec_layer = nn.TransformerDecoderLayer(
+                d_model=token_dim,
+                nhead=nhead,
+                dim_feedforward=ff_dim,
+                batch_first=True,
+                norm_first=True,
+            )
+            self.decoder = nn.TransformerDecoder(dec_layer, num_layers=num_dec_layers)
+            self.out_proj = nn.Linear(token_dim, token_dim)
 
     def encode(self, vla_tokens: torch.Tensor) -> torch.Tensor:
         """Encode VLA tokens into RL token(s).
