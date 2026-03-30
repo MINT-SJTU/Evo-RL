@@ -97,21 +97,29 @@ When keyboard control is enabled (the default):
 
 The script starts in a stopped state when keyboard control is enabled. Press `R` first, then `I` for each chunk when `--safe-mode` is active.
 
-### 5.1 Raw training recording（录制用于训练的原始轨迹）
+### 5.1 Raw training recording (record trajectories for training)
 
-当你在命令行额外设置 `--raw-train-record-dir /path/to/raw_root` 时，会启用“raw training recording”。
-此时键盘按键语义会在原有基础上叠加（主要用于原始轨迹采集）：
+When you additionally set `--raw-train-record-dir /path/to/raw_root` in the command line, the script enables
+"raw training recording".
+In this mode, the keyboard semantics are overlaid on top of the existing controls (primarily for collecting
+training trajectories):
 
-- `R`: 开始录制一个 episode，并恢复 policy（如果已经在录制中，则继续录制同一条 episode，且仍会把主循环切回 `RUNNING`）
-- `D`: 结束当前录制 episode（如果此 episode 期间没有 VR 接管，则会进入等待你按 `0/1` 标注 success 的状态）
-- `0`: 标注 `episode_success=0`（false）
-- `1`: 标注 `episode_success=1`（true）
-- `V`: 进入 VR teleop（如果你在录制过程中按下 `V`，会将当前 episode 标记为“人工接管(=VR takeover)”，并对该 episode 强制 success=true=1）
+- `R`: start recording a new `episode` and resume the policy (if you are already recording, it continues
+  the same episode and the main loop stays in `RUNNING`)
+- `D`: end the current recording episode (if there was no VR takeover during this episode, the script will
+  wait for you to label success with `0/1`)
+- `0`: set `episode_success=0` (false)
+- `1`: set `episode_success=1` (true)
+- `V`: enter VR teleop (if you press `V` while recording, the current episode is marked as "human takeover"
+  (= VR takeover), and `episode_success` is forced to `1`)
 
-关于 VR takeover 标注：
-- VR 段落会以 `segment_*_vr/` 的形式被记录
-- 转换为 LeRobot Dataset 时，会把 `segment_*_vr` 映射为训练用的 `complementary_info.is_intervention=1`
-- 若 episode 期间发生 VR takeover，则 `episode_success` 会被强制为 `1`，因此 `D` 结束后通常不会再等待你按 `0/1`
+VR takeover labeling:
+
+- VR segments are stored under `segment_*_vr/`
+- During conversion to LeRobot Dataset, `segment_*_vr` is mapped to
+  `complementary_info.is_intervention=1`
+- If VR takeover happens within the episode, `episode_success` is forced to `1`, so after you press `D`
+  you usually will not need to press `0/1`.
 
 ### VR switch behavior (`V`)
 
@@ -136,9 +144,9 @@ While VR is running, press `Ctrl+C` in the VR terminal:
 
 After returning from VR, press `R` to continue infer policy execution.
 
-### 5.2 Raw dataset format（raw 原始数据存储格式）
+### 5.2 Raw dataset format
 
-启用 `--raw-train-record-dir` 后，每次完整录制会生成一个 `episode_XXXX` 目录：
+After enabling `--raw-train-record-dir`, each full recording session generates an `episode_XXXX` directory:
 
 ```text
 raw_root/
@@ -151,8 +159,8 @@ raw_root/
             frame_000000.png
             frame_000001.png
             ...
-        actions.json   # [T, action_dim]，action_dim=7（6关节+夹爪）
-        states.json    # [T, 7]，用于与 action 对齐的状态向量
+        actions.json   # [T, action_dim], action_dim=7 (6 joints + gripper)
+        states.json    # [T, 7] state vector aligned with action
       segment_0001_vr/
         images/
           {camera_name}/
@@ -165,20 +173,22 @@ raw_root/
   ...
 ```
 
-关键字段说明：
+Key fields:
+
 - `meta.json`
-  - `episode_success`: 你的最终 success 标签（0/1），写入时间点是按 `D` 结束录制并完成标注后
-  - `has_vr_takeover`: episode 是否发生过 VR 接管
-  - `success_forced`: 若发生 VR 接管，则 success 会被强制为 1
+  - `episode_success`: the final success label (0/1). It is written after you press `D` and complete labeling.
+  - `has_vr_takeover`: whether the episode had a VR takeover
+  - `success_forced`: if VR takeover happened, success is forced to 1
 - `segments/segment_*_policy` vs `segments/segment_*_vr`
-  - `source` 由目录名体现：`policy`=自主运行，`vr`=人工接管
-  - 转换脚本会据此生成训练用的 `complementary_info.is_intervention`
+  - `source` is encoded in the directory name: `policy` = autonomous control, `vr` = human takeover
+  - The conversion script uses it to generate training-time `complementary_info.is_intervention`
 
-注：当前实现会在每个 segment 内把**每个 step 的所有相机帧都保存**到 `frame_XXXX.png`，因此能够保留完整逐步图像序列。
+Note: the current implementation saves **all camera frames for every step** into `frame_XXXX.png` inside
+each segment, so it preserves the full step-by-step visual sequence.
 
-### 5.3 Convert raw -> LeRobotDataset（raw 转 LeRobot 训练格式）
+### 5.3 Convert raw -> LeRobotDataset
 
-转换脚本：
+Conversion script:
 
 ```bash
 python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
@@ -188,7 +198,7 @@ python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
   --robot-type arx5
 ```
 
-如果你希望训练集使用图片而不是视频（不生成 mp4）：
+If you want the dataset to store images instead of videos (no `mp4`):
 
 ```bash
 python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
@@ -199,11 +209,12 @@ python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
   --images-only
 ```
 
-LeRobotDataset 存储位置与结构（简化理解）：
-- `data/chunk-XXX/file-XXX.parquet`：逐帧数值数据（action/state 等）
-- `meta/episodes/*.parquet` 与 `meta/info.json`：episode/索引/统计等元信息
-- 若使用视频模式（默认）：`videos/` 下会存 mp4
-- 若使用图片模式（`--images-only`）：`images/` 下存每帧 PNG（不走 mp4 编码）
+LeRobotDataset storage location and structure (simplified):
+
+- `data/chunk-XXX/file-XXX.parquet`: per-frame numeric data (e.g. action/state)
+- `meta/episodes/*.parquet` and `meta/info.json`: episode index/statistics metadata
+- If using video mode (default): `videos/` contains `mp4`
+- If using image mode (`--images-only`): `images/` contains per-frame PNGs (no mp4 encoding)
 
 ## 6. Record-only mode
 
