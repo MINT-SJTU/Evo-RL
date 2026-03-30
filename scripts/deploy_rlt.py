@@ -170,32 +170,31 @@ def main() -> None:
     log.info("Building RLT deploy policy...")
     policy = load_rlt_deploy_policy(config)
 
+    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+    from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
     from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
     from lerobot.robots.so_follower import SOFollowerConfig
 
     left_cfg = SOFollowerConfig(
         port=args.left_port,
         cameras={
-            "wrist": {
-                "type": "opencv",
-                "index_or_path": args.left_cam,
-                "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG",
-            },
+            "wrist": OpenCVCameraConfig(
+                index_or_path=args.left_cam,
+                width=640, height=480, fps=30, fourcc="MJPG",
+            ),
         },
     )
     right_cfg = SOFollowerConfig(
         port=args.right_port,
         cameras={
-            "wrist": {
-                "type": "opencv",
-                "index_or_path": args.right_cam,
-                "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG",
-            },
-            "front": {
-                "type": "intelrealsense",
-                "serial_number_or_name": args.front_cam_serial,
-                "width": 640, "height": 480, "fps": 30, "warmup_s": 2,
-            },
+            "wrist": OpenCVCameraConfig(
+                index_or_path=args.right_cam,
+                width=640, height=480, fps=30, fourcc="MJPG",
+            ),
+            "front": RealSenseCameraConfig(
+                serial_number_or_name=args.front_cam_serial,
+                width=640, height=480, fps=30, warmup_s=2,
+            ),
         },
     )
     robot_cfg = BiSOFollowerConfig(
