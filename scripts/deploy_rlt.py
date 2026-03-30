@@ -175,7 +175,6 @@ def main() -> None:
 
     left_cfg = SOFollowerConfig(
         port=args.left_port,
-        id="left",
         cameras={
             "wrist": {
                 "type": "opencv",
@@ -186,7 +185,6 @@ def main() -> None:
     )
     right_cfg = SOFollowerConfig(
         port=args.right_port,
-        id="right",
         cameras={
             "wrist": {
                 "type": "opencv",
