@@ -216,6 +216,7 @@ lerobot-human-inloop-record="lerobot.scripts.lerobot_human_inloop_record:main"
 lerobot-value-train="lerobot.scripts.lerobot_value_train:main"
 lerobot-value-infer="lerobot.scripts.lerobot_value_infer:main"
 lerobot-dataset-report="lerobot.scripts.lerobot_dataset_report:main"
+lerobot-export-boundary-frames="lerobot.scripts.lerobot_export_boundary_frames:main"
 
 # ---------------- Tool Configurations ----------------
 [tool.setuptools.packages.find]
