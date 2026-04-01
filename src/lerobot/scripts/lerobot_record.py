@@ -547,8 +547,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if dataset:
             dataset.finalize()
             logging.info(
-                "To visually inspect episode boundaries, run:\n"
-                "  lerobot-export-boundary-frames --dataset %s --episodes all --output-dir <output_dir>",
+                "To inspect the recorded dataset, run:\n"
+                "  lerobot-dataset-report --dataset %s",
                 dataset.repo_id,
             )
 
