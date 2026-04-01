@@ -546,6 +546,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if dataset:
             dataset.finalize()
+            logging.info(
+                "To visually inspect episode boundaries, run:\n"
+                "  lerobot-export-boundary-frames --dataset %s --episodes all --output-dir <output_dir>",
+                dataset.repo_id,
+            )
 
         if policy_sync_executor is not None:
             policy_sync_executor.shutdown()
