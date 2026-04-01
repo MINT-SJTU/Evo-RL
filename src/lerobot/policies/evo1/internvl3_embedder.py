@@ -1,8 +1,10 @@
+import functools
 import logging
 
 import torch
 import torch.nn as nn
-import torchvision.transforms as transforms
+import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode, to_pil_image
 from transformers import AutoModel, AutoTokenizer
@@ -16,21 +18,32 @@ IMG_END_TOKEN = "</img>"  # nosec B105
 
 # === Image Transformations ===
 def build_transform(input_size):
-    return transforms.Compose(
+    return T.Compose(
         [
-            transforms.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-            transforms.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
     )
 
 
 # === Aspect Ratio Handling ===
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
+@functools.lru_cache(maxsize=10000)
+def get_target_aspect_ratio(orig_width, orig_height, image_size, min_num, max_num):
+    aspect_ratio = orig_width / orig_height
+    target_ratios = {
+        (i, j)
+        for n in range(min_num, max_num + 1)
+        for i in range(1, n + 1)
+        for j in range(1, n + 1)
+        if i * j <= max_num and i * j >= min_num
+    }
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
     best_ratio_diff = float("inf")
     best_ratio = (1, 1)
-    area = width * height
+    area = orig_width * orig_height
     for ratio in target_ratios:
         target_ar = ratio[0] / ratio[1]
         diff = abs(aspect_ratio - target_ar)
@@ -44,18 +57,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
 
 def dynamic_preprocess(image, min_num=1, max_num=1, image_size=448, use_thumbnail=False):
     orig_width, orig_height = image.size
-    aspect_ratio = orig_width / orig_height
-    target_ratios = {
-        (i, j)
-        for n in range(min_num, max_num + 1)
-        for i in range(1, n + 1)
-        for j in range(1, n + 1)
-        if i * j <= max_num and i * j >= min_num
-    }
-    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
-    )
+    target_aspect_ratio = get_target_aspect_ratio(orig_width, orig_height, image_size, min_num, max_num)
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
@@ -127,20 +129,75 @@ class InternVL3Embedder(nn.Module):
 
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
 
+    def _dynamic_preprocess_tensor(
+        self, image_t, min_num=1, max_num=1, use_thumbnail=False
+    ):
+        # image_t shape expected: [C, H, W]
+        C, orig_height, orig_width = image_t.shape
+
+        # get ratio by cache
+        target_aspect_ratio = get_target_aspect_ratio(
+            orig_width, orig_height, self.image_size, min_num, max_num
+        )
+
+        ratio_w, ratio_h = target_aspect_ratio[0], target_aspect_ratio[1]
+        target_width = self.image_size * ratio_w
+        target_height = self.image_size * ratio_h
+        blocks = ratio_w * ratio_h
+
+        # Resize on GPU
+        # image_t expected shape for interpolate is [C, H, W] mapping to size
+        resized_img = TF.resize(
+            image_t,
+            size=[target_height, target_width],
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=True,
+        )
+
+        # Eliminate the for-loop using view and permute for zero-copy strided tensor tiling
+        # resized_img shape: [C, ratio_h * image_size, ratio_w * image_size]
+        # 1. view to -> [C, ratio_h, image_size, ratio_w, image_size]
+        reshaped = resized_img.view(C, ratio_h, self.image_size, ratio_w, self.image_size)
+        # 2. permute to -> [ratio_h, ratio_w, C, image_size, image_size]
+        permuted = reshaped.permute(1, 3, 0, 2, 4)
+        # 3. reshape to -> [blocks, C, image_size, image_size]
+        stacked_tiles = permuted.reshape(blocks, C, self.image_size, self.image_size)
+
+        if use_thumbnail and blocks != 1:
+            thumbnail_img = TF.resize(
+                image_t,
+                size=[self.image_size, self.image_size],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            )
+            # Concat the thumbnail directly along the batch dimension
+            stacked_tiles = torch.cat([stacked_tiles, thumbnail_img.unsqueeze(0)], dim=0)
+
+        return stacked_tiles
+
     def _preprocess_images(
         self, image_tensors_batch: list[list[Image.Image | torch.Tensor]]
     ) -> tuple[torch.Tensor, list[list[int]]]:
         pixel_values_list = []
         batch_num_tiles_list = []
         model_dtype = next(self.model.parameters()).dtype
-        mean = torch.tensor(IMAGENET_MEAN, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
-        std = torch.tensor(IMAGENET_STD, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
+        mean = torch.tensor(IMAGENET_MEAN, device=self.device, dtype=torch.float32).view(
+            1, 3, 1, 1
+        )
+        std = torch.tensor(IMAGENET_STD, device=self.device, dtype=torch.float32).view(
+            1, 3, 1, 1
+        )
 
         for image_tensors in image_tensors_batch:
             num_tiles_list = []
             for image in image_tensors:
                 if isinstance(image, torch.Tensor):
-                    if image.ndim == 3 and image.shape[0] == 3 and image.shape[1] == self.image_size and image.shape[2] == self.image_size:
+                    if (
+                        image.ndim == 3
+                        and image.shape[0] == 3
+                        and image.shape[1] == self.image_size
+                        and image.shape[2] == self.image_size
+                    ):
                         image_t = image.to(device=self.device)
                         if not torch.is_floating_point(image_t):
                             image_t = image_t.to(torch.float32) / 255.0
@@ -150,12 +207,18 @@ class InternVL3Embedder(nn.Module):
                                 image_t = image_t / 255.0
                         tile_tensors = (image_t.unsqueeze(0) - mean) / std
                     else:
-                        image = to_pil_image(image.detach().cpu())
-                        tiles = dynamic_preprocess(image, image_size=self.image_size)
-                        tile_tensors = torch.stack([self.transform(t) for t in tiles]).to(device=self.device)
+                        image_t = image.to(device=self.device, dtype=torch.float32)
+                        if not torch.is_floating_point(image):
+                            image_t = image_t / 255.0
+                        else:
+                            if float(image_t.max().item()) > 1.0:
+                                image_t = image_t / 255.0
+                        tiles = self._dynamic_preprocess_tensor(image_t)
+                        tile_tensors = (tiles - mean) / std
                 else:
-                    tiles = dynamic_preprocess(image, image_size=self.image_size)
-                    tile_tensors = torch.stack([self.transform(t) for t in tiles]).to(device=self.device)
+                    image_t = TF.to_tensor(image).to(device=self.device, dtype=torch.float32)
+                    tiles = self._dynamic_preprocess_tensor(image_t)
+                    tile_tensors = (tiles - mean) / std
 
                 tile_tensors = tile_tensors.to(dtype=model_dtype)
                 pixel_values_list.append(tile_tensors)

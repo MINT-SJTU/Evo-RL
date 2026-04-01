@@ -173,12 +173,17 @@ class EVO1(nn.Module):
             raise ValueError(
                 f"EVO1 batch mismatch: state_batch={state_tensor.shape[0]} fused_batch={fused_tokens.shape[0]}"
             )
-        return self.predict_action(
+        action = self.predict_action(
             fused_tokens,
             state_tensor,
             action_mask=action_mask,
             embodiment_ids=embodiment_ids,
         )
+        
+        if isinstance(action, torch.Tensor) and action.dtype == torch.bfloat16:
+            action = action.to(torch.float32)
+            
+        return action
 
     def forward(
         self,
