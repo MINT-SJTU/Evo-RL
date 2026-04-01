@@ -23,6 +23,7 @@ import select
 import sys
 import termios
 import threading
+import time
 import tty
 from contextlib import nullcontext
 from copy import copy
@@ -40,6 +41,9 @@ from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.robots import Robot
 from lerobot.utils.recording_annotations import EPISODE_FAILURE, EPISODE_SUCCESS
+
+# Minimum interval (seconds) between consecutive intervention toggle presses.
+INTERVENTION_TOGGLE_COOLDOWN_S = 0.5
 
 
 @cache
@@ -81,6 +85,7 @@ class TTYKeyboardListener:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._old_attrs = None
+        self._last_intervention_time: float = 0.0
 
     def start(self):
         self._old_attrs = termios.tcgetattr(self._fd)
@@ -157,6 +162,10 @@ class TTYKeyboardListener:
             self.events["stop_recording"] = True
             self.events["exit_early"] = True
         elif normalized == self.intervention_toggle_key:
+            now = time.monotonic()
+            if now - self._last_intervention_time < INTERVENTION_TOGGLE_COOLDOWN_S:
+                return
+            self._last_intervention_time = now
             print(f"'{self.intervention_toggle_key}' key pressed. Toggling intervention mode...")
             self.events["toggle_intervention"] = True
         elif self.episode_success_key and normalized == self.episode_success_key:
@@ -253,6 +262,8 @@ def init_keyboard_listener(
         # Only import pynput if not in a headless environment
         from pynput import keyboard
 
+        last_intervention_time = [0.0]
+
         def on_press(key):
             try:
                 if key == keyboard.Key.right:
@@ -267,6 +278,10 @@ def init_keyboard_listener(
                     events["stop_recording"] = True
                     events["exit_early"] = True
                 elif hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower():
+                    now = time.monotonic()
+                    if now - last_intervention_time[0] < INTERVENTION_TOGGLE_COOLDOWN_S:
+                        return
+                    last_intervention_time[0] = now
                     print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
                     events["toggle_intervention"] = True
                 elif (

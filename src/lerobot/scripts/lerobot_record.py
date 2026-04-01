@@ -353,7 +353,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             use_videos=cfg.dataset.video,
         ),
     )
-    if cfg.teleop is not None and cfg.enable_collector_policy_id:
+    if cfg.teleop is not None:
         action_names = dataset_features[ACTION]["names"]
         action_names = list(robot.action_features) if action_names is None else list(action_names)
         _ensure_human_inloop_compatible_features(dataset_features, action_feature_names=action_names)
