@@ -546,6 +546,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if dataset:
             dataset.finalize()
+            logging.info(
+                "To inspect the recorded dataset, run:\n"
+                "  lerobot-dataset-report --dataset %s",
+                dataset.repo_id,
+            )
 
         if policy_sync_executor is not None:
             policy_sync_executor.shutdown()
