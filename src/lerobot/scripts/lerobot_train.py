@@ -410,6 +410,14 @@ def train(
     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         policy, optimizer, dataloader, lr_scheduler
     )
+    if (
+        accelerator.num_processes > 1
+        and cfg.policy.type == "evo1"
+        and getattr(cfg.policy, "training_stage", None) == "stage2"
+        and hasattr(policy, "_set_static_graph")
+    ):
+        logging.info("Enabling DDP static graph for Evo1 stage2.")
+        policy._set_static_graph()
     dl_iter = cycle(dataloader)
 
     policy.train()
