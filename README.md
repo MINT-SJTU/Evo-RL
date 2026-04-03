@@ -199,6 +199,18 @@ lerobot-teleoperate \
 
 For dual-arm camera mapping, it is fine to attach `front` under either the left-arm or right-arm camera config. If you use more camera views, place them under either the left or right arm camera config as well.
 
+> **Camera naming for bimanual robots:**
+> `BiSOFollower` (and `BiPiperXFollower`) automatically prepend `left_` / `right_` to every feature name from each arm — including cameras.
+> Therefore, name cameras **without** the arm prefix:
+>
+> | Camera config key | Final observation feature name |
+> |---|---|
+> | `left_arm_config.cameras.wrist` | `observation.images.left_wrist` |
+> | `right_arm_config.cameras.wrist` | `observation.images.right_wrist` |
+> | `right_arm_config.cameras.front` | `observation.images.right_front` |
+>
+> If you mistakenly name a camera `left_wrist` under `left_arm_config`, the final feature becomes `observation.images.left_left_wrist`, which will **not** match pretrained policy expectations.
+
 If needed, you can also use temporary device paths (for example `/dev/ttyACM*` and `/dev/video*`) during initial debugging.
 
 <a id="agilex-piper-setup"></a>
@@ -546,6 +558,82 @@ Iterative training loop (abstract):
         v
 [Stronger policy with improved success rate and throughput]
 ```
+
+### Policy-only inference (no teleoperator)
+
+You can run a trained policy without a teleop device. Use `lerobot-record` (not `lerobot-human-inloop-record`) with only `--policy.path`:
+
+```bash
+lerobot-record \
+  --robot.type=bi_so_follower \
+  --robot.left_arm_config.port=/dev/serial/by-id/<LEFT_FOLLOWER_PORT> \
+  --robot.right_arm_config.port=/dev/serial/by-id/<RIGHT_FOLLOWER_PORT> \
+  --robot.id=my_bi_so101_follower \
+  --robot.left_arm_config.cameras='{ wrist: {type: opencv, index_or_path: "/dev/v4l/by-path/<LEFT_WRIST_CAM_PATH>", width: 640, height: 480, fps: 30}}' \
+  --robot.right_arm_config.cameras='{ wrist: {type: opencv, index_or_path: "/dev/v4l/by-path/<RIGHT_WRIST_CAM_PATH>", width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: "/dev/v4l/by-path/<FRONT_CAM_PATH>", width: 640, height: 480, fps: 30}}' \
+  --policy.path=<POLICY_CHECKPOINT_OR_HUB_ID> \
+  --dataset.repo_id=<HF_USER>/eval_<POLICY_NAME> \
+  --dataset.root=<LOCAL_DATASET_DIR> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=30 \
+  --dataset.push_to_hub=false \
+  --display_data=false
+```
+
+> **Important notes for policy-only mode:**
+> - Dataset `repo_id` **must** start with `eval_` when a policy is provided (lerobot convention).
+> - `--dataset.video` must be `true` (the default). Setting `video=false` disables image features entirely due to an [upstream lerobot limitation](#known-lerobot-limitations), which causes the policy to receive no camera input.
+> - For offline/air-gapped environments, set `HF_HUB_OFFLINE=1` and ensure the model is already in the local HuggingFace cache.
+> - You can also load robot configuration from a JSON file instead of CLI args: `--robot.config_file=my_setup.json` (see [Robot config file](#robot-config-file) below).
+
+<a id="robot-config-file"></a>
+
+### Robot config file
+
+Instead of passing long CLI arguments for robot ports and cameras, you can load them from a JSON file:
+
+```bash
+lerobot-record \
+  --robot.config_file=my_setup.json \
+  --policy.path=<POLICY_CHECKPOINT_OR_HUB_ID> \
+  --dataset.repo_id=<HF_USER>/eval_<POLICY_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  ...
+```
+
+The JSON file follows this schema (compatible with roboclaw `setup.json`):
+
+```json
+{
+  "robot_type": "bi_so_follower",
+  "robot_id": "my_bi_so101_follower",
+  "arms": [
+    {"alias": "left_follower", "port": "/dev/serial/by-id/usb-...-if00"},
+    {"alias": "right_follower", "port": "/dev/serial/by-id/usb-...-if00"}
+  ],
+  "cameras": [
+    {"alias": "left_wrist", "port": "/dev/v4l/by-path/pci-...", "width": 640, "height": 480, "fps": 30},
+    {"alias": "right_wrist", "port": "/dev/v4l/by-path/pci-...", "width": 640, "height": 480, "fps": 30},
+    {"alias": "right_front", "port": "/dev/v4l/by-path/pci-...", "width": 640, "height": 480, "fps": 30}
+  ]
+}
+```
+
+Camera aliases use the **final** feature name (e.g. `left_wrist`), and the loader automatically strips the `left_`/`right_` prefix before assigning to the correct arm config.
+
+<a id="known-lerobot-limitations"></a>
+
+### Known lerobot limitations
+
+The following behaviors come from upstream lerobot (not Evo-RL) and may affect your workflow:
+
+| Issue | Workaround |
+|-------|------------|
+| `--policy.path` and `--policy.type` cannot be specified together | Only use `--policy.path`; type is inferred from the saved config |
+| Dataset `repo_id` must start with `eval_` when a policy is provided | Name your dataset `eval_<something>` |
+| **`--dataset.video=false` disables all image features**, not just video encoding. The policy will receive no camera input. | Always keep `video=true` (the default) when using a vision policy |
+| Headless SSH sessions have no keyboard control (pynput unavailable) | Use a TTY-attached tmux session, or add `--dataset.episode_time_s` for timer-based episode end |
 
 ## Model & Dataset
 

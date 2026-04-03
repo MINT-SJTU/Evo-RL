@@ -91,6 +91,49 @@ T = TypeVar("T")
 """
 
 
+def _validate_policy_image_features(
+    policy: PreTrainedPolicy, dataset_features: dict[str, dict]
+) -> None:
+    """Check that dataset features include all image features the policy expects.
+
+    Raises a clear error if images are missing — the most common cause is
+    ``--dataset.video=false`` which silently drops all image features from the
+    dataset due to an upstream lerobot limitation in
+    ``aggregate_pipeline_dataset_features``.
+    """
+    policy_image_keys = [
+        k for k, ft in policy.config.input_features.items()
+        if ft.type.value == "VISUAL"
+    ]
+    if not policy_image_keys:
+        return
+
+    ds_image_keys = [
+        k for k, ft in dataset_features.items()
+        if ft.get("dtype") in ("image", "video")
+    ]
+    missing = [k for k in policy_image_keys if k not in ds_image_keys]
+    if not missing:
+        return
+
+    hint = (
+        "This usually means --dataset.video=false was set, which disables ALL "
+        "image features in the dataset (upstream lerobot limitation). "
+        "Set --dataset.video=true (the default) to fix this."
+    )
+    if ds_image_keys:
+        hint += (
+            f"\n  Dataset has images: {ds_image_keys}"
+            f"\n  Policy expects:     {policy_image_keys}"
+            "\n  Check camera naming — BiSOFollower auto-prepends left_/right_ "
+            "to each arm's camera names."
+        )
+    raise ValueError(
+        f"Policy expects image features {missing} but they are not in "
+        f"the dataset features. {hint}"
+    )
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -157,6 +200,10 @@ def record_loop(
 
     if dataset is None and policy is not None:
         raise ValueError("Policy-driven recording requires a dataset for feature mapping.")
+
+    # Early check: verify dataset features include all image features the policy expects.
+    if policy is not None and dataset is not None:
+        _validate_policy_image_features(policy, dataset.features)
 
     action_feature_names = dataset.features[ACTION]["names"] if dataset is not None else None
     if action_feature_names is None:
