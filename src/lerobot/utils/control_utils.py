@@ -74,11 +74,15 @@ class TTYKeyboardListener:
         self,
         events: dict[str, Any],
         intervention_toggle_key: str,
+        critical_phase_toggle_key: str | None,
         episode_success_key: str | None,
         episode_failure_key: str | None,
     ):
         self.events = events
         self.intervention_toggle_key = intervention_toggle_key.lower()
+        self.critical_phase_toggle_key = (
+            critical_phase_toggle_key.lower() if critical_phase_toggle_key else None
+        )
         self.episode_success_key = episode_success_key.lower() if episode_success_key else None
         self.episode_failure_key = episode_failure_key.lower() if episode_failure_key else None
         self._fd = sys.stdin.fileno()
@@ -86,6 +90,7 @@ class TTYKeyboardListener:
         self._thread: threading.Thread | None = None
         self._old_attrs = None
         self._last_intervention_time: float = 0.0
+        self._last_critical_phase_time: float = 0.0
 
     def start(self):
         self._old_attrs = termios.tcgetattr(self._fd)
@@ -168,6 +173,13 @@ class TTYKeyboardListener:
             self._last_intervention_time = now
             print(f"'{self.intervention_toggle_key}' key pressed. Toggling intervention mode...")
             self.events["toggle_intervention"] = True
+        elif self.critical_phase_toggle_key and normalized == self.critical_phase_toggle_key:
+            now = time.monotonic()
+            if now - self._last_critical_phase_time < INTERVENTION_TOGGLE_COOLDOWN_S:
+                return
+            self._last_critical_phase_time = now
+            print(f"'{self.critical_phase_toggle_key}' key pressed. Toggling critical phase...")
+            self.events["toggle_critical_phase"] = True
         elif self.episode_success_key and normalized == self.episode_success_key:
             print(f"'{self.episode_success_key}' key pressed. Marking episode as success and exiting loop...")
             self.events["episode_outcome"] = EPISODE_SUCCESS
@@ -231,6 +243,7 @@ def predict_action(
 
 def init_keyboard_listener(
     intervention_toggle_key: str = "i",
+    critical_phase_toggle_key: str | None = None,
     episode_success_key: str | None = None,
     episode_failure_key: str | None = None,
 ):
@@ -255,6 +268,8 @@ def init_keyboard_listener(
     events["rerecord_episode"] = False
     events["stop_recording"] = False
     events["toggle_intervention"] = False
+    if critical_phase_toggle_key is not None:
+        events["toggle_critical_phase"] = False
     events["episode_outcome"] = None
 
     listener = None
@@ -263,6 +278,7 @@ def init_keyboard_listener(
         from pynput import keyboard
 
         last_intervention_time = [0.0]
+        last_critical_phase_time = [0.0]
 
         def on_press(key):
             try:
@@ -284,6 +300,18 @@ def init_keyboard_listener(
                     last_intervention_time[0] = now
                     print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
                     events["toggle_intervention"] = True
+                elif (
+                    critical_phase_toggle_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == critical_phase_toggle_key.lower()
+                ):
+                    now = time.monotonic()
+                    if now - last_critical_phase_time[0] < INTERVENTION_TOGGLE_COOLDOWN_S:
+                        return
+                    last_critical_phase_time[0] = now
+                    print(f"'{critical_phase_toggle_key}' key pressed. Toggling critical phase...")
+                    events["toggle_critical_phase"] = True
                 elif (
                     episode_success_key
                     and hasattr(key, "char")
@@ -313,6 +341,7 @@ def init_keyboard_listener(
         listener = TTYKeyboardListener(
             events=events,
             intervention_toggle_key=intervention_toggle_key,
+            critical_phase_toggle_key=critical_phase_toggle_key,
             episode_success_key=episode_success_key,
             episode_failure_key=episode_failure_key,
         )

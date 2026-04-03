@@ -15,6 +15,7 @@ from lerobot.rlt.obs_bridge import robot_obs_to_rlt_obs
 from lerobot.rlt.phase_controller import Phase, PhaseController
 from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
 from lerobot.rlt.utils import subsample_indices
+from lerobot.utils.recording_annotations import PHASE_CRITICAL, PHASE_PREFIX, SOURCE_RL, SOURCE_VLA
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class RLTDeployPolicy(nn.Module):
         super().__init__()
         self.config = config
         self._action_queue: deque[torch.Tensor] = deque()
+        self._meta_queue: deque[dict] = deque()
 
         log.info("Loading VLA model from %s", config.vla_model_path)
         self.vla = Pi05VLAAdapter(
@@ -51,7 +53,8 @@ class RLTDeployPolicy(nn.Module):
         self.agent.freeze_rl_token_encoder()
         self.agent.eval()
 
-        self.phase_controller = PhaseController(mode="manual")
+        self._phase_ctrl = PhaseController(mode="manual")
+        self.phase_controller = self._phase_ctrl
         self._phase_mode = config.phase_mode
 
         self._timing: dict[str, float] = {}
@@ -81,36 +84,53 @@ class RLTDeployPolicy(nn.Module):
             device=self.config.device,
         )
 
-        action_chunk = self._compute_action_chunk(obs)
+        action_chunk, state_vec, ref_chunk = self._compute_action_chunk(obs)
+        phase = self._phase_ctrl.phase
+        phase_val = PHASE_CRITICAL if phase == Phase.CRITICAL_PHASE else PHASE_PREFIX
+        source_val = SOURCE_RL if phase == Phase.CRITICAL_PHASE else SOURCE_VLA
+        state_cpu = state_vec.squeeze(0).detach().cpu()
+        ref_cpu = ref_chunk.squeeze(0).detach().cpu()
 
         # Enqueue each timestep as (1, action_dim)
         for t in range(action_chunk.shape[1]):
             self._action_queue.append(action_chunk[:, t, :])
+            self._meta_queue.append(
+                {
+                    "phase": phase_val,
+                    "source_type": source_val,
+                    "state_vec": state_cpu,
+                    "ref_chunk": ref_cpu,
+                }
+            )
 
         elapsed = time.monotonic() - t0
         self._timing["last_chunk_compute_ms"] = elapsed * 1000
         log.debug("Chunk compute: %.1f ms (%d actions queued)", elapsed * 1000, len(self._action_queue))
 
-    def _compute_action_chunk(self, obs: Observation) -> torch.Tensor:
+    def _compute_action_chunk(self, obs: Observation) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute action chunk based on phase mode.
 
         Returns:
             action_chunk: (1, C, action_dim)
+            state_vec: (1, state_dim)
+            ref_chunk: (1, C, action_dim)
         """
         vla_out = self.vla.forward_vla(obs)
+        state_vec, ref_chunk = self.agent._extract_state_and_ref(obs, vla_out)
 
         if self._phase_mode == "always_vla":
-            return self._vla_reference_chunk(vla_out)
+            self._phase_ctrl.trigger_vla()
+            return self._vla_reference_chunk(vla_out), state_vec, ref_chunk
 
         if self._phase_mode == "always_rl":
-            return self._rl_action_chunk(obs, vla_out)
+            self._phase_ctrl.trigger_critical()
+            return self._rl_action_chunk(obs, vla_out), state_vec, ref_chunk
 
         # manual mode: use phase controller
-        state_vec, ref_chunk = self.agent._extract_state_and_ref(obs, vla_out)
-        self.phase_controller.update(z_rl=state_vec[:, :self.vla.token_dim])
-        if self.phase_controller.phase == Phase.CRITICAL_PHASE:
-            return self._rl_action_chunk(obs, vla_out)
-        return self._vla_reference_chunk(vla_out)
+        self._phase_ctrl.update(z_rl=state_vec[:, :self.vla.token_dim])
+        if self._phase_ctrl.phase == Phase.CRITICAL_PHASE:
+            return self._rl_action_chunk(obs, vla_out), state_vec, ref_chunk
+        return self._vla_reference_chunk(vla_out), state_vec, ref_chunk
 
     def _rl_action_chunk(self, obs: Observation, vla_out) -> torch.Tensor:
         """Run RL actor to get action chunk."""
@@ -129,8 +149,27 @@ class RLTDeployPolicy(nn.Module):
     def reset(self) -> None:
         """Reset for a new episode."""
         self._action_queue.clear()
-        self.phase_controller.reset()
+        self._meta_queue.clear()
+        self._phase_ctrl.reset()
         log.info("Episode reset")
+
+    def pop_step_metadata(self) -> dict | None:
+        return self._meta_queue.popleft() if self._meta_queue else None
+
+    def trigger_critical_phase(self) -> None:
+        """Toggle between VLA (prefix) and RL (critical) phases.
+
+        Clears queued actions so the new phase takes effect immediately
+        on the next select_action() call.
+        """
+        self._action_queue.clear()
+        self._meta_queue.clear()
+        if self._phase_ctrl.is_critical:
+            self._phase_ctrl.trigger_vla()
+            log.info("Phase toggled back to VLA (prefix)")
+        else:
+            self._phase_ctrl.trigger_critical()
+            log.info("Phase toggled to CRITICAL")
 
     @property
     def timing(self) -> dict[str, float]:

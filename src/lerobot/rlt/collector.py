@@ -4,7 +4,12 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from lerobot.rlt.interfaces import ChunkTransition, Observation
+from lerobot.rlt.interfaces import (
+    TRANSITION_SOURCE_RL_AUTONOMOUS,
+    TRANSITION_SOURCE_WARMUP_VLA,
+    ChunkTransition,
+    Observation,
+)
 from lerobot.rlt.replay_buffer import ReplayBuffer
 
 
@@ -104,6 +109,9 @@ def _build_transition(
     done: bool,
     intervention: bool,
     actual_steps: int,
+    source: int = 0,
+    episode_id: int = -1,
+    is_critical: float = 0.0,
 ) -> ChunkTransition:
     """Build a ChunkTransition, squeezing batch dims if present."""
     sq = lambda t: t.squeeze(0) if t.dim() > 1 and t.shape[0] == 1 else t
@@ -117,6 +125,9 @@ def _build_transition(
         done=torch.tensor(float(done)),
         intervention=torch.tensor(float(intervention)),
         actual_steps=torch.tensor(actual_steps),
+        source=torch.tensor(source),
+        episode_id=torch.tensor(episode_id),
+        is_critical=torch.tensor(is_critical),
     )
 
 
@@ -126,6 +137,7 @@ def warmup_collect(
     replay_buffer: ReplayBuffer,
     num_steps: int,
     chunk_length: int,
+    episode_id: int = -1,
 ) -> int:
     """Run VLA-only warmup, filling the replay buffer.
 
@@ -153,6 +165,7 @@ def warmup_collect(
         transition = _build_transition(
             state_vec, action_chunk, ref_chunk, reward_seq,
             next_state_vec, next_ref_chunk, done, False, len(rewards),
+            source=TRANSITION_SOURCE_WARMUP_VLA, episode_id=episode_id,
         )
         replay_buffer.add(transition)
 
@@ -168,6 +181,7 @@ def rl_collect_step(
     replay_buffer: ReplayBuffer,
     chunk_length: int,
     intervention: bool = False,
+    episode_id: int = -1,
 ) -> tuple[Observation, bool, int]:
     """Execute one RL collection step with single VLA forward.
 
@@ -188,6 +202,7 @@ def rl_collect_step(
     transition = _build_transition(
         state_vec, action_chunk, ref_chunk, reward_seq,
         next_state_vec, next_ref_chunk, done, intervention, len(rewards),
+        source=TRANSITION_SOURCE_RL_AUTONOMOUS, episode_id=episode_id,
     )
     replay_buffer.add(transition)
 

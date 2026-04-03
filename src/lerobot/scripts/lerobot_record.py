@@ -190,6 +190,13 @@ class DatasetRecordConfig:
 
 
 @dataclass
+class RLTRecordConfig:
+    enable: bool = False
+    critical_phase_toggle_key: str = "p"
+    default_reset_mode: str = "full"
+
+
+@dataclass
 class RecordConfig:
     robot: RobotConfig
     dataset: DatasetRecordConfig
@@ -239,6 +246,7 @@ class RecordConfig:
     communication_retry_timeout_s: float = 2.0
     # Sleep interval between communication retries (seconds).
     communication_retry_interval_s: float = 0.1
+    rlt: RLTRecordConfig = field(default_factory=RLTRecordConfig)
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -273,6 +281,22 @@ class RecordConfig:
             if len(set(normalized_keys)) != len(normalized_keys):
                 raise ValueError(
                     "`intervention_toggle_key`, `episode_success_key`, and `episode_failure_key` must be distinct."
+                )
+
+        if self.rlt.enable:
+            if not self.rlt.critical_phase_toggle_key or len(self.rlt.critical_phase_toggle_key) != 1:
+                raise ValueError("`rlt.critical_phase_toggle_key` must be a single character.")
+
+            reserved_keys = [
+                self.rlt.critical_phase_toggle_key.lower(),
+                self.intervention_toggle_key.lower(),
+            ]
+            if self.enable_episode_outcome_labeling:
+                reserved_keys.append(self.episode_success_key.lower())
+                reserved_keys.append(self.episode_failure_key.lower())
+            if len(set(reserved_keys)) != len(reserved_keys):
+                raise ValueError(
+                    "`rlt.critical_phase_toggle_key` must not collide with intervention or episode outcome keys."
                 )
 
         if self.default_episode_success is not None:
@@ -318,6 +342,20 @@ def _ensure_human_inloop_compatible_features(
     }
 
 
+def _ensure_rlt_compatible_features(dataset_features: dict[str, dict]) -> None:
+    dataset_features["complementary_info.phase"] = {"dtype": "float32", "shape": (1,), "names": ["phase"]}
+    dataset_features["complementary_info.source_type"] = {
+        "dtype": "float32",
+        "shape": (1,),
+        "names": ["source_type"],
+    }
+    dataset_features["complementary_info.is_handover"] = {
+        "dtype": "float32",
+        "shape": (1,),
+        "names": ["is_handover"],
+    }
+
+
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
@@ -357,6 +395,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         action_names = dataset_features[ACTION]["names"]
         action_names = list(robot.action_features) if action_names is None else list(action_names)
         _ensure_human_inloop_compatible_features(dataset_features, action_feature_names=action_names)
+    if cfg.rlt.enable:
+        _ensure_rlt_compatible_features(dataset_features)
     if cfg.enable_collector_policy_id:
         dataset_features["complementary_info.collector_policy_id"] = {
             "dtype": "string",
@@ -445,6 +485,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         listener, events = init_keyboard_listener(
             intervention_toggle_key=cfg.intervention_toggle_key,
+            critical_phase_toggle_key=cfg.rlt.critical_phase_toggle_key if cfg.rlt.enable else None,
             episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
             episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
         )

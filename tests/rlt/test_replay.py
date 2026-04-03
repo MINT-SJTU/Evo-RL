@@ -52,6 +52,9 @@ def test_sample_shapes():
     assert batch["next_state_vec"].shape == (8, STATE_DIM)
     assert batch["next_ref_flat"].shape == (8, C * ACTION_DIM)
     assert batch["done"].shape == (8,)
+    assert batch["source"].shape == (8,)
+    assert batch["episode_id"].shape == (8,)
+    assert batch["is_critical"].shape == (8,)
 
 
 def test_sample_capped_by_buffer_size():
@@ -69,5 +72,6 @@ def test_batch_keys():
     expected_keys = {
         "state_vec", "exec_chunk_flat", "ref_chunk_flat",
         "reward_seq", "next_state_vec", "next_ref_flat", "done", "actual_steps",
+        "source", "episode_id", "is_critical",
     }
     assert set(batch.keys()) == expected_keys

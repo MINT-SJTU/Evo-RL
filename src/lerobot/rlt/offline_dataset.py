@@ -50,6 +50,9 @@ def build_transitions_from_demos(
     chunk_length: int,
     reward_fn=None,
     device: str = "cpu",
+    source: int = 0,
+    episode_id: int = -1,
+    is_critical: float = 0.0,
 ) -> list[ChunkTransition]:
     """Build ChunkTransitions from a *single-episode* sequential demo loader.
 
@@ -76,12 +79,21 @@ def build_transitions_from_demos(
             rew = _compute_reward(reward_fn, e, r, chunk_length)
             encoded.append((s, r, e, rew))
 
-    return _encoded_to_transitions(encoded, chunk_length)
+    return _encoded_to_transitions(
+        encoded,
+        chunk_length,
+        source=source,
+        episode_id=episode_id,
+        is_critical=is_critical,
+    )
 
 
 def _encoded_to_transitions(
     encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     chunk_length: int,
+    source: int = 0,
+    episode_id: int = -1,
+    is_critical: float = 0.0,
 ) -> list[ChunkTransition]:
     """Convert list of (state, ref, expert, reward) into ChunkTransitions."""
     transitions: list[ChunkTransition] = []
@@ -95,6 +107,9 @@ def _encoded_to_transitions(
             done=torch.tensor(float(is_last)),
             intervention=torch.tensor(0.0),
             actual_steps=torch.tensor(chunk_length),
+            source=torch.tensor(source),
+            episode_id=torch.tensor(episode_id),
+            is_critical=torch.tensor(is_critical),
         ))
     return transitions
 
@@ -149,7 +164,12 @@ def precompute_offline_buffer(
             collate_fn=rlt_demo_collate, num_workers=0, drop_last=False,
         )
         transitions = build_transitions_from_demos(
-            agent, loader, config.chunk_length, reward_fn=reward_fn, device=device,
+            agent,
+            loader,
+            config.chunk_length,
+            reward_fn=reward_fn,
+            device=device,
+            episode_id=ep_id,
         )
         for t in transitions:
             buf.add(t)
@@ -182,6 +202,9 @@ def save_cached_buffer(
             "next_state_vec": t.next_state_vec, "next_ref_chunk": t.next_ref_chunk,
             "done": t.done, "intervention": t.intervention,
             "actual_steps": t.actual_steps,
+            "source": t.source,
+            "episode_id": t.episode_id,
+            "is_critical": t.is_critical,
         }
         for t in transitions
     ]
@@ -197,6 +220,9 @@ def load_cached_buffer(
     data = torch.load(path, weights_only=False)
     buf = ReplayBuffer(capacity=capacity)
     for d in data:
+        d["source"] = d.get("source", torch.tensor(0))
+        d["episode_id"] = d.get("episode_id", torch.tensor(-1))
+        d["is_critical"] = d.get("is_critical", torch.tensor(0.0))
         buf.add(ChunkTransition(**d))
     logger.info("Loaded %d transitions from %s", len(buf), path)
     return buf

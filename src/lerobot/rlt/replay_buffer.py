@@ -8,11 +8,14 @@ import torch
 from lerobot.rlt.interfaces import (
     ACTUAL_STEPS,
     DONE,
+    EPISODE_ID,
     EXEC_CHUNK_FLAT,
+    IS_CRITICAL,
     NEXT_REF_FLAT,
     NEXT_STATE_VEC,
     REF_CHUNK_FLAT,
     REWARD_SEQ,
+    SOURCE,
     STATE_VEC,
     ChunkTransition,
 )
@@ -59,4 +62,7 @@ class ReplayBuffer:
             NEXT_REF_FLAT: stacked_next_ref.flatten(start_dim=-2),
             DONE: torch.stack([t.done for t in batch]),
             ACTUAL_STEPS: torch.stack([t.actual_steps for t in batch]),
+            SOURCE: torch.stack([t.source for t in batch]),
+            EPISODE_ID: torch.stack([t.episode_id for t in batch]),
+            IS_CRITICAL: torch.stack([t.is_critical for t in batch]),
         }

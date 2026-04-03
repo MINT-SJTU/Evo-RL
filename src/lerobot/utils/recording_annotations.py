@@ -25,6 +25,15 @@ EPISODE_SUCCESS = "success"
 EPISODE_FAILURE = "failure"
 VALID_EPISODE_SUCCESS_LABELS = {EPISODE_SUCCESS, EPISODE_FAILURE}
 
+# RLT phase constants
+PHASE_PREFIX = 0.0
+PHASE_CRITICAL = 1.0
+
+# RLT source type constants
+SOURCE_VLA = 0.0
+SOURCE_RL = 1.0
+SOURCE_HUMAN = 2.0
+
 
 def normalize_episode_success_label(label: str | None) -> str | None:
     """Normalize a user-provided episode label to canonical lowercase values."""

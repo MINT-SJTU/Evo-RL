@@ -20,6 +20,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 import numpy as np
+import torch
 
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -46,7 +47,13 @@ from lerobot.scripts.recording_hil import (
 from lerobot.teleoperators import Teleoperator, koch_leader, omx_leader, so_leader
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
-from lerobot.utils.recording_annotations import resolve_collector_policy_id
+from lerobot.utils.recording_annotations import (
+    PHASE_CRITICAL,
+    PHASE_PREFIX,
+    SOURCE_HUMAN,
+    SOURCE_VLA,
+    resolve_collector_policy_id,
+)
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import get_safe_torch_device
 from lerobot.utils.visualization_utils import log_rerun_data
@@ -114,6 +121,8 @@ def record_loop(
     acp_inference: ACPInferenceConfig | None = None,
     communication_retry_timeout_s: float = 2.0,
     communication_retry_interval_s: float = 0.1,
+    rlt_online_collector: Any | None = None,
+    rlt_deploy_policy: Any | None = None,
 ):
     if acp_inference is None:
         acp_inference = ACPInferenceConfig()
@@ -238,8 +247,15 @@ def record_loop(
                 sleep_s = interval_s if interval_s > 0.0 else remaining_s
                 time.sleep(min(sleep_s, remaining_s))
 
+    def build_action_tensor(values: RobotAction) -> torch.Tensor:
+        return torch.tensor(
+            [float(np.asarray(values[name]).reshape(-1)[0]) for name in action_feature_names],
+            dtype=torch.float32,
+        )
+
     timestamp = 0
     start_episode_t = time.perf_counter()
+    prev_phase = PHASE_PREFIX
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -269,6 +285,11 @@ def record_loop(
                     logging.info("Intervention release requested (S2): returning control to policy.")
             else:
                 logging.info("Intervention toggle ignored because policy+teleop are not both active.")
+
+        if events.get("toggle_critical_phase", False):
+            events["toggle_critical_phase"] = False
+            if rlt_deploy_policy is not None:
+                rlt_deploy_policy.trigger_critical_phase()
 
         # Get robot observation
         obs = robot.get_observation()
@@ -383,6 +404,18 @@ def record_loop(
                 lambda robot_action_to_send=robot_action_to_send: robot.send_action(robot_action_to_send),
             )
 
+        # Compute RLT metadata for both dataset writing and online collector.
+        # Only pop metadata when policy action was actually executed (not during intervention)
+        # to keep _meta_queue in sync with _action_queue.
+        rlt_meta = None
+        if rlt_deploy_policy is not None and not is_intervention:
+            rlt_meta = rlt_deploy_policy.pop_step_metadata()
+
+        rlt_phase = rlt_meta["phase"] if rlt_meta is not None else prev_phase
+        rlt_source = SOURCE_HUMAN if is_intervention else (rlt_meta["source_type"] if rlt_meta else SOURCE_VLA)
+        rlt_is_critical = float(rlt_phase == PHASE_CRITICAL)
+        rlt_is_handover = float(rlt_phase != prev_phase and rlt_phase == PHASE_CRITICAL)
+
         # Write to dataset
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
@@ -403,7 +436,23 @@ def record_loop(
                     policy_id=collector_policy_id_policy,
                     human_id=collector_policy_id_human,
                 )
+            # Always populate RLT columns when they exist in the schema
+            if "complementary_info.phase" in dataset.features:
+                frame["complementary_info.phase"] = np.array([rlt_phase], dtype=np.float32)
+                frame["complementary_info.source_type"] = np.array([rlt_source], dtype=np.float32)
+                frame["complementary_info.is_handover"] = np.array([rlt_is_handover], dtype=np.float32)
+            prev_phase = rlt_phase
             dataset.add_frame(frame)
+
+        if rlt_online_collector is not None:
+            action_tensor = build_action_tensor(action_values)
+            rlt_online_collector.on_frame(
+                action=action_tensor,
+                state_vec=rlt_meta["state_vec"] if rlt_meta is not None else None,
+                ref_chunk=rlt_meta["ref_chunk"] if rlt_meta is not None else None,
+                source_type=rlt_source,
+                is_critical=rlt_is_critical,
+            )
 
         if display_data:
             log_rerun_data(
