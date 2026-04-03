@@ -81,6 +81,52 @@ Notes:
 - `--safe-mode` gates each predicted chunk behind keyboard confirmation and clips each Cartesian translation step to `0.05 m` by default.
 - The runtime uses the bundled quantile stats file `src/lerobot/robots/arx5_follower/pi05_arx5_default_stats.json` unless `--stats-path` is provided.
 
+### 4.1 Dual-arm inference + intervention
+
+The current repository also provides a dual-arm runtime with the same keyboard/VR takeover flow as the
+single-arm script:
+
+```bash
+cd /home/user/workspace/zsj/Evo-RL
+conda activate lerobot
+export ARX_SDK_ROOT=~/workspace/ARX_X5/py/arx_x5_python
+
+lerobot-arx5-dual-infer \
+  --task "handover the object" \
+  --policy-path lerobot/pi05_bimanual \
+  --left-can-port can0 \
+  --right-can-port can1 \
+  --cameras base:254522071216 left_wrist:150622073629 right_wrist:409122272986 \
+  --safe-mode
+
+lerobot-arx5-dual-infer \
+  --task "Put the slippers on the shelf" \
+  --policy-path checkpoints/dual_towel/pretrained_model \
+  --left-can-port can0 \
+  --right-can-port can1 \
+  --cameras base:150622073629 left_wrist:352122273179 right_wrist:409122272986 \
+  --safe-mode
+
+python -m lerobot.scripts.lerobot_arx5_dual_infer \
+  --task "Fold the towel and put it on the edge of the table" \
+  --policy-path checkpoints/dual_towel/pretrained_model/ \
+  --left-can-port can0 \
+  --right-can-port can1 \
+  --cameras \
+    base:150622073629 \
+    left_wrist:352122273179 \
+    right_wrist:409122272986 \
+  --safe-mode \
+  --record-dir /home/user/workspace/zsj/Evo-RL/inference_records
+```
+
+Notes:
+
+- Dual-arm policy input/output state is fixed to 14 dims: left arm `state.0..6`, right arm `state.7..13`.
+- `V` switches from infer to dual-arm VR teleop, reusing the same two ARX5 clients without reopening CAN.
+- After pressing `Ctrl+C` in the VR process, the script reconnects infer cameras, holds both arms, and returns to keyboard `STOPPED` state.
+- `--raw-train-record-dir` is also supported in dual-arm mode; policy segments and VR takeover segments are recorded in the same raw format as the single-arm script.
+
 ## 5. Keyboard controls
 
 When keyboard control is enabled (the default):
@@ -105,21 +151,21 @@ In this mode, the keyboard semantics are overlaid on top of the existing control
 training trajectories):
 
 - `R`: start recording a new `episode` and resume the policy (if you are already recording, it continues
-  the same episode and the main loop stays in `RUNNING`)
+the same episode and the main loop stays in `RUNNING`)
 - `D`: end the current recording episode (if there was no VR takeover during this episode, the script will
-  wait for you to label success with `0/1`)
+wait for you to label success with `0/1`)
 - `0`: set `episode_success=0` (false)
 - `1`: set `episode_success=1` (true)
 - `V`: enter VR teleop (if you press `V` while recording, the current episode is marked as "human takeover"
-  (= VR takeover), and `episode_success` is forced to `1`)
+(= VR takeover), and `episode_success` is forced to `1`)
 
 VR takeover labeling:
 
 - VR segments are stored under `segment_*_vr/`
 - During conversion to LeRobot Dataset, `segment_*_vr` is mapped to
-  `complementary_info.is_intervention=1`
+`complementary_info.is_intervention=1`
 - If VR takeover happens within the episode, `episode_success` is forced to `1`, so after you press `D`
-  you usually will not need to press `0/1`.
+you usually will not need to press `0/1`.
 
 ### VR switch behavior (`V`)
 
@@ -219,8 +265,6 @@ LeRobotDataset storage location and structure (simplified):
 ## 6. Record-only mode
 
 To inspect policy outputs without moving the robot, add `--record-dir`:
-
-
 
 ```bash
 lerobot-arx5-infer \

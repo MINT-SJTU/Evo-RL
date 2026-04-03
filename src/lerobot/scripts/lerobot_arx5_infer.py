@@ -132,6 +132,10 @@ class KeyboardListener:
             tty.setcbreak(self._fd)
         except termios.error:
             self._old_settings = None
+            logger.warning(
+                "KeyboardListener: stdin is not a TTY; keyboard hotkeys ([R]/[D]/[Space]/...) are disabled. "
+                "Run the script attached to a real terminal (e.g. ssh/pty), not piped or detached stdin."
+            )
             return
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
@@ -924,6 +928,9 @@ def _run_vr_teleop_session(
             scale_factor=args.vr_scale_factor,
             enable_camera=vr_cam,
             enable_camera_display=vr_cam and not args.vr_no_camera_display,
+            camera_width=args.cam_width,
+            camera_height=args.cam_height,
+            camera_fps=args.fps,
             enable_log_data=False,
             can_ports={"right_arm": args.can_port},
             control_rate_hz=args.vr_control_hz,
@@ -973,12 +980,26 @@ def _run_keyboard_command(
         # Episode finalized; keep the loop stopped until the user explicitly resumes policy.
         return LoopState.STOPPED, False, True, False
 
-    if key == "d" and recorder is not None and recorder.recording_active:
-        logger.info("Stopping raw training recording (D).")
-        robot.hold_position()
-        time.sleep(0.05)
-        recorder.request_finish_episode()
-        return LoopState.STOPPED, False, True, False
+    if key == "d":
+        if recorder is None:
+            logger.warning(
+                "[D] Raw training recording is not enabled (omit --raw-train-record-dir). "
+                "Stopping policy like [Space]. Re-run with --raw-train-record-dir <dir> to use [D] to end episodes."
+            )
+            robot.hold_position()
+            time.sleep(0.05)
+            return LoopState.STOPPED, False, True, False
+        if recorder.recording_active:
+            logger.info("Stopping raw training recording (D).")
+            robot.hold_position()
+            time.sleep(0.05)
+            recorder.request_finish_episode()
+            return LoopState.STOPPED, False, True, False
+        if recorder.waiting_for_success_label:
+            logger.info("[D] Ignored: already waiting for success label; press [0] or [1] to finalize.")
+            return state, request_next_chunk, running, vr
+        logger.info("[D] Ignored: raw recording is not active (press [R] to start an episode).")
+        return state, request_next_chunk, running, vr
 
     if key == " ":
         robot.hold_position()
@@ -1000,9 +1021,6 @@ def _run_keyboard_command(
             robot.go_home()
             time.sleep(2.0)
             robot.hold_position()
-        elif key == "d":
-            # Handled above (covers both STOPPED and RUNNING states).
-            return LoopState.STOPPED, False, True, False
         elif key == "r":
             if recorder is not None and recorder.waiting_for_success_label:
                 logger.info("Waiting for success label (press '0' or '1'); ignoring [R] resume.")
