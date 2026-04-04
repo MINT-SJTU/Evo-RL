@@ -63,3 +63,23 @@ def build_mlp(
         in_dim = hidden_dim
     layers.append(nn.Linear(hidden_dim, out_dim))
     return nn.Sequential(*layers)
+
+
+def filter_encoder_only(state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], list[str]]:
+    """Keep only encoder keys from an rl_token state_dict.
+
+    Drops decoder.* and out_proj.* keys which are only needed during demo
+    adaptation training, not inference.
+
+    Returns:
+        filtered: state_dict with encoder-only keys
+        skipped: list of dropped key names
+    """
+    filtered = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k.startswith("decoder.") or k.startswith("out_proj."):
+            skipped.append(k)
+        else:
+            filtered[k] = v
+    return filtered, skipped

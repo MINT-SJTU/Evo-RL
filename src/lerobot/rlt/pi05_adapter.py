@@ -184,11 +184,6 @@ class Pi05VLAAdapter(VLAAdapter):
             tokens,
             masks,
         )
-        # Vision tower is no longer needed after embed_prefix; offload to CPU
-        # to free ~827 MB VRAM for subsequent attention computation
-        _gpu_device = device
-        self.pi05.paligemma_with_expert.paligemma.model.vision_tower.to("cpu")
-        torch.cuda.empty_cache()
 
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
@@ -231,9 +226,6 @@ class Pi05VLAAdapter(VLAAdapter):
             final_tokens = final_tokens.permute(0, 2, 1)  # (B, D, M)
             final_tokens = torch.nn.functional.adaptive_avg_pool1d(final_tokens, self.token_pool_size)
             final_tokens = final_tokens.permute(0, 2, 1)  # (B, pool_size, D)
-
-        # Restore vision tower to GPU for next forward pass
-        self.pi05.paligemma_with_expert.paligemma.model.vision_tower.to(_gpu_device)
 
         return VLAOutput(
             final_tokens=final_tokens,

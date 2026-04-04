@@ -5,12 +5,12 @@ import pytest
 
 from lerobot.rlt.collector import DummyEnvironment, warmup_collect, rl_collect_step
 from lerobot.rlt.replay_buffer import ReplayBuffer
-from lerobot.rlt.agent import RLTAgent
+from lerobot.rlt.policy import RLTPolicy
 from lerobot.rlt.config import RLTConfig
 from lerobot.rlt.vla_adapter import DummyVLAAdapter
 
 
-def _make_agent(token_dim=64, action_dim=7, proprio_dim=7):
+def _make_policy(token_dim=64, action_dim=7, proprio_dim=7):
     cfg = RLTConfig(
         action_dim=action_dim,
         proprio_dim=proprio_dim,
@@ -26,30 +26,28 @@ def _make_agent(token_dim=64, action_dim=7, proprio_dim=7):
 
     cfg.actor.hidden_dim = 32
     cfg.actor.num_layers = 1
-    cfg.critic.hidden_dim = 32
-    cfg.critic.num_layers = 1
 
     vla = DummyVLAAdapter(token_dim=token_dim, num_tokens=8, action_dim=action_dim, horizon=10)
-    return RLTAgent(cfg, vla)
+    return RLTPolicy(cfg, vla)
 
 
 def test_warmup_fills_buffer():
-    agent = _make_agent()
+    policy = _make_policy()
     env = DummyEnvironment(proprio_dim=7, action_dim=7)
     buf = ReplayBuffer(capacity=100)
 
-    steps = warmup_collect(env, agent, buf, num_steps=20, chunk_length=4)
+    steps = warmup_collect(env, policy, buf, num_steps=20, chunk_length=4)
     assert len(buf) > 0
     assert steps >= 20
 
 
 def test_rl_collect_step():
-    agent = _make_agent()
+    policy = _make_policy()
     env = DummyEnvironment(proprio_dim=7, action_dim=7)
     buf = ReplayBuffer(capacity=100)
 
     obs = env.reset()
-    next_obs, done, steps = rl_collect_step(env, agent, obs, buf, chunk_length=4)
+    next_obs, done, steps = rl_collect_step(env, policy, obs, buf, chunk_length=4)
 
     assert len(buf) == 1
     assert steps == 4

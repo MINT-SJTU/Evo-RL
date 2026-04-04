@@ -45,7 +45,7 @@ def split_episode_indices(
 
 @torch.no_grad()
 def build_transitions_from_demos(
-    agent,
+    policy,
     demo_loader: DataLoader,
     chunk_length: int,
     reward_fn=None,
@@ -61,8 +61,11 @@ def build_transitions_from_demos(
 
     In offline RL, exec_chunk = expert_chunk. If reward_fn is None, rewards
     default to zeros.
+
+    Args:
+        policy: RLTPolicy (uses .encode_observation for state extraction).
     """
-    agent.eval()
+    policy.eval()
     encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     for obs, expert_actions in demo_loader:
@@ -70,7 +73,7 @@ def build_transitions_from_demos(
             images={k: v.to(device) for k, v in obs.images.items()},
             proprio=obs.proprio.to(device),
         )
-        state_vec, ref_chunk = _encode_obs(agent, obs)
+        state_vec, ref_chunk = policy.encode_observation(obs)
         B = state_vec.shape[0]
         for i in range(B):
             s = state_vec[i].cpu()
@@ -119,7 +122,7 @@ def _encoded_to_transitions(
 # ---------------------------------------------------------------------------
 
 def precompute_offline_buffer(
-    agent,
+    policy,
     dataset_path: str,
     config,
     split: str = "train",
@@ -132,7 +135,7 @@ def precompute_offline_buffer(
     Iterates per-episode to correctly handle episode boundaries (done flags).
 
     Args:
-        agent: RLTAgent (frozen VLA + RL token encoder).
+        policy: RLTPolicy (frozen VLA + RL token encoder).
         dataset_path: Path to LeRobotDataset on disk.
         config: RLTConfig (needs vla_horizon, chunk_length, replay.capacity, seed).
         split: Which split to use ("train", "val", "test").
@@ -164,7 +167,7 @@ def precompute_offline_buffer(
             collate_fn=rlt_demo_collate, num_workers=0, drop_last=False,
         )
         transitions = build_transitions_from_demos(
-            agent,
+            policy,
             loader,
             config.chunk_length,
             reward_fn=reward_fn,
@@ -231,11 +234,6 @@ def load_cached_buffer(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-def _encode_obs(agent, obs: Observation) -> tuple[torch.Tensor, torch.Tensor]:
-    """Extract state_vec and ref_chunk via agent.encode_observation."""
-    return agent.encode_observation(obs)
-
 
 def _subsample_chunk(actions: torch.Tensor, target_len: int) -> torch.Tensor:
     """Subsample action trajectory from (H, D) to (target_len, D)."""

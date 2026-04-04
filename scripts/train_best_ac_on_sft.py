@@ -44,7 +44,6 @@ def parse_args() -> argparse.Namespace:
 
 def build_cache(args) -> None:
     """Build offline transition cache using SFT model."""
-    from lerobot.rlt.agent import RLTAgent
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.demo_loader import RLTDemoDataset, rlt_demo_collate
     from lerobot.rlt.offline_dataset import (
@@ -55,6 +54,7 @@ def build_cache(args) -> None:
         _episode_frame_range,
     )
     from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.rewards import build_reward_seq
     from torch.utils.data import DataLoader, Subset
 
@@ -81,14 +81,14 @@ def build_cache(args) -> None:
     )
     logger.info("SFT pi0.5 loaded")
 
-    agent = RLTAgent(config, vla).to(args.device)
+    policy = RLTPolicy(config, vla).to(args.device)
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-    agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+    policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
     logger.info("Loaded SFT RL token checkpoint from %s", args.checkpoint)
 
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
-    agent.eval()
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+    policy.eval()
 
     def reward_fn(expert_chunk, ref_chunk):
         return build_reward_seq(
@@ -120,7 +120,7 @@ def build_cache(args) -> None:
                 collate_fn=rlt_demo_collate, num_workers=0, drop_last=False,
             )
             transitions = build_transitions_from_demos(
-                agent, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
+                policy, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
             )
             if transitions:
                 transitions[-1].reward_seq[-1] += 10.0
@@ -135,11 +135,12 @@ def build_cache(args) -> None:
 
 def train_best_ac(args) -> None:
     """Train ResidualMLP actor-critic with beta=0.3 on cached SFT transitions."""
-    from lerobot.rlt.agent import RLTAgent
+    from lerobot.rlt.algorithm import RLTAlgorithm
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.evaluator import evaluate_offline
     from lerobot.rlt.losses import actor_loss, critic_loss
     from lerobot.rlt.offline_dataset import load_cached_buffer
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.utils import soft_update
     from lerobot.rlt.vla_adapter import DummyVLAAdapter
 
@@ -162,21 +163,24 @@ def train_best_ac(args) -> None:
     config.training.beta = 0.3
 
     vla = DummyVLAAdapter(token_dim=2048, action_dim=12, num_tokens=64, horizon=50)
-    agent = RLTAgent(config, vla).to(args.device)
+    policy = RLTPolicy(config, vla).to(args.device)
 
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-    agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+
+    algorithm = RLTAlgorithm(policy, config)
+    algorithm.to(args.device)
 
     train_buffer = load_cached_buffer(args.cache_dir, "train", capacity=200000)
     val_buffer = load_cached_buffer(args.cache_dir, "val", capacity=200000)
     logger.info("Buffers: train=%d, val=%d", len(train_buffer), len(val_buffer))
 
-    actor_opt = torch.optim.Adam(agent.actor.parameters(), lr=3e-4)
-    critic_opt = torch.optim.Adam(agent.critic.parameters(), lr=3e-4)
+    actor_opt = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=3e-4)
+    critic_opt = torch.optim.Adam(algorithm.critic.parameters(), lr=3e-4)
 
-    agent.train()
+    algorithm.train()
     critic_count = 0
     actor_losses, critic_losses = [], []
     start = time.time()
@@ -184,7 +188,7 @@ def train_best_ac(args) -> None:
     for step in range(1, args.gradient_steps + 1):
         batch = {k: v.to(args.device) for k, v in train_buffer.sample(256).items()}
 
-        c_loss = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, 0.99, 10)
+        c_loss = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, 0.99, 10)
         critic_opt.zero_grad()
         c_loss.backward()
         critic_opt.step()
@@ -192,13 +196,13 @@ def train_best_ac(args) -> None:
         critic_count += 1
 
         if critic_count % 2 == 0:
-            a_loss = actor_loss(agent.actor, agent.critic, batch, 0.3)
+            a_loss = actor_loss(algorithm.policy.actor, algorithm.critic, batch, 0.3)
             actor_opt.zero_grad()
             a_loss.backward()
             actor_opt.step()
             actor_losses.append(a_loss.item())
 
-        soft_update(agent.target_critic, agent.critic, 0.005)
+        soft_update(algorithm.target_critic, algorithm.critic, 0.005)
 
         if step % 5000 == 0:
             avg_a = sum(actor_losses[-2500:]) / max(len(actor_losses[-2500:]), 1)
@@ -208,18 +212,18 @@ def train_best_ac(args) -> None:
     elapsed = time.time() - start
     logger.info("Training done in %.1fs (%d steps/sec)", elapsed, args.gradient_steps / elapsed)
 
-    agent.eval()
-    eval_m = evaluate_offline(agent, val_buffer, config, num_batches=20)
+    algorithm.eval()
+    eval_m = evaluate_offline(algorithm, val_buffer, config, num_batches=20)
     logger.info("Eval: ref_mse=%.5f expert_mse=%.4f q_gap=%.5f td_err=%.4f",
                 eval_m.ref_action_mse, eval_m.expert_action_mse, eval_m.q_gap, eval_m.mean_critic_td_error)
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "actor_state_dict": agent.actor.state_dict(),
-        "critic_state_dict": agent.critic.state_dict(),
-        "target_critic_state_dict": agent.target_critic.state_dict(),
-        "rl_token_state_dict": agent.rl_token.state_dict(),
+        "actor_state_dict": algorithm.policy.actor.state_dict(),
+        "critic_state_dict": algorithm.critic.state_dict(),
+        "target_critic_state_dict": algorithm.target_critic.state_dict(),
+        "rl_token_state_dict": algorithm.policy.rl_token.state_dict(),
         "config": {
             "architecture": "residual_mlp",
             "actor_hidden": 256, "actor_layers": 3,

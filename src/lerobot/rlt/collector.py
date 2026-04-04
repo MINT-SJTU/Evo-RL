@@ -133,13 +133,16 @@ def _build_transition(
 
 def warmup_collect(
     env: Environment,
-    agent,
+    policy,
     replay_buffer: ReplayBuffer,
     num_steps: int,
     chunk_length: int,
     episode_id: int = -1,
 ) -> int:
     """Run VLA-only warmup, filling the replay buffer.
+
+    Args:
+        policy: RLTPolicy (uses .vla.forward_vla and ._extract_state_and_ref).
 
     Returns:
         total_steps: number of environment steps taken
@@ -149,8 +152,8 @@ def warmup_collect(
 
     while total_steps < num_steps:
         with torch.no_grad():
-            vla_out = agent.vla.forward_vla(obs)
-            state_vec, ref_chunk = agent._extract_state_and_ref(obs, vla_out)
+            vla_out = policy.vla.forward_vla(obs)
+            state_vec, ref_chunk = policy._extract_state_and_ref(obs, vla_out)
             action_chunk = ref_chunk  # warmup: use VLA reference as action
 
         obs_list, rewards, done, _ = execute_chunk(env, action_chunk, chunk_length)
@@ -159,8 +162,8 @@ def warmup_collect(
 
         next_obs = obs_list[-1] if obs_list else obs
         with torch.no_grad():
-            next_vla_out = agent.vla.forward_vla(next_obs)
-            next_state_vec, next_ref_chunk = agent._extract_state_and_ref(next_obs, next_vla_out)
+            next_vla_out = policy.vla.forward_vla(next_obs)
+            next_state_vec, next_ref_chunk = policy._extract_state_and_ref(next_obs, next_vla_out)
 
         transition = _build_transition(
             state_vec, action_chunk, ref_chunk, reward_seq,
@@ -176,7 +179,7 @@ def warmup_collect(
 
 def rl_collect_step(
     env: Environment,
-    agent,
+    policy,
     obs: Observation,
     replay_buffer: ReplayBuffer,
     chunk_length: int,
@@ -185,19 +188,22 @@ def rl_collect_step(
 ) -> tuple[Observation, bool, int]:
     """Execute one RL collection step with single VLA forward.
 
+    Args:
+        policy: RLTPolicy (uses .select_action and ._extract_state_and_ref).
+
     Returns:
         next_obs, done, steps_taken
     """
     with torch.no_grad():
-        action_chunk, _, state_vec, ref_chunk = agent.select_action(obs)
+        action_chunk, _, state_vec, ref_chunk = policy.select_action(obs)
 
     obs_list, rewards, done, _ = execute_chunk(env, action_chunk, chunk_length)
     reward_seq = pad_rewards(rewards, chunk_length)
 
     next_obs = obs_list[-1] if obs_list else obs
     with torch.no_grad():
-        next_vla_out = agent.vla.forward_vla(next_obs)
-        next_state_vec, next_ref_chunk = agent._extract_state_and_ref(next_obs, next_vla_out)
+        next_vla_out = policy.vla.forward_vla(next_obs)
+        next_state_vec, next_ref_chunk = policy._extract_state_and_ref(next_obs, next_vla_out)
 
     transition = _build_transition(
         state_vec, action_chunk, ref_chunk, reward_seq,

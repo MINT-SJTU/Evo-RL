@@ -5,67 +5,34 @@ import copy
 import torch
 import pytest
 
-from lerobot.rlt.agent import RLTAgent
-from lerobot.rlt.config import RLTConfig
-from lerobot.rlt.vla_adapter import DummyVLAAdapter
 from lerobot.rlt.losses import critic_loss, actor_loss
 from lerobot.rlt.utils import soft_update, flatten_chunk, compute_discount_vector
-from lerobot.rlt.interfaces import Observation
+from lerobot.rlt.interfaces import Observation, ChunkTransition
 from lerobot.rlt.replay_buffer import ReplayBuffer
-from lerobot.rlt.interfaces import ChunkTransition
-
-TOKEN_DIM = 64
-ACTION_DIM = 7
-PROPRIO_DIM = 7
-C = 4
-STATE_DIM = TOKEN_DIM + PROPRIO_DIM
-CHUNK_DIM = C * ACTION_DIM
+from tests.rlt.helpers import (
+    make_test_algorithm, make_batch, make_fake_transition,
+    TOKEN_DIM, ACTION_DIM, PROPRIO_DIM, C, STATE_DIM, CHUNK_DIM,
+)
 
 
 @pytest.fixture
-def agent():
-    cfg = RLTConfig(
-        action_dim=ACTION_DIM,
-        proprio_dim=PROPRIO_DIM,
-        chunk_length=C,
-        vla_horizon=10,
-    )
-    cfg.rl_token.token_dim = TOKEN_DIM
-    cfg.rl_token.nhead = 4
-    cfg.rl_token.enc_layers = 1
-    cfg.rl_token.dec_layers = 1
-    cfg.rl_token.ff_dim = 128
-    cfg.actor.hidden_dim = 32
-    cfg.actor.num_layers = 1
-    cfg.critic.hidden_dim = 32
-    cfg.critic.num_layers = 1
-
-    vla = DummyVLAAdapter(token_dim=TOKEN_DIM, num_tokens=8, action_dim=ACTION_DIM, horizon=10)
-    return RLTAgent(cfg, vla)
+def algorithm():
+    algo, _ = make_test_algorithm()
+    return algo
 
 
 @pytest.fixture
 def batch():
-    B = 8
-    return {
-        "state_vec": torch.randn(B, STATE_DIM),
-        "exec_chunk_flat": torch.randn(B, CHUNK_DIM),
-        "ref_chunk_flat": torch.randn(B, CHUNK_DIM),
-        "reward_seq": torch.randn(B, C),
-        "next_state_vec": torch.randn(B, STATE_DIM),
-        "next_ref_flat": torch.randn(B, CHUNK_DIM),
-        "done": torch.zeros(B),
-        "actual_steps": torch.full((B,), C),
-    }
+    return make_batch()
 
 
-def test_single_critic_step_loss_not_nan(agent, batch):
+def test_single_critic_step_loss_not_nan(algorithm, batch):
     """Single critic gradient step produces finite loss."""
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    algorithm.policy.freeze_vla()
+    algorithm.policy.freeze_rl_token_encoder()
 
-    optimizer = torch.optim.Adam(agent.critic.parameters(), lr=1e-3)
-    loss = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, gamma=0.99, C=C)
+    optimizer = torch.optim.Adam(algorithm.critic.parameters(), lr=1e-3)
+    loss = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, gamma=0.99, C=C)
     assert not torch.isnan(loss)
 
     optimizer.zero_grad()
@@ -73,17 +40,17 @@ def test_single_critic_step_loss_not_nan(agent, batch):
     optimizer.step()
 
     # Verify params changed
-    loss2 = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, gamma=0.99, C=C)
+    loss2 = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, gamma=0.99, C=C)
     assert not torch.isnan(loss2)
 
 
-def test_single_actor_step_loss_not_nan(agent, batch):
+def test_single_actor_step_loss_not_nan(algorithm, batch):
     """Single actor gradient step produces finite loss."""
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    algorithm.policy.freeze_vla()
+    algorithm.policy.freeze_rl_token_encoder()
 
-    optimizer = torch.optim.Adam(agent.actor.parameters(), lr=1e-3)
-    loss = actor_loss(agent.actor, agent.critic, batch, beta=1.0)
+    optimizer = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=1e-3)
+    loss = actor_loss(algorithm.policy.actor, algorithm.critic, batch, beta=1.0)
     assert not torch.isnan(loss)
 
     optimizer.zero_grad()
@@ -91,29 +58,29 @@ def test_single_actor_step_loss_not_nan(agent, batch):
     optimizer.step()
 
 
-def test_frozen_params_stay_frozen(agent, batch):
+def test_frozen_params_stay_frozen(algorithm, batch):
     """After freezing VLA and encoder, their params should not get gradients."""
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    algorithm.policy.freeze_vla()
+    algorithm.policy.freeze_rl_token_encoder()
 
     # Run both losses
-    c_loss = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, gamma=0.99, C=C)
+    c_loss = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, gamma=0.99, C=C)
     c_loss.backward()
 
     # VLA params: no grad
-    for p in agent.vla.parameters():
+    for p in algorithm.policy.vla.parameters():
         assert p.grad is None
 
     # RL token encoder params: no grad
-    assert agent.rl_token.rl_token_embed.grad is None
-    for p in agent.rl_token.encoder.parameters():
+    assert algorithm.policy.rl_token.rl_token_embed.grad is None
+    for p in algorithm.policy.rl_token.encoder.parameters():
         assert p.grad is None
 
 
-def test_full_forward_backward_pipeline(agent):
+def test_full_forward_backward_pipeline(algorithm):
     """End-to-end: obs -> state -> action -> critic -> loss -> backward."""
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    algorithm.policy.freeze_vla()
+    algorithm.policy.freeze_rl_token_encoder()
 
     obs = Observation(
         images={"base": torch.randn(4, 3, 64, 64)},
@@ -121,36 +88,36 @@ def test_full_forward_backward_pipeline(agent):
     )
 
     with torch.no_grad():
-        state = agent.get_rl_state(obs)
-        ref = agent.get_reference_chunk(obs)
+        state = algorithm.policy.get_rl_state(obs)
+        ref = algorithm.policy.get_reference_chunk(obs)
         ref_flat = flatten_chunk(ref)
 
-    action, mu = agent.actor.sample(state, ref_flat, training=True)
-    q = agent.critic.min_q(state, action)
+    action, mu = algorithm.policy.actor.sample(state, ref_flat, training=True)
+    q = algorithm.critic.min_q(state, action)
     loss = -q.mean()
     loss.backward()
 
     # Actor should have gradients
-    for p in agent.actor.parameters():
+    for p in algorithm.policy.actor.parameters():
         assert p.grad is not None
 
     # Critic should have gradients (from Q computation)
-    for p in agent.critic.parameters():
+    for p in algorithm.critic.parameters():
         assert p.grad is not None
 
 
-def test_soft_update_changes_target(agent):
+def test_soft_update_changes_target(algorithm):
     """Verify soft update actually modifies target critic."""
-    orig_params = [p.data.clone() for p in agent.target_critic.parameters()]
+    orig_params = [p.data.clone() for p in algorithm.target_critic.parameters()]
 
     # Perturb online critic
-    for p in agent.critic.parameters():
+    for p in algorithm.critic.parameters():
         p.data += torch.randn_like(p.data) * 0.1
 
-    soft_update(agent.target_critic, agent.critic, tau=0.1)
+    soft_update(algorithm.target_critic, algorithm.critic, tau=0.1)
 
     changed = False
-    for orig, p in zip(orig_params, agent.target_critic.parameters()):
+    for orig, p in zip(orig_params, algorithm.target_critic.parameters()):
         if not torch.allclose(orig, p.data):
             changed = True
             break
@@ -175,18 +142,7 @@ def test_replay_buffer_integration():
     """Test that buffer -> sample -> loss pipeline works end-to-end."""
     buf = ReplayBuffer(capacity=100)
     for _ in range(20):
-        t = ChunkTransition(
-            state_vec=torch.randn(STATE_DIM),
-            exec_chunk=torch.randn(C, ACTION_DIM),
-            ref_chunk=torch.randn(C, ACTION_DIM),
-            reward_seq=torch.randn(C),
-            next_state_vec=torch.randn(STATE_DIM),
-            next_ref_chunk=torch.randn(C, ACTION_DIM),
-            done=torch.tensor(0.0),
-            intervention=torch.tensor(0.0),
-            actual_steps=torch.tensor(C),
-        )
-        buf.add(t)
+        buf.add(make_fake_transition())
 
     from lerobot.rlt.actor import ChunkActor
     from lerobot.rlt.critic import TwinCritic

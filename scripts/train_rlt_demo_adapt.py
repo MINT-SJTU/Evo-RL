@@ -42,10 +42,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    from lerobot.rlt.agent import RLTAgent
+    from lerobot.rlt.algorithm import RLTAlgorithm
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.demo_loader import make_demo_loader
     from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.trainer import demo_adaptation
 
     config = RLTConfig.from_yaml(args.config) if args.config else RLTConfig()
@@ -75,10 +76,11 @@ def main() -> None:
     )
     logger.info("pi0.5 loaded")
 
-    agent = RLTAgent(config, vla).to(args.device)
+    policy = RLTPolicy(config, vla).to(args.device)
+    algorithm = RLTAlgorithm(policy, config)
     logger.info(
-        "RLTAgent created. RL token params: %.1fM",
-        sum(param.numel() for param in agent.rl_token.parameters()) / 1e6,
+        "RLTPolicy created. RL token params: %.1fM",
+        sum(param.numel() for param in policy.rl_token.parameters()) / 1e6,
     )
 
     # Resume from checkpoint if specified
@@ -86,7 +88,7 @@ def main() -> None:
     prior_losses = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location=args.device, weights_only=False)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
         start_step = ckpt.get("step", 0)
         prior_losses = ckpt.get("losses", [])
         logger.info("Resumed from step %d (loss=%.4f)", start_step, prior_losses[-1] if prior_losses else 0)
@@ -100,10 +102,12 @@ def main() -> None:
     )
     logger.info("Demo loader ready")
 
+    # Build full rl_token for demo adaptation (needs decoder)
+    rl_token_full = algorithm.build_rl_token_full(args.device)
     if args.vla_ft_weight > 0:
-        params = list(agent.rl_token.parameters()) + list(agent.vla.parameters())
+        params = list(rl_token_full.parameters()) + list(policy.vla.parameters())
     else:
-        params = list(agent.rl_token.parameters())
+        params = list(rl_token_full.parameters())
     optimizer = torch.optim.Adam(params, lr=config.demo_adaptation.lr)
 
     logger.info(
@@ -113,7 +117,7 @@ def main() -> None:
     )
     start_time = time.time()
     losses = demo_adaptation(
-        agent, config, demo_loader, optimizer,
+        algorithm, config, demo_loader, optimizer, rl_token_full=rl_token_full,
         save_dir=args.output_dir, save_every=args.save_every,
         start_step=start_step, prior_losses=prior_losses,
     )

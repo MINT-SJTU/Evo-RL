@@ -35,6 +35,7 @@ from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.rlt.configuration_rlt import RLTPretrainedConfig
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.sarm.configuration_sarm import SARMConfig
@@ -127,6 +128,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
 
         return XVLAPolicy
+    elif name == "rlt":
+        from lerobot.policies.rlt.modeling_rlt import RLTPretrainedPolicy
+
+        return RLTPretrainedPolicy
     elif name == "wall_x":
         from lerobot.policies.wall_x.modeling_wall_x import WallXPolicy
 
@@ -175,6 +180,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SmolVLAConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
+    elif policy_type == "rlt":
+        return RLTPretrainedConfig(**kwargs)
     elif policy_type == "groot":
         return GrootConfig(**kwargs)
     elif policy_type == "xvla":

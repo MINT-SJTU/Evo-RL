@@ -68,7 +68,7 @@ def _load_buffers_from_cache(cache_dir: str, capacity: int) -> tuple:
     return train_buffer, val_buffer
 
 
-def _precompute_buffers(agent, args: argparse.Namespace, config) -> tuple:
+def _precompute_buffers(policy, args: argparse.Namespace, config) -> tuple:
     from lerobot.rlt.offline_dataset import precompute_offline_buffer
     from lerobot.rlt.rewards import build_reward_seq
     from functools import partial
@@ -79,15 +79,16 @@ def _precompute_buffers(agent, args: argparse.Namespace, config) -> tuple:
         progress_scale=config.offline_rl.progress_scale,
     )
     logger.info("Precomputing train buffer from %s (reward_mode=%s)", args.dataset_path, config.offline_rl.reward_mode)
-    train_buffer = precompute_offline_buffer(agent, args.dataset_path, config, split="train", device=args.device, reward_fn=reward_fn)
+    train_buffer = precompute_offline_buffer(policy, args.dataset_path, config, split="train", device=args.device, reward_fn=reward_fn)
     logger.info("Precomputing val buffer from %s", args.dataset_path)
-    val_buffer = precompute_offline_buffer(agent, args.dataset_path, config, split="val", device=args.device, reward_fn=reward_fn)
+    val_buffer = precompute_offline_buffer(policy, args.dataset_path, config, split="val", device=args.device, reward_fn=reward_fn)
     return train_buffer, val_buffer
 
 
-def _create_agent_with_cache(config, checkpoint_path: str | None, device: str):
-    """Create agent with DummyVLAAdapter (no Pi05 needed when using cached transitions)."""
-    from lerobot.rlt.agent import RLTAgent
+def _create_algorithm_with_cache(config, checkpoint_path: str | None, device: str):
+    """Create algorithm with DummyVLAAdapter (no Pi05 needed when using cached transitions)."""
+    from lerobot.rlt.algorithm import RLTAlgorithm
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.vla_adapter import DummyVLAAdapter
 
     vla = DummyVLAAdapter(
@@ -96,20 +97,23 @@ def _create_agent_with_cache(config, checkpoint_path: str | None, device: str):
         num_tokens=64,
         horizon=config.vla_horizon,
     )
-    agent = RLTAgent(config, vla).to(device)
+    policy = RLTPolicy(config, vla).to(device)
 
     if checkpoint_path:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
         logger.info("Loaded RL token weights from %s", checkpoint_path)
 
-    return agent
+    algorithm = RLTAlgorithm(policy, config)
+    algorithm.to(device)
+    return algorithm
 
 
-def _create_agent_with_vla(config, args: argparse.Namespace):
-    """Create agent with real Pi05VLAAdapter (needed for precomputing buffers)."""
-    from lerobot.rlt.agent import RLTAgent
+def _create_algorithm_with_vla(config, args: argparse.Namespace):
+    """Create algorithm with real Pi05VLAAdapter (needed for precomputing buffers)."""
+    from lerobot.rlt.algorithm import RLTAlgorithm
     from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
+    from lerobot.rlt.policy import RLTPolicy
 
     logger.info("Loading pi0.5 from %s", args.model_path)
     vla = Pi05VLAAdapter(
@@ -121,16 +125,19 @@ def _create_agent_with_vla(config, args: argparse.Namespace):
         device=args.device,
         token_pool_size=args.token_pool_size,
     )
-    agent = RLTAgent(config, vla).to(args.device)
+    policy = RLTPolicy(config, vla).to(args.device)
 
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
         logger.info("Loaded RL token weights from %s", args.checkpoint)
 
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
-    return agent
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+
+    algorithm = RLTAlgorithm(policy, config)
+    algorithm.to(args.device)
+    return algorithm
 
 
 def main() -> None:
@@ -152,11 +159,11 @@ def main() -> None:
     if args.cache_dir:
         logger.info("Loading cached transitions from %s", args.cache_dir)
         train_buffer, val_buffer = _load_buffers_from_cache(args.cache_dir, config.replay.capacity)
-        agent = _create_agent_with_cache(config, args.checkpoint, args.device)
+        algorithm = _create_algorithm_with_cache(config, args.checkpoint, args.device)
     else:
         assert args.dataset_path, "--dataset-path is required when --cache-dir is not provided"
-        agent = _create_agent_with_vla(config, args)
-        train_buffer, val_buffer = _precompute_buffers(agent, args, config)
+        algorithm = _create_algorithm_with_vla(config, args)
+        train_buffer, val_buffer = _precompute_buffers(algorithm.policy, args, config)
 
     logger.info("Train buffer: %d transitions, Val buffer: %d transitions", len(train_buffer), len(val_buffer))
     logger.info(
@@ -165,12 +172,12 @@ def main() -> None:
         config.training.beta, config.actor.lr, config.critic.lr,
     )
 
-    actor_opt = torch.optim.Adam(agent.actor.parameters(), lr=config.actor.lr)
-    critic_opt = torch.optim.Adam(agent.critic.parameters(), lr=config.critic.lr)
+    actor_opt = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=config.actor.lr)
+    critic_opt = torch.optim.Adam(algorithm.critic.parameters(), lr=config.critic.lr)
 
     start_time = time.time()
     metrics = offline_rl_loop(
-        agent, config, train_buffer,
+        algorithm, config, train_buffer,
         val_buffer=val_buffer,
         actor_optimizer=actor_opt,
         critic_optimizer=critic_opt,
@@ -184,7 +191,7 @@ def main() -> None:
     )
 
     # Final evaluation on validation buffer
-    eval_metrics = evaluate_offline(agent, val_buffer, config, num_batches=10)
+    eval_metrics = evaluate_offline(algorithm, val_buffer, config, num_batches=10)
     logger.info(
         "Eval: expert_mse=%.4f, ref_mse=%.4f, Q_policy=%.4f, Q_expert=%.4f, Q_gap=%.4f, TD_err=%.4f",
         eval_metrics.expert_action_mse, eval_metrics.ref_action_mse,

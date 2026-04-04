@@ -40,8 +40,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    from lerobot.rlt.agent import RLTAgent
     from lerobot.rlt.config import RLTConfig
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.demo_loader import RLTDemoDataset, rlt_demo_collate
     from lerobot.rlt.offline_dataset import (
         build_transitions_from_demos,
@@ -74,15 +74,15 @@ def main() -> None:
     )
     logger.info("pi0.5 loaded")
 
-    # --- Build agent and load checkpoint ---
-    agent = RLTAgent(config, vla).to(args.device)
+    # --- Build policy and load checkpoint ---
+    policy = RLTPolicy(config, vla).to(args.device)
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-    agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+    policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
     logger.info("Loaded demo adaptation checkpoint from %s", args.checkpoint)
 
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
-    agent.eval()
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+    policy.eval()
 
     # --- Reward function ---
     reward_mode = args.reward_mode
@@ -134,7 +134,7 @@ def main() -> None:
                 drop_last=False,
             )
             transitions = build_transitions_from_demos(
-                agent, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
+                policy, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
             )
             # Add terminal bonus to last transition of each episode
             if transitions and success_bonus > 0:

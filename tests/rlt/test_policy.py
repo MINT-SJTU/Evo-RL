@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
-from lerobot.rlt.agent import RLTAgent
+from lerobot.rlt.policy import RLTPolicy
 from lerobot.rlt.config import RLTConfig
 from lerobot.rlt.vla_adapter import DummyVLAAdapter
 from lerobot.rlt.interfaces import Observation
@@ -18,7 +18,7 @@ C = 4
 
 
 @pytest.fixture
-def agent():
+def policy():
     cfg = RLTConfig(
         action_dim=ACTION_DIM,
         proprio_dim=PROPRIO_DIM,
@@ -32,11 +32,9 @@ def agent():
     cfg.rl_token.ff_dim = 128
     cfg.actor.hidden_dim = 32
     cfg.actor.num_layers = 1
-    cfg.critic.hidden_dim = 32
-    cfg.critic.num_layers = 1
 
     vla = DummyVLAAdapter(token_dim=TOKEN_DIM, num_tokens=8, action_dim=ACTION_DIM, horizon=10)
-    return RLTAgent(cfg, vla)
+    return RLTPolicy(cfg, vla)
 
 
 @pytest.fixture
@@ -47,38 +45,36 @@ def obs():
     )
 
 
-def test_get_rl_state_shape(agent, obs):
-    state = agent.get_rl_state(obs)
+def test_get_rl_state_shape(policy, obs):
+    state = policy.get_rl_state(obs)
     assert state.shape == (2, TOKEN_DIM + PROPRIO_DIM)
 
 
-def test_get_reference_chunk_shape(agent, obs):
-    ref = agent.get_reference_chunk(obs)
+def test_get_reference_chunk_shape(policy, obs):
+    ref = policy.get_reference_chunk(obs)
     assert ref.shape == (2, C, ACTION_DIM)
 
 
-def test_select_action_shape(agent, obs):
-    action, mu, state_vec, ref_chunk = agent.select_action(obs)
+def test_select_action_shape(policy, obs):
+    action, mu, state_vec, ref_chunk = policy.select_action(obs)
     assert action.shape == (2, C, ACTION_DIM)
     assert mu.shape == (2, C, ACTION_DIM)
     assert state_vec.shape[0] == 2
     assert ref_chunk.shape == (2, C, ACTION_DIM)
 
 
-def test_freeze_vla(agent):
-    agent.freeze_vla()
-    for p in agent.vla.parameters():
+def test_freeze_vla(policy):
+    policy.freeze_vla()
+    for p in policy.vla.parameters():
         assert not p.requires_grad
 
 
-def test_freeze_rl_token_encoder(agent):
-    agent.freeze_rl_token_encoder()
-    assert not agent.rl_token.rl_token_embed.requires_grad
-    for p in agent.rl_token.encoder.parameters():
+def test_freeze_rl_token_encoder(policy):
+    policy.freeze_rl_token_encoder()
+    assert not policy.rl_token.rl_token_embed.requires_grad
+    for p in policy.rl_token.encoder.parameters():
         assert not p.requires_grad
-    # Decoder should still be trainable
-    for p in agent.rl_token.decoder.parameters():
-        assert p.requires_grad
+    # Policy rl_token is inference_only, so no decoder to check
 
 
 def test_soft_update_correctness():

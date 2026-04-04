@@ -209,11 +209,12 @@ def run_experiment(
     results_file: Path,
 ) -> dict:
     """Run a single experiment and return metrics."""
-    from lerobot.rlt.agent import RLTAgent
+    from lerobot.rlt.algorithm import RLTAlgorithm
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.evaluator import evaluate_offline
     from lerobot.rlt.losses import actor_loss, critic_loss
     from lerobot.rlt.offline_dataset import load_cached_buffer
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.replay_buffer import ReplayBuffer
     from lerobot.rlt.utils import soft_update
     from lerobot.rlt.vla_adapter import DummyVLAAdapter
@@ -256,16 +257,19 @@ def run_experiment(
     config.training.batch_size = exp.batch_size
     config.training.actor_update_interval = exp.actor_update_interval
 
-    # Create agent
+    # Create algorithm
     vla = DummyVLAAdapter(token_dim=2048, action_dim=12, num_tokens=64, horizon=50)
-    agent = RLTAgent(config, vla).to(device)
+    policy = RLTPolicy(config, vla).to(device)
 
     if checkpoint:
         ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
 
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+
+    algorithm = RLTAlgorithm(policy, config)
+    algorithm.to(device)
 
     # Load cached transitions
     train_buffer = load_cached_buffer(cache_dir, "train", capacity=config.replay.capacity)
@@ -273,8 +277,8 @@ def run_experiment(
     logger.info("Buffers loaded: train=%d, val=%d", len(train_buffer), len(val_buffer))
 
     # Optimizers
-    actor_opt = torch.optim.Adam(agent.actor.parameters(), lr=config.actor.lr)
-    critic_opt = torch.optim.Adam(agent.critic.parameters(), lr=config.critic.lr)
+    actor_opt = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=config.actor.lr)
+    critic_opt = torch.optim.Adam(algorithm.critic.parameters(), lr=config.critic.lr)
 
     # Training loop
     C = config.chunk_length
@@ -286,13 +290,13 @@ def run_experiment(
     actor_losses = []
     critic_losses = []
 
-    agent.train()
+    algorithm.train()
     start_time = time.time()
 
     for step in range(1, exp.gradient_steps + 1):
         batch = {k: v.to(device) for k, v in train_buffer.sample(exp.batch_size).items()}
 
-        c_loss = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, gamma, C)
+        c_loss = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, gamma, C)
         critic_opt.zero_grad()
         c_loss.backward()
         critic_opt.step()
@@ -300,13 +304,13 @@ def run_experiment(
         critic_update_count += 1
 
         if critic_update_count % actor_interval == 0:
-            a_loss = actor_loss(agent.actor, agent.critic, batch, beta)
+            a_loss = actor_loss(algorithm.policy.actor, algorithm.critic, batch, beta)
             actor_opt.zero_grad()
             a_loss.backward()
             actor_opt.step()
             actor_losses.append(a_loss.item())
 
-        soft_update(agent.target_critic, agent.critic, tau)
+        soft_update(algorithm.target_critic, algorithm.critic, tau)
 
         if step % 5000 == 0:
             avg_a = sum(actor_losses[-2500:]) / max(len(actor_losses[-2500:]), 1)
@@ -319,8 +323,8 @@ def run_experiment(
     elapsed = time.time() - start_time
 
     # Evaluation
-    agent.eval()
-    eval_metrics = evaluate_offline(agent, val_buffer, config, num_batches=20)
+    algorithm.eval()
+    eval_metrics = evaluate_offline(algorithm, val_buffer, config, num_batches=20)
 
     # Compute summary stats
     final_actor_loss = sum(actor_losses[-1000:]) / max(len(actor_losses[-1000:]), 1)
@@ -341,8 +345,8 @@ def run_experiment(
         "td_error": eval_metrics.mean_critic_td_error,
         "elapsed_sec": elapsed,
         "steps_per_sec": exp.gradient_steps / elapsed,
-        "actor_params": sum(p.numel() for p in agent.actor.parameters()),
-        "critic_params": sum(p.numel() for p in agent.critic.parameters()),
+        "actor_params": sum(p.numel() for p in algorithm.policy.actor.parameters()),
+        "critic_params": sum(p.numel() for p in algorithm.critic.parameters()),
     }
 
     logger.info(

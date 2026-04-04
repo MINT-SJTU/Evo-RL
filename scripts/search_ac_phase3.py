@@ -131,11 +131,12 @@ def build_phase3_experiments() -> list[ExperimentConfig]:
 
 
 def run_experiment(exp, cache_dir, checkpoint, device, results_file):
-    from lerobot.rlt.agent import RLTAgent
+    from lerobot.rlt.algorithm import RLTAlgorithm
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.evaluator import evaluate_offline
     from lerobot.rlt.losses import actor_loss, critic_loss
     from lerobot.rlt.offline_dataset import load_cached_buffer
+    from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.utils import soft_update
     from lerobot.rlt.vla_adapter import DummyVLAAdapter
 
@@ -176,20 +177,23 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
     config.training.actor_update_interval = exp.actor_update_interval
 
     vla = DummyVLAAdapter(token_dim=2048, action_dim=12, num_tokens=64, horizon=50)
-    agent = RLTAgent(config, vla).to(device)
+    policy = RLTPolicy(config, vla).to(device)
 
     if checkpoint:
         ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-        agent.rl_token.load_state_dict(ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(ckpt["rl_token_state_dict"], strict=False)
 
-    agent.freeze_vla()
-    agent.freeze_rl_token_encoder()
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+
+    algorithm = RLTAlgorithm(policy, config)
+    algorithm.to(device)
 
     train_buffer = load_cached_buffer(cache_dir, "train", capacity=config.replay.capacity)
     val_buffer = load_cached_buffer(cache_dir, "val", capacity=config.replay.capacity)
 
-    actor_opt = torch.optim.Adam(agent.actor.parameters(), lr=config.actor.lr)
-    critic_opt = torch.optim.Adam(agent.critic.parameters(), lr=config.critic.lr)
+    actor_opt = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=config.actor.lr)
+    critic_opt = torch.optim.Adam(algorithm.critic.parameters(), lr=config.critic.lr)
 
     C = config.chunk_length
     gamma, beta, tau = config.training.gamma, config.training.beta, config.training.tau
@@ -197,13 +201,13 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
     critic_update_count = 0
     actor_losses, critic_losses = [], []
 
-    agent.train()
+    algorithm.train()
     start_time = time.time()
 
     for step in range(1, exp.gradient_steps + 1):
         batch = {k: v.to(device) for k, v in train_buffer.sample(exp.batch_size).items()}
 
-        c_loss = critic_loss(agent.critic, agent.target_critic, agent.actor, batch, gamma, C)
+        c_loss = critic_loss(algorithm.critic, algorithm.target_critic, algorithm.policy.actor, batch, gamma, C)
         critic_opt.zero_grad()
         c_loss.backward()
         critic_opt.step()
@@ -211,13 +215,13 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
         critic_update_count += 1
 
         if critic_update_count % actor_interval == 0:
-            a_loss = actor_loss(agent.actor, agent.critic, batch, beta)
+            a_loss = actor_loss(algorithm.policy.actor, algorithm.critic, batch, beta)
             actor_opt.zero_grad()
             a_loss.backward()
             actor_opt.step()
             actor_losses.append(a_loss.item())
 
-        soft_update(agent.target_critic, agent.critic, tau)
+        soft_update(algorithm.target_critic, algorithm.critic, tau)
 
         if step % 20000 == 0:
             avg_a = sum(actor_losses[-10000:]) / max(len(actor_losses[-10000:]), 1)
@@ -226,8 +230,8 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
 
     elapsed = time.time() - start_time
 
-    agent.eval()
-    eval_metrics = evaluate_offline(agent, val_buffer, config, num_batches=20)
+    algorithm.eval()
+    eval_metrics = evaluate_offline(algorithm, val_buffer, config, num_batches=20)
 
     final_actor = sum(actor_losses[-2000:]) / max(len(actor_losses[-2000:]), 1)
     final_critic = sum(critic_losses[-2000:]) / max(len(critic_losses[-2000:]), 1)
@@ -246,8 +250,8 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
         "td_error": eval_metrics.mean_critic_td_error,
         "elapsed_sec": elapsed,
         "steps_per_sec": exp.gradient_steps / elapsed,
-        "actor_params": sum(p.numel() for p in agent.actor.parameters()),
-        "critic_params": sum(p.numel() for p in agent.critic.parameters()),
+        "actor_params": sum(p.numel() for p in algorithm.policy.actor.parameters()),
+        "critic_params": sum(p.numel() for p in algorithm.critic.parameters()),
     }
 
     logger.info("[%s] DONE: actor=%.4f ref_mse=%.4f q_gap=%.4f time=%.1fs",
@@ -264,18 +268,18 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
         if result["ref_mse"] < best["ref_mse"]:
             best_file.write_text(json.dumps(result, indent=2))
             torch.save({
-                "actor_state_dict": agent.actor.state_dict(),
-                "critic_state_dict": agent.critic.state_dict(),
-                "target_critic_state_dict": agent.target_critic.state_dict(),
+                "actor_state_dict": algorithm.policy.actor.state_dict(),
+                "critic_state_dict": algorithm.critic.state_dict(),
+                "target_critic_state_dict": algorithm.target_critic.state_dict(),
                 "config": asdict(exp),
             }, output_dir / "best_checkpoint.pt")
             logger.info("[%s] NEW BEST! ref_mse=%.4f", exp.name, result["ref_mse"])
     else:
         best_file.write_text(json.dumps(result, indent=2))
         torch.save({
-            "actor_state_dict": agent.actor.state_dict(),
-            "critic_state_dict": agent.critic.state_dict(),
-            "target_critic_state_dict": agent.target_critic.state_dict(),
+            "actor_state_dict": algorithm.policy.actor.state_dict(),
+            "critic_state_dict": algorithm.critic.state_dict(),
+            "target_critic_state_dict": algorithm.target_critic.state_dict(),
             "config": asdict(exp),
         }, output_dir / "best_checkpoint.pt")
 

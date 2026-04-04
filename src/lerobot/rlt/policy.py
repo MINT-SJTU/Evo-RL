@@ -1,31 +1,27 @@
 from __future__ import annotations
 
-import copy
-
 import torch
 import torch.nn as nn
 
 from lerobot.rlt.actor import ChunkActor
 from lerobot.rlt.config import RLTConfig
-from lerobot.rlt.critic import TwinCritic
 from lerobot.rlt.interfaces import Observation, VLAOutput
 from lerobot.rlt.rl_token import RLTokenModule
 from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
 from lerobot.rlt.vla_adapter import VLAAdapter
 
 
-class RLTAgent(nn.Module):
-    """RLT Agent facade tying VLA adapter + RL token + actor + critic.
+class RLTPolicy(nn.Module):
+    """Inference-only RLT policy: VLA adapter + RL token encoder + actor.
 
-    Provides high-level methods for action selection and state computation
-    used by the collector and trainer.
+    Contains only the components needed for action selection. Training
+    state (critic, target critic) lives in RLTAlgorithm.
     """
 
-    def __init__(self, config: RLTConfig, vla: VLAAdapter, inference_only: bool = False):
+    def __init__(self, config: RLTConfig, vla: VLAAdapter):
         super().__init__()
         self.config = config
         self.vla = vla
-        self.inference_only = inference_only
 
         token_dim = vla.token_dim
         action_dim = vla.action_dim
@@ -39,7 +35,7 @@ class RLTAgent(nn.Module):
             num_dec_layers=config.rl_token.dec_layers,
             ff_dim=config.rl_token.ff_dim,
             num_rl_tokens=config.rl_token.num_rl_tokens,
-            inference_only=inference_only,
+            inference_only=True,
         )
 
         self.actor = ChunkActor(
@@ -54,21 +50,6 @@ class RLTAgent(nn.Module):
             residual=config.actor.residual,
         )
 
-        if not inference_only:
-            self.critic = TwinCritic(
-                state_dim=state_dim,
-                chunk_dim=chunk_dim,
-                hidden_dim=config.critic.hidden_dim,
-                num_layers=config.critic.num_layers,
-                activation=config.critic.activation,
-                layer_norm=config.critic.layer_norm,
-                residual=config.critic.residual,
-            )
-
-            self.target_critic = copy.deepcopy(self.critic)
-            for p in self.target_critic.parameters():
-                p.requires_grad = False
-
         self._subsample_indices: torch.Tensor | None = None
 
     def _get_subsample_indices(self, H: int) -> torch.Tensor:
@@ -79,7 +60,7 @@ class RLTAgent(nn.Module):
         return self._subsample_indices
 
     def _extract_state_and_ref(
-        self, obs: Observation, vla_out: VLAOutput
+        self, obs: Observation, vla_out: VLAOutput,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """From a single VLA output, extract state_vec and ref_chunk.
 

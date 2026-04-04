@@ -8,8 +8,9 @@ from lerobot.rlt.actor import ChunkActor
 from lerobot.rlt.critic import ChunkCritic, TwinCritic
 from lerobot.rlt.losses import discounted_chunk_return, critic_loss, actor_loss
 from lerobot.rlt.replay_buffer import ReplayBuffer
-from lerobot.rlt.utils import soft_update, flatten_chunk, unflatten_chunk, compute_discount_vector, build_mlp, subsample_indices
-from lerobot.rlt.agent import RLTAgent
+from lerobot.rlt.utils import soft_update, flatten_chunk, unflatten_chunk, compute_discount_vector, build_mlp, subsample_indices, filter_encoder_only
+from lerobot.rlt.policy import RLTPolicy
+from lerobot.rlt.algorithm import RLTAlgorithm
 from lerobot.rlt.collector import Environment, DummyEnvironment, execute_chunk
 from lerobot.rlt.rewards import build_reward_seq, REWARD_MODES
 
@@ -29,13 +30,15 @@ __all__ = [
     "critic_loss",
     "actor_loss",
     "ReplayBuffer",
-    "RLTAgent",
+    "RLTPolicy",
+    "RLTAlgorithm",
     "soft_update",
     "flatten_chunk",
     "unflatten_chunk",
     "compute_discount_vector",
     "build_mlp",
     "subsample_indices",
+    "filter_encoder_only",
     "Environment",
     "DummyEnvironment",
     "execute_chunk",
