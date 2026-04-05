@@ -30,6 +30,7 @@ class Pi05VLAAdapter(VLAAdapter):
         num_inference_steps: int = 10,
         cache_dir: str | None = None,
         token_pool_size: int = 0,  # 0 = no pooling, >0 = pool prefix tokens to this size
+        tokenizer_path: str | None = None,  # local path to tokenizer (avoids HF download)
     ):
         super().__init__()
         if num_inference_steps <= 0:
@@ -78,10 +79,8 @@ class Pi05VLAAdapter(VLAAdapter):
         policy = PI05Policy.from_pretrained(model_path, config=pi05_config, cache_dir=cache_dir)
         self.pi05: PI05Pytorch = policy.model
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            "leo009/paligemma-3b-pt-224",
-            cache_dir=cache_dir,
-        )
+        tokenizer_id = tokenizer_path or "leo009/paligemma-3b-pt-224"
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, cache_dir=cache_dir)
         self.tokenizer.padding_side = "right"
 
         for param in self.pi05.parameters():
