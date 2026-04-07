@@ -166,6 +166,7 @@ def record_loop(
     communication_retry_interval_s: float = 0.1,
     rlt_online_collector: Any | None = None,
     rlt_deploy_policy: Any | None = None,
+    critical_phase_tracker: Any | None = None,
 ):
     if acp_inference is None:
         acp_inference = ACPInferenceConfig()
@@ -337,6 +338,8 @@ def record_loop(
             events["toggle_critical_phase"] = False
             if rlt_deploy_policy is not None:
                 rlt_deploy_policy.trigger_critical_phase()
+            if critical_phase_tracker is not None and dataset is not None:
+                critical_phase_tracker.toggle(dataset.episode_buffer["size"])
 
         # Get robot observation
         obs = robot.get_observation()

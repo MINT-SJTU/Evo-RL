@@ -246,6 +246,10 @@ class RecordConfig:
     communication_retry_timeout_s: float = 2.0
     # Sleep interval between communication retries (seconds).
     communication_retry_interval_s: float = 0.1
+    # Enable critical phase labeling via keyboard toggle during recording.
+    enable_critical_phase_labeling: bool = False
+    # Keyboard key for toggling critical phase marking. Default is space.
+    critical_phase_toggle_key: str = " "
     rlt: RLTRecordConfig = field(default_factory=RLTRecordConfig)
     # Path to a JSON file with robot + camera config (e.g. roboclaw setup.json).
     # When set, overrides robot port and camera CLI args.
@@ -253,9 +257,9 @@ class RecordConfig:
 
     def __post_init__(self):
         if self.robot_config_file is not None:
-            from lerobot.scripts.robot_config_loader import load_robot_config_from_json
+            from lerobot.scripts.robot_config_loader import load_robot_config_fromjson
 
-            self.robot = load_robot_config_from_json(self.robot_config_file)
+            self.robot = load_robot_config_fromjson(self.robot_config_file)
 
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
         policy_path = parser.get_path_arg("policy")
@@ -491,9 +495,19 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 parallel_dispatch=cfg.policy_sync_parallel,
             )
 
+        critical_phase_tracker = None
+        if cfg.enable_critical_phase_labeling:
+            from lerobot.utils.critical_phase_tracker import CriticalPhaseTracker
+
+            critical_phase_tracker = CriticalPhaseTracker()
+
+        cp_key = cfg.critical_phase_toggle_key if cfg.enable_critical_phase_labeling else None
+        if cp_key is None and cfg.rlt.enable:
+            cp_key = cfg.rlt.critical_phase_toggle_key
+
         listener, events = init_keyboard_listener(
             intervention_toggle_key=cfg.intervention_toggle_key,
-            critical_phase_toggle_key=cfg.rlt.critical_phase_toggle_key if cfg.rlt.enable else None,
+            critical_phase_toggle_key=cp_key,
             episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
             episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
         )
@@ -503,6 +517,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 events["episode_outcome"] = None
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                if critical_phase_tracker is not None:
+                    critical_phase_tracker.on_episode_start(dataset.num_episodes)
                 record_loop(
                     robot=robot,
                     events=events,
@@ -526,7 +542,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     acp_inference=cfg.acp_inference,
                     communication_retry_timeout_s=cfg.communication_retry_timeout_s,
                     communication_retry_interval_s=cfg.communication_retry_interval_s,
+                    critical_phase_tracker=critical_phase_tracker,
                 )
+
+                if critical_phase_tracker is not None:
+                    ep_frames = dataset.episode_buffer["size"] if dataset.episode_buffer else 0
+                    critical_phase_tracker.on_episode_end(ep_frames)
 
                 episode_success = None
                 if cfg.enable_episode_outcome_labeling:
@@ -579,6 +600,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
+                    if critical_phase_tracker is not None:
+                        critical_phase_tracker.discard_episode(dataset.num_episodes)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     events["episode_outcome"] = None
@@ -600,6 +623,23 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 "  lerobot-dataset-report --dataset %s",
                 dataset.repo_id,
             )
+
+        if critical_phase_tracker is not None and len(critical_phase_tracker) > 0:
+            import json
+
+            intervals = critical_phase_tracker.get_intervals()
+            logging.info("Critical phase labeling: %d intervals recorded.", len(intervals))
+            for ep_idx, start, end in intervals:
+                logging.info("  Episode %d: frames %d-%d (%d frames)", ep_idx, start, end, end - start)
+            if dataset is not None:
+                intervals_file = dataset.root / "critical_phase_intervals.json"
+                with open(intervals_file, "w") as f:
+                    json.dump(
+                        [{"episode_index": ep, "start_frame": s, "end_frame": e} for ep, s, e in intervals],
+                        f,
+                        indent=2,
+                    )
+                logging.info("Critical phase intervals saved to %s", intervals_file)
 
         if policy_sync_executor is not None:
             policy_sync_executor.shutdown()

@@ -241,6 +241,16 @@ def predict_action(
     return action
 
 
+def _match_critical_phase_key(key, toggle_key: str, keyboard_module) -> bool:
+    """Check if the pressed key matches the critical phase toggle key.
+
+    Handles space (keyboard.Key.space) and regular character keys.
+    """
+    if toggle_key == " ":
+        return key == keyboard_module.Key.space
+    return hasattr(key, "char") and key.char and key.char.lower() == toggle_key.lower()
+
+
 def init_keyboard_listener(
     intervention_toggle_key: str = "i",
     critical_phase_toggle_key: str | None = None,
@@ -268,8 +278,7 @@ def init_keyboard_listener(
     events["rerecord_episode"] = False
     events["stop_recording"] = False
     events["toggle_intervention"] = False
-    if critical_phase_toggle_key is not None:
-        events["toggle_critical_phase"] = False
+    events["toggle_critical_phase"] = False
     events["episode_outcome"] = None
 
     listener = None
@@ -300,17 +309,12 @@ def init_keyboard_listener(
                     last_intervention_time[0] = now
                     print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
                     events["toggle_intervention"] = True
-                elif (
-                    critical_phase_toggle_key
-                    and hasattr(key, "char")
-                    and key.char
-                    and key.char.lower() == critical_phase_toggle_key.lower()
-                ):
+                elif critical_phase_toggle_key and _match_critical_phase_key(key, critical_phase_toggle_key, keyboard):
                     now = time.monotonic()
                     if now - last_critical_phase_time[0] < INTERVENTION_TOGGLE_COOLDOWN_S:
                         return
                     last_critical_phase_time[0] = now
-                    print(f"'{critical_phase_toggle_key}' key pressed. Toggling critical phase...")
+                    print(f"Critical phase toggle key pressed. Toggling critical phase...")
                     events["toggle_critical_phase"] = True
                 elif (
                     episode_success_key
