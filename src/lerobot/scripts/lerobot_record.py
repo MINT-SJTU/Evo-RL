@@ -419,6 +419,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     dataset = None
     listener = None
     policy_sync_executor = None
+    critical_phase_tracker = None
 
     try:
         if cfg.resume:
