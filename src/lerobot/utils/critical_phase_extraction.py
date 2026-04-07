@@ -54,7 +54,8 @@ def extract_critical_phase_dataset(
         use_videos=bool(source_ds.meta.video_keys),
     )
 
-    for seg_idx, (ep_idx, start_frame, end_frame) in enumerate(intervals):
+    for seg_idx, iv in enumerate(intervals):
+        ep_idx, start_frame, end_frame = iv[0], iv[1], iv[2]
         n_frames = end_frame - start_frame
         logging.info(f"[CP Extraction] Segment {seg_idx}: ep={ep_idx} frames={start_frame}-{end_frame} ({n_frames})")
 
