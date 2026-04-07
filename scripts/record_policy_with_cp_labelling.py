@@ -108,6 +108,8 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     full_name = f"local/eval_271ep_sft_autonomy_{timestamp}"
     cp_name = f"local/eval_271ep_sft_cp_{timestamp}"
+    cp_success_name = f"local/eval_271ep_sft_cp_success_{timestamp}"
+    cp_failure_name = f"local/eval_271ep_sft_cp_failure_{timestamp}"
 
     setup_path = args.setup_json or str(Path.home() / ".roboclaw/workspace/embodied/setup.json")
     with open(setup_path) as fh:
@@ -169,25 +171,63 @@ def main():
 
     with open(cp_json) as f:
         raw_intervals = json.load(f)
-    intervals = [(iv["episode_index"], iv["start_frame"], iv["end_frame"]) for iv in raw_intervals]
+    intervals = [
+        (iv["episode_index"], iv["start_frame"], iv["end_frame"], iv.get("outcome"))
+        for iv in raw_intervals
+    ]
 
     if not intervals:
         print("[CP] No critical phase intervals recorded.")
         return
 
-    cp_ds_root = Path(ds_root_base).expanduser() / cp_name.split("/", 1)[1]
-
     from lerobot.utils.critical_phase_extraction import extract_critical_phase_dataset
 
-    extract_critical_phase_dataset(
-        source_repo_id=full_name,
-        source_root=full_ds_root,
-        output_repo_id=cp_name,
-        output_root=cp_ds_root,
-        intervals=intervals,
-        task=args.task,
-    )
-    print(f"\n[CP] Done! CP dataset at: {cp_ds_root}")
+    # Check if any intervals have outcome labels
+    has_outcomes = any(iv[3] is not None for iv in intervals)
+
+    if has_outcomes:
+        # Split by outcome: success and failure get separate datasets
+        for outcome, ds_name in [("success", cp_success_name), ("failure", cp_failure_name)]:
+            matching = [iv for iv in intervals if iv[3] == outcome]
+            if not matching:
+                print(f"[CP] No {outcome} intervals found, skipping {ds_name}")
+                continue
+            ds_root = Path(ds_root_base).expanduser() / ds_name.split("/", 1)[1]
+            extract_critical_phase_dataset(
+                source_repo_id=full_name,
+                source_root=full_ds_root,
+                output_repo_id=ds_name,
+                output_root=ds_root,
+                intervals=matching,
+                task=args.task,
+            )
+            print(f"[CP] {outcome.capitalize()} dataset ({len(matching)} segments): {ds_root}")
+
+        # Also extract unlabeled intervals (outcome=None) into the generic cp dataset
+        unlabeled = [iv for iv in intervals if iv[3] is None]
+        if unlabeled:
+            cp_ds_root = Path(ds_root_base).expanduser() / cp_name.split("/", 1)[1]
+            extract_critical_phase_dataset(
+                source_repo_id=full_name,
+                source_root=full_ds_root,
+                output_repo_id=cp_name,
+                output_root=cp_ds_root,
+                intervals=unlabeled,
+                task=args.task,
+            )
+            print(f"[CP] Unlabeled intervals ({len(unlabeled)} segments): {cp_ds_root}")
+    else:
+        # No outcome labels — extract all into single CP dataset (backward compatible)
+        cp_ds_root = Path(ds_root_base).expanduser() / cp_name.split("/", 1)[1]
+        extract_critical_phase_dataset(
+            source_repo_id=full_name,
+            source_root=full_ds_root,
+            output_repo_id=cp_name,
+            output_root=cp_ds_root,
+            intervals=intervals,
+            task=args.task,
+        )
+        print(f"\n[CP] Done! CP dataset at: {cp_ds_root}")
 
 
 if __name__ == "__main__":

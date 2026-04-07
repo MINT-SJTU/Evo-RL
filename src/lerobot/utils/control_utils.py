@@ -77,6 +77,8 @@ class TTYKeyboardListener:
         critical_phase_toggle_key: str | None,
         episode_success_key: str | None,
         episode_failure_key: str | None,
+        cp_success_key: str | None = None,
+        cp_failure_key: str | None = None,
     ):
         self.events = events
         self.intervention_toggle_key = intervention_toggle_key.lower()
@@ -85,6 +87,8 @@ class TTYKeyboardListener:
         )
         self.episode_success_key = episode_success_key.lower() if episode_success_key else None
         self.episode_failure_key = episode_failure_key.lower() if episode_failure_key else None
+        self.cp_success_key = cp_success_key.lower() if cp_success_key else None
+        self.cp_failure_key = cp_failure_key.lower() if cp_failure_key else None
         self._fd = sys.stdin.fileno()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -180,6 +184,12 @@ class TTYKeyboardListener:
             self._last_critical_phase_time = now
             print(f"'{self.critical_phase_toggle_key}' key pressed. Toggling critical phase...")
             self.events["toggle_critical_phase"] = True
+        elif self.cp_success_key and normalized == self.cp_success_key:
+            print(f"'{self.cp_success_key}' key pressed. Marking critical phase as success...")
+            self.events["cp_mark_success"] = True
+        elif self.cp_failure_key and normalized == self.cp_failure_key:
+            print(f"'{self.cp_failure_key}' key pressed. Marking critical phase as failure...")
+            self.events["cp_mark_failure"] = True
         elif self.episode_success_key and normalized == self.episode_success_key:
             print(f"'{self.episode_success_key}' key pressed. Marking episode as success and exiting loop...")
             self.events["episode_outcome"] = EPISODE_SUCCESS
@@ -256,6 +266,8 @@ def init_keyboard_listener(
     critical_phase_toggle_key: str | None = None,
     episode_success_key: str | None = None,
     episode_failure_key: str | None = None,
+    cp_success_key: str | None = None,
+    cp_failure_key: str | None = None,
 ):
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
@@ -280,6 +292,8 @@ def init_keyboard_listener(
     events["toggle_intervention"] = False
     events["toggle_critical_phase"] = False
     events["episode_outcome"] = None
+    events["cp_mark_success"] = False
+    events["cp_mark_failure"] = False
 
     listener = None
     if not is_headless():
@@ -317,6 +331,22 @@ def init_keyboard_listener(
                     print(f"Critical phase toggle key pressed. Toggling critical phase...")
                     events["toggle_critical_phase"] = True
                 elif (
+                    cp_success_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == cp_success_key.lower()
+                ):
+                    print(f"'{cp_success_key}' key pressed. Marking critical phase as success...")
+                    events["cp_mark_success"] = True
+                elif (
+                    cp_failure_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == cp_failure_key.lower()
+                ):
+                    print(f"'{cp_failure_key}' key pressed. Marking critical phase as failure...")
+                    events["cp_mark_failure"] = True
+                elif (
                     episode_success_key
                     and hasattr(key, "char")
                     and key.char
@@ -348,6 +378,8 @@ def init_keyboard_listener(
             critical_phase_toggle_key=critical_phase_toggle_key,
             episode_success_key=episode_success_key,
             episode_failure_key=episode_failure_key,
+            cp_success_key=cp_success_key,
+            cp_failure_key=cp_failure_key,
         )
         listener.start()
         logging.warning(

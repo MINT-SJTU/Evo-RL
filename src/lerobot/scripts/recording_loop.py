@@ -340,6 +340,23 @@ def record_loop(
                 rlt_deploy_policy.trigger_critical_phase()
             if critical_phase_tracker is not None and dataset is not None:
                 critical_phase_tracker.toggle(dataset.episode_buffer["size"])
+                if critical_phase_tracker.is_active:
+                    from lerobot.utils.audio_feedback import say_start
+                    say_start()
+
+        if events.get("cp_mark_success", False):
+            events["cp_mark_success"] = False
+            if critical_phase_tracker is not None and dataset is not None:
+                critical_phase_tracker.mark_success(dataset.episode_buffer["size"])
+                from lerobot.utils.audio_feedback import say_success
+                say_success()
+
+        if events.get("cp_mark_failure", False):
+            events["cp_mark_failure"] = False
+            if critical_phase_tracker is not None and dataset is not None:
+                critical_phase_tracker.mark_failure(dataset.episode_buffer["size"])
+                from lerobot.utils.audio_feedback import say_failure
+                say_failure()
 
         # Get robot observation
         obs = robot.get_observation()

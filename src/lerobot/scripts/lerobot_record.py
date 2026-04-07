@@ -511,6 +511,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             critical_phase_toggle_key=cp_key,
             episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
             episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
+            cp_success_key="s" if cfg.enable_critical_phase_labeling else None,
+            cp_failure_key="f" if cfg.enable_critical_phase_labeling else None,
         )
 
         with VideoEncodingManager(dataset):
@@ -630,13 +632,20 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
             intervals = critical_phase_tracker.get_intervals()
             logging.info("Critical phase labeling: %d intervals recorded.", len(intervals))
-            for ep_idx, start, end in intervals:
-                logging.info("  Episode %d: frames %d-%d (%d frames)", ep_idx, start, end, end - start)
+            for ep_idx, start, end, outcome in intervals:
+                outcome_str = f" [{outcome}]" if outcome else ""
+                logging.info(
+                    "  Episode %d: frames %d-%d (%d frames)%s",
+                    ep_idx, start, end, end - start, outcome_str,
+                )
             if dataset is not None:
                 intervals_file = dataset.root / "critical_phase_intervals.json"
                 with open(intervals_file, "w") as f:
                     json.dump(
-                        [{"episode_index": ep, "start_frame": s, "end_frame": e} for ep, s, e in intervals],
+                        [
+                            {"episode_index": ep, "start_frame": s, "end_frame": e, "outcome": o}
+                            for ep, s, e, o in intervals
+                        ],
                         f,
                         indent=2,
                     )

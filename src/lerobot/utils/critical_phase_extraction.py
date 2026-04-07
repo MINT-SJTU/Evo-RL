@@ -16,18 +16,26 @@ def extract_critical_phase_dataset(
     source_root: Path,
     output_repo_id: str,
     output_root: Path,
-    intervals: list[tuple[int, int, int]],
+    intervals: list[tuple[int, int, int] | tuple[int, int, int, str | None]],
     task: str,
+    outcome_filter: str | None = None,
 ) -> Path | None:
     """Extract critical phase segments from a recorded dataset into a new dataset.
-    
-    Each interval (episode_idx, start_frame, end_frame) becomes a separate episode
-    in the output dataset.
-    
+
+    Each interval becomes a separate episode in the output dataset.
+    Intervals can be 3-tuples (ep_idx, start, end) or 4-tuples (..., outcome).
+
+    Args:
+        outcome_filter: If set, only extract intervals whose outcome matches
+            this value (e.g. "success", "failure"). None means extract all.
+
     Returns output_root on success, None if no intervals.
     """
+    if outcome_filter is not None:
+        intervals = [iv for iv in intervals if len(iv) >= 4 and iv[3] == outcome_filter]
+
     if not intervals:
-        logging.info("[CP Extraction] No intervals to extract.")
+        logging.info("[CP Extraction] No intervals to extract (filter=%s).", outcome_filter)
         return None
 
     logging.info(f"[CP Extraction] Extracting {len(intervals)} segments...")
