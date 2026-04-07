@@ -341,19 +341,22 @@ def record_loop(
             if critical_phase_tracker is not None and dataset is not None:
                 critical_phase_tracker.toggle(dataset.episode_buffer["size"])
                 if critical_phase_tracker.is_active:
-                    log_say("开始", play_sounds=True)
+                    from lerobot.utils.audio_feedback import say_start
+                    say_start()
 
         if events.get("cp_mark_success", False):
             events["cp_mark_success"] = False
             if critical_phase_tracker is not None and dataset is not None:
                 critical_phase_tracker.mark_success(dataset.episode_buffer["size"])
-                log_say("成功", play_sounds=True)
+                from lerobot.utils.audio_feedback import say_success
+                say_success()
 
         if events.get("cp_mark_failure", False):
             events["cp_mark_failure"] = False
             if critical_phase_tracker is not None and dataset is not None:
                 critical_phase_tracker.mark_failure(dataset.episode_buffer["size"])
-                log_say("失败", play_sounds=True)
+                from lerobot.utils.audio_feedback import say_failure
+                say_failure()
 
         # Get robot observation
         obs = robot.get_observation()

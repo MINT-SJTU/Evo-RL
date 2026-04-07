@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 
 
 def _speak_async(text: str) -> None:
-    """Non-blocking Chinese TTS via spd-say (speech-dispatcher, same as lerobot's say())."""
+    """Non-blocking Chinese TTS via pyttsx3 (espeak backend)."""
     def _run():
         try:
-            subprocess.run(["spd-say", "-l", "zh", text], capture_output=True, timeout=5)
-        except FileNotFoundError:
-            logging.debug("spd-say not found, TTS unavailable")
-        except subprocess.TimeoutExpired:
-            logging.debug("TTS timed out for: %s", text)
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.setProperty("rate", 180)
+            engine.say(text)
+            engine.runAndWait()
+        except Exception:
+            logging.debug("TTS unavailable for: %s", text)
     threading.Thread(target=_run, daemon=True).start()
 
 
