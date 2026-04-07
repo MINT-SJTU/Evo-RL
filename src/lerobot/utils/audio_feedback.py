@@ -6,23 +6,14 @@ import threading
 
 
 def _speak_async(text: str) -> None:
-    """Non-blocking Chinese TTS via espeak-ng or espeak fallback."""
+    """Non-blocking Chinese TTS via spd-say (speech-dispatcher, same as lerobot's say())."""
     def _run():
         try:
-            subprocess.run(
-                ["espeak-ng", "-v", "cmn", text],
-                capture_output=True, timeout=3,
-            )
+            subprocess.run(["spd-say", "-l", "zh", text], capture_output=True, timeout=5)
         except FileNotFoundError:
-            try:
-                subprocess.run(
-                    ["espeak", "-v", "zh", text],
-                    capture_output=True, timeout=3,
-                )
-            except FileNotFoundError:
-                logging.debug("No TTS engine available (espeak-ng / espeak not found)")
+            logging.debug("spd-say not found, TTS unavailable")
         except subprocess.TimeoutExpired:
-            logging.debug("TTS timed out for text: %s", text)
+            logging.debug("TTS timed out for: %s", text)
     threading.Thread(target=_run, daemon=True).start()
 
 
