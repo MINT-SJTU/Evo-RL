@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--save-every", type=int, default=2000)
     parser.add_argument("--token-pool-size", type=int, default=0, help="Pool prefix tokens (0=no pool)")
+    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"], help="VLA model dtype")
     return parser.parse_args()
 
 
@@ -69,7 +70,7 @@ def main() -> None:
         actual_action_dim=12,
         actual_proprio_dim=12,
         task_instruction=args.task_instruction,
-        dtype="bfloat16",
+        dtype=args.dtype,
         device=args.device,
         cache_dir=args.cache_dir,
         token_pool_size=args.token_pool_size,
