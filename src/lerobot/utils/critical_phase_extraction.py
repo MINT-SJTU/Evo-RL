@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.common.datasets.utils import DEFAULT_FEATURES
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot.datasets.image_writer import image_array_to_pil_image
 
 
