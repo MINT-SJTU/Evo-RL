@@ -84,7 +84,7 @@ def build_lerobot_record_argv(
         "--dataset.push_to_hub=false",
         f"--dataset.num_episodes={num_episodes}",
         f"--dataset.episode_time_s={episode_time_s}",
-        "--play_sounds=false",
+        "--play_sounds=true",
     ]
     if enable_critical_phase:
         argv.append("--enable_critical_phase_labeling=true")
