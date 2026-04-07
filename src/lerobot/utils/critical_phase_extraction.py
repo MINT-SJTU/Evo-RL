@@ -32,7 +32,7 @@ def extract_critical_phase_dataset(
 
     logging.info(f"[CP Extraction] Extracting {len(intervals)} segments...")
 
-    source_ds = LeRobotDataset(source_repo_id, root=source_root)
+    source_ds = LeRobotDataset(source_repo_id, root=source_root, video_backend="pyav")
 
     # Determine which features to copy (exclude DEFAULT_FEATURES)
     copy_features = {k: v for k, v in source_ds.features.items() if k not in DEFAULT_FEATURES}
