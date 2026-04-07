@@ -107,8 +107,8 @@ def main():
     os.environ["HF_HUB_OFFLINE"] = "1"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    full_name = f"local/271ep_sft_autonomy_{timestamp}"
-    cp_name = f"local/271ep_sft_cp_{timestamp}"
+    full_name = f"local/eval_271ep_sft_autonomy_{timestamp}"
+    cp_name = f"local/eval_271ep_sft_cp_{timestamp}"
 
     setup_path = args.setup_json or str(Path.home() / ".roboclaw/workspace/embodied/setup.json")
     with open(setup_path) as fh:
