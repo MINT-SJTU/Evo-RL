@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-instruction", default="pick up the object")
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"], help="VLA model dtype")
     return parser.parse_args()
 
 
@@ -68,7 +69,7 @@ def main() -> None:
         actual_action_dim=12,
         actual_proprio_dim=12,
         task_instruction=args.task_instruction,
-        dtype="bfloat16",
+        dtype=args.dtype,
         device=args.device,
         token_pool_size=args.token_pool_size,
     )
