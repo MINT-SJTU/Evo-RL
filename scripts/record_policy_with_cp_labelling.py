@@ -88,7 +88,6 @@ def build_lerobot_record_argv(
     ]
     if enable_critical_phase:
         argv.append("--enable_critical_phase_labeling=true")
-        argv.append("--critical_phase_toggle_key= ")
     return argv
 
 
