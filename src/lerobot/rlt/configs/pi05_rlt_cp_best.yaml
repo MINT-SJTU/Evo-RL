@@ -1,0 +1,63 @@
+seed: 0
+control_hz: 30
+action_dim: 12
+proprio_dim: 12
+vla_horizon: 50
+chunk_length: 10
+
+cameras:
+  - left_wrist
+  - right_wrist
+  - right_front
+
+rl_token:
+  token_dim: 2048
+  nhead: 8
+  enc_layers: 3
+  dec_layers: 3
+  ff_dim: 4096
+  num_rl_tokens: 4
+
+demo_adaptation:
+  steps: 50000
+  batch_size: 2
+  lr: 2.0e-4
+  vla_ft_weight: 0.0
+  grad_clip_norm: 1.0
+  warmup_steps: 2000
+  min_lr: 5.0e-6
+
+# Best AC config from CP search (p3_winner_lr_x0.1, ref_mse=0.0048)
+actor:
+  hidden_dim: 512
+  num_layers: 4
+  fixed_std: 0.01
+  lr: 3.0e-5
+  ref_dropout_p: 0.7
+  activation: silu
+  layer_norm: false
+  residual: true
+
+critic:
+  hidden_dim: 512
+  num_layers: 4
+  lr: 3.0e-5
+  activation: silu
+  layer_norm: false
+  residual: true
+
+training:
+  gamma: 0.9
+  beta: 5.0
+  tau: 0.02
+  batch_size: 64
+  utd_ratio: 5
+  actor_update_interval: 2
+
+replay:
+  capacity: 200000
+
+collector:
+  warmup_steps: 5000
+  total_env_steps: 100000
+  chunk_subsample_stride: 2
