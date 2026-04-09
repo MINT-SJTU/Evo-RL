@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from lerobot.datasets.repair.io_helpers import (
+from .io_helpers import (
     build_video_path,
     coerce_recovery_value,
     get_video_keys,
@@ -23,7 +23,7 @@ from lerobot.datasets.repair.io_helpers import (
     scan_parquet_files,
     write_info,
 )
-from lerobot.datasets.repair.types import (
+from .types import (
     SKIP_FRAME_KEYS,
     DamageType,
     DiagnosisResult,
@@ -390,7 +390,7 @@ def repair_missing_cp(dataset_dir: Path, diagnosis: DiagnosisResult) -> None:
 
 
 def truncate_recovery_jsonl(dataset_dir: Path, n_keep: int) -> None:
-    from lerobot.datasets.repair.io_helpers import sanitize_jsonl_line
+    from .io_helpers import sanitize_jsonl_line
 
     recovery_path = dataset_dir / "recovery_frames.jsonl"
     if not recovery_path.exists():
@@ -485,7 +485,7 @@ def repair_frame_mismatch(dataset_dir: Path, diagnosis: DiagnosisResult) -> None
 
 def _run_verify(diagnosis: DiagnosisResult) -> list[str]:
     """Determine verify directory and run verification."""
-    from lerobot.datasets.repair.diagnosis import verify_repaired_dataset
+    from .diagnosis import verify_repaired_dataset
 
     verify_dir = diagnosis.dataset_dir
     if diagnosis.damage_type in (DamageType.CRASH_NO_SAVE, DamageType.TMP_VIDEOS_STUCK):

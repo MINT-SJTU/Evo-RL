@@ -12,7 +12,8 @@ import sys
 import traceback
 from pathlib import Path
 
-from lerobot.datasets.repair import (
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dataset import (
     DamageType,
     DiagnosisResult,
     RepairResult,

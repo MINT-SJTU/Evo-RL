@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from lerobot.datasets.repair.io_helpers import (
+from .io_helpers import (
     build_video_path,
     count_images_per_camera,
     count_video_files,
@@ -20,7 +20,7 @@ from lerobot.datasets.repair.io_helpers import (
     safe_read_parquet_table,
     scan_parquet_files,
 )
-from lerobot.datasets.repair.types import DamageType, DiagnosisResult
+from .types import DamageType, DiagnosisResult
 
 log = logging.getLogger(__name__)
 
