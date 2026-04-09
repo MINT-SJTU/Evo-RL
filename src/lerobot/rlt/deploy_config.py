@@ -30,6 +30,9 @@ class DeployConfig:
     token_pool_size: int = 64
     chunk_length: int = 10
 
+    # Tokenizer
+    tokenizer_path: str | None = None
+
     # Actor-critic architecture (must match checkpoint)
     actor_hidden_dim: int = 256
     actor_num_layers: int = 3

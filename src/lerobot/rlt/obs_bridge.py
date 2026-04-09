@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from lerobot.rlt.interfaces import Observation
+
+
+def _to_tensor(x: torch.Tensor | np.ndarray | float | int) -> torch.Tensor:
+    if isinstance(x, torch.Tensor):
+        return x
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x)
+    return torch.tensor(x)
 
 
 def robot_obs_to_rlt_obs(
@@ -39,7 +48,7 @@ def _extract_images(
     """Extract and normalize camera images to (1, C, H, W) float32 in [0, 1]."""
     images: dict[str, torch.Tensor] = {}
     for key in camera_keys:
-        raw = _find_image_tensor(obs_dict, key)
+        raw = _to_tensor(_find_image_tensor(obs_dict, key))
         img = raw.to(device=device, dtype=torch.float32)
         # Ensure 4D: add batch dim if needed
         if img.ndim == 3:
@@ -74,7 +83,7 @@ def _extract_proprio(
     """Concatenate proprio values into (1, proprio_dim) tensor."""
     parts: list[torch.Tensor] = []
     for key in proprio_keys:
-        val = obs_dict[key].to(device=device, dtype=torch.float32)
+        val = _to_tensor(obs_dict[key]).to(device=device, dtype=torch.float32)
         if val.ndim == 0:
             val = val.unsqueeze(0)
         val = val.flatten()

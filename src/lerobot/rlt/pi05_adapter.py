@@ -79,8 +79,10 @@ class Pi05VLAAdapter(VLAAdapter):
         policy = PI05Policy.from_pretrained(model_path, config=pi05_config, cache_dir=cache_dir)
         self.pi05: PI05Pytorch = policy.model
 
-        tokenizer_id = tokenizer_path or "leo009/paligemma-3b-pt-224"
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, cache_dir=cache_dir)
+        tokenizer_id = tokenizer_path or "google/paligemma-3b-pt-224"
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_id, cache_dir=cache_dir, local_files_only=True,
+        )
         self.tokenizer.padding_side = "right"
 
         for param in self.pi05.parameters():

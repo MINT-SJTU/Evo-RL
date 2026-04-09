@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=3000,
                     help="Max steps per episode before auto-reset")
     p.add_argument("--log-level", type=str, default="INFO")
+    p.add_argument("--tokenizer-path", type=str, default=None,
+                    help="Local path to tokenizer (avoids HF download)")
+    # Actor architecture (must match checkpoint)
+    p.add_argument("--actor-hidden-dim", type=int, default=256)
+    p.add_argument("--actor-num-layers", type=int, default=3)
+    p.add_argument("--actor-residual", action="store_true", default=True)
+    p.add_argument("--actor-activation", type=str, default="relu")
     # Robot hardware
     p.add_argument("--left-port", type=str, default="/dev/ttyACM3")
     p.add_argument("--right-port", type=str, default="/dev/ttyACM2")
@@ -60,6 +67,8 @@ def parse_args() -> argparse.Namespace:
                     default="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0")
     p.add_argument("--front-cam-serial", type=str, default="152122079296",
                     help="Intel RealSense serial number for front camera")
+    p.add_argument("--front-cam", type=str, default="",
+                    help="OpenCV front camera path (overrides --front-cam-serial)")
     return p.parse_args()
 
 
@@ -165,6 +174,11 @@ def main() -> None:
         task_instruction=args.task,
         token_pool_size=args.token_pool_size,
         chunk_length=args.chunk_length,
+        tokenizer_path=args.tokenizer_path,
+        actor_hidden_dim=args.actor_hidden_dim,
+        actor_num_layers=args.actor_num_layers,
+        actor_residual=args.actor_residual,
+        actor_activation=args.actor_activation,
     )
 
     log.info("Building RLT deploy policy...")
@@ -191,7 +205,10 @@ def main() -> None:
                 index_or_path=args.right_cam,
                 width=640, height=480, fps=30, fourcc="MJPG",
             ),
-            "front": RealSenseCameraConfig(
+            "front": OpenCVCameraConfig(
+                index_or_path=args.front_cam,
+                width=640, height=480, fps=30, fourcc="MJPG",
+            ) if args.front_cam else RealSenseCameraConfig(
                 serial_number_or_name=args.front_cam_serial,
                 width=640, height=480, fps=30, warmup_s=2,
             ),

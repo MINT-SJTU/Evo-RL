@@ -41,6 +41,7 @@ class RLTDeployPolicy(nn.Module):
             task_instruction=config.task_instruction,
             device=config.device,
             token_pool_size=config.token_pool_size,
+            tokenizer_path=config.tokenizer_path,
         )
 
         rlt_config = _build_rlt_config(config, self.vla.action_dim)
