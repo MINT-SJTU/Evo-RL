@@ -14,6 +14,7 @@
 
 """Core recording loop used by `lerobot_record.py`."""
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -301,11 +302,32 @@ def record_loop(
             dtype=torch.float32,
         )
 
+    # Open sidecar JSONL for crash-recovery (state/action per frame)
+    _recovery_fh = None
+    _frame_counter = 0
+    if dataset is not None and hasattr(dataset, "root") and dataset.root is not None:
+        _recovery_path = dataset.root / "recovery_frames.jsonl"
+        _recovery_fh = open(_recovery_path, "a")  # noqa: SIM115
+
+    def _is_image_key(key: str) -> bool:
+        return "image" in key or (dataset is not None and key in dataset.features
+                                  and dataset.features[key].get("dtype") in ("video", "image"))
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     prev_phase = PHASE_PREFIX
+    _frame_idx = 0
+    _cuda_cleanup_interval = 500  # defrag CUDA allocator every N frames
+
+    # Per-frame timing instrumentation → /tmp/frame_timing.csv
+    _perf_fh = open("/tmp/frame_timing.csv", "w")  # noqa: SIM115
+    _perf_fh.write("frame,total_ms,obs_ms,infer_ms,send_ms,dataset_ms,sleep_ms\n")
+
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
+        _t_infer = 0.0  # only set on inference frames
+        _t_send = 0.0
+        _t_dataset = 0.0
 
         if events["exit_early"]:
             events["exit_early"] = False
@@ -359,7 +381,9 @@ def record_loop(
                 say_failure()
 
         # Get robot observation
+        _t0 = time.perf_counter()
         obs = robot.get_observation()
+        _t_obs = (time.perf_counter() - _t0) * 1000
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -376,6 +400,7 @@ def record_loop(
             and postprocessor is not None
             and not (intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE)
         ):
+            _t0 = time.perf_counter()
             policy_action = _predict_policy_action_with_acp_inference(
                 observation_frame=observation_frame,
                 policy=policy,
@@ -389,6 +414,7 @@ def record_loop(
                 cond_runtime_state=cond_policy_runtime_state,
                 uncond_runtime_state=uncond_policy_runtime_state,
             )
+            _t_infer = (time.perf_counter() - _t0) * 1000
             act_processed_policy = make_robot_action(policy_action, dataset.features)
 
         if isinstance(teleop, Teleoperator):
@@ -458,6 +484,7 @@ def record_loop(
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         selected_from_policy = act_processed_policy is not None and action_values is act_processed_policy
+        _t0 = time.perf_counter()
         if policy_sync_executor is not None and selected_from_policy:
             _sent_action = run_with_connection_retry(
                 "policy_sync_executor.send_action",
@@ -470,6 +497,7 @@ def record_loop(
                 "robot.send_action",
                 lambda robot_action_to_send=robot_action_to_send: robot.send_action(robot_action_to_send),
             )
+        _t_send = (time.perf_counter() - _t0) * 1000
 
         # Compute RLT metadata for both dataset writing and online collector.
         # Only pop metadata when policy action was actually executed (not during intervention)
@@ -509,7 +537,23 @@ def record_loop(
                 frame["complementary_info.source_type"] = np.array([rlt_source], dtype=np.float32)
                 frame["complementary_info.is_handover"] = np.array([rlt_is_handover], dtype=np.float32)
             prev_phase = rlt_phase
+            _t0 = time.perf_counter()
             dataset.add_frame(frame)
+            _t_dataset = (time.perf_counter() - _t0) * 1000
+
+            # Write non-image fields to sidecar for crash recovery
+            if _recovery_fh is not None:
+                recovery_row = {}
+                for k, v in frame.items():
+                    if _is_image_key(k) or k == "task":
+                        continue
+                    if isinstance(v, np.ndarray):
+                        recovery_row[k] = v.tolist()
+                    elif isinstance(v, (int, float, str, bool)):
+                        recovery_row[k] = v
+                _recovery_fh.write(json.dumps(recovery_row) + "\n")
+                _recovery_fh.flush()
+                _frame_counter += 1
 
         if rlt_online_collector is not None:
             action_tensor = build_action_tensor(action_values)
@@ -529,7 +573,33 @@ def record_loop(
         if intervention_state == INTERVENTION_STATE_RELEASE:
             intervention_state = INTERVENTION_STATE_POLICY
 
+        # Periodically defragment CUDA allocator and trigger Python GC to prevent
+        # progressive inference slowdown from allocator fragmentation + GC pressure.
+        # (KV cache alloc/dealloc every n_action_steps fragments the CUDA free list;
+        # episode_buffer accumulates ~20 numpy arrays/frame → 250K+ objects by 10 min.)
+        _frame_idx += 1
+        if policy is not None and _frame_idx % _cuda_cleanup_interval == 0:
+            torch.cuda.empty_cache()
+
         dt_s = time.perf_counter() - start_loop_t
         precise_sleep(max(1 / fps - dt_s, 0.0))
+        _t_total = (time.perf_counter() - start_loop_t) * 1000
+        _t_sleep = _t_total - dt_s * 1000
+        _perf_fh.write(
+            f"{_frame_idx},{_t_total:.1f},{_t_obs:.1f},{_t_infer:.1f},"
+            f"{_t_send:.1f},{_t_dataset:.1f},{_t_sleep:.1f}\n"
+        )
+        if _frame_idx % 100 == 0:
+            _perf_fh.flush()
 
         timestamp = time.perf_counter() - start_episode_t
+
+    # Close timing file
+    if _perf_fh is not None:
+        _perf_fh.close()
+        logging.info("[Timing] Wrote %d frame timings to /tmp/frame_timing.csv", _frame_idx)
+
+    # Close sidecar file
+    if _recovery_fh is not None:
+        logging.info("[Recovery] Wrote %d frames to recovery_frames.jsonl", _frame_counter)
+        _recovery_fh.close()

@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,21 @@ def main():
         env = os.environ.copy()
         env["HF_HUB_OFFLINE"] = "1"
 
+        proc = None
+        sigint_count = 0
+
+        def _on_sigint(signum, frame):
+            nonlocal sigint_count
+            sigint_count += 1
+            if sigint_count == 1:
+                log.info("Ctrl+C — waiting for subprocess to save data...")
+                print("\n[Ctrl+C] Waiting for save to complete (press again to force quit)...")
+            elif proc and proc.poll() is None:
+                log.warning("Force killing subprocess")
+                proc.kill()
+
+        prev_handler = signal.signal(signal.SIGINT, _on_sigint)
+
         # Capture subprocess stdout/stderr to log file as well
         with open(log_file, "a") as lf:
             proc = subprocess.Popen(
@@ -251,13 +267,22 @@ def main():
                 text=True,
                 bufsize=1,
             )
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                lf.write(line)
-                lf.flush()
-            proc.wait()
+            try:
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    lf.write(line)
+                    lf.flush()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                log.warning("Subprocess did not exit in 60s, killing")
+                proc.kill()
+                proc.wait()
 
+        signal.signal(signal.SIGINT, prev_handler)
         log.info("Subprocess exit code: %d", proc.returncode)
 
     # Always run diagnostic, even on failure

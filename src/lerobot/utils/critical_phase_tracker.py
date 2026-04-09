@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 
 class CriticalPhaseTracker:
@@ -10,10 +12,11 @@ class CriticalPhaseTracker:
     is "success", "failure", or None (toggle-closed / auto-closed).
     """
 
-    def __init__(self):
+    def __init__(self, auto_save_path: Path | str | None = None):
         self._intervals: list[tuple[int, int, int, str | None]] = []
         self._current_start: int | None = None
         self._current_episode: int = 0
+        self._auto_save_path = Path(auto_save_path) if auto_save_path else None
 
     def on_episode_start(self, episode_idx: int) -> None:
         """Call at the start of each episode. Auto-closes any unclosed interval."""
@@ -56,6 +59,7 @@ class CriticalPhaseTracker:
             f"{frame_index - self._current_start} frames{outcome_str})"
         )
         self._current_start = None
+        self._auto_save()
 
     def on_episode_end(self, total_frames: int) -> None:
         """Call before save_episode. Auto-closes unclosed interval with outcome=None."""
@@ -73,6 +77,19 @@ class CriticalPhaseTracker:
         if discarded > 0:
             logging.info(f"[CP] Discarded {discarded} intervals for episode {episode_idx}")
         self._current_start = None
+        self._auto_save()
+
+    def _auto_save(self) -> None:
+        """Write current intervals to disk for crash recovery."""
+        if self._auto_save_path is None:
+            return
+        data = [
+            {"episode_index": ep, "start_frame": s, "end_frame": e, "outcome": o}
+            for ep, s, e, o in self._intervals
+        ]
+        self._auto_save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._auto_save_path, "w") as f:
+            json.dump(data, f, indent=2)
 
     def get_intervals(self) -> list[tuple[int, int, int, str | None]]:
         """Return all recorded intervals as (episode_idx, start_frame, end_frame, outcome)."""

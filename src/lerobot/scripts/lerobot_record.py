@@ -500,7 +500,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if cfg.enable_critical_phase_labeling:
             from lerobot.utils.critical_phase_tracker import CriticalPhaseTracker
 
-            critical_phase_tracker = CriticalPhaseTracker()
+            critical_phase_tracker = CriticalPhaseTracker(
+                auto_save_path=dataset.root / "critical_phase_intervals.json",
+            )
 
         cp_key = cfg.critical_phase_toggle_key if cfg.enable_critical_phase_labeling else None
         if cp_key is None and cfg.rlt.enable:
