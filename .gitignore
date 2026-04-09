@@ -178,4 +178,13 @@ outputs/
 *.xml
 *.part
 AGENTS.md
-docs/实现对比.md
+docs/rlt/
+docs/rlt_final_dev_plan.md
+dev_plan.md
+
+# Claude Code local config
+.claude/
+docs/.claude/
+
+# Local replay datasets
+replay/

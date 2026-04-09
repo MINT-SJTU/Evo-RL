@@ -230,6 +230,12 @@ scripts/
   deploy_rlt.py                    # Real robot deployment with SO101 bilateral robot
 ```
 
+## Robot Hardware Config
+
+- **Calibration**: `~/.cache/huggingface/lerobot/calibration/{robots/so_follower,teleoperators/so_leader}/bi_so101_*.json`
+- **RoboClaw setup**: `~/.roboclaw/workspace/embodied/setup.json` (arm ports + camera mapping, used by `--robot_config_file`)
+- **Stable device paths**: `/dev/serial/by-id/` (arms), `/dev/v4l/by-path/` (cameras)
+
 ## Deployment
 
 ### Hardware Requirements
