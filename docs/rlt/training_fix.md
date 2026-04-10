@@ -1,126 +1,151 @@
-# Offline RL Training Bug: Action Space Mismatch
+# Offline RL 训练 Bug：Action/State 空间不匹配
 
-## Root Cause
+## 问题发现经过
 
-During offline RL training,`exec_chunk` (expert actions from dataset) and `ref_chunk` (VLA reference actions) are in **different action spaces**:
+### 起因：部署时机械臂剧烈运动
 
-| Component | Source | Space | Typical Range |
-|-----------|--------|-------|---------------|
-| `exec_chunk` | LeRobot dataset `action` field | Raw degrees | [-103°, 97°] |
-| `ref_chunk` | VLA `sampled_action_chunk` output | Normalized | [-1, 1] |
+在 Machine 100 (4090) 上部署 RLT 策略时，发现两个现象：
+- **不加 unnormalize**：机械臂固定在中位（action ~0 被当作角度 → ~0°）
+- **加 unnormalize**：机械臂剧烈大幅运动
 
-This mismatch propagates through the entire training pipeline:
+### 定位过程
 
-1. **Critic** learns `Q(state, degree_action)` from `exec_chunk` in degree space
-2. **Actor** is BC-regularized toward `ref_chunk` in normalized space (`actor_loss = -Q + β * MSE(mu, ref)`)
-3. **Target Q** evaluates actor output (≈normalized) as if it were degrees → out-of-distribution
+1. **对比 VLA vs RLT 输出**：在 eval 数据集上跑 `visualize_vla_actions.py`，同时运行 VLA 和 RLT inference
 
-Result: Q-gradient to actor is noise. Actor converges only via BC term, with noisy perturbations from meaningless Q-gradients. At inference, actor outputs are approximately in [-1, 1] but with frequent outliers (38% of dims hit ±1 clamp). After unnormalization, outliers cause violent robot motion.
+   | 模型 | 原始输出范围 | unnormalize 后范围 |
+   |------|------------|-------------------|
+   | GT (ground truth) | — | [-107°, 103°] |
+   | VLA (pi0.5) | [-1.03, 1.26] | [-117°, 102°] ✓ |
+   | **RLT actor** | **[-2.08, 4.06]** | **[-282°, 188°]** ✗ |
 
-## Where the Bug Lives
+   Actor 输出超出 [-1, 1] 范围，unnormalize 后放大到了合理角度范围的 2-3 倍。
 
-### Cache building (`offline_dataset.py:build_transitions_from_demos`)
+2. **逐帧诊断**：对 5 个采样帧做 actor vs VLA 对比
+
+   ```
+   Frame     0: actor mu range [-1.96, 4.08], ref vs mu MSE = 1.18 (正常应 < 0.05)
+   Frame   500: actor mu range [-1.25, 1.22], ref vs mu MSE = 0.05 (正常)
+   Frame  1000: actor mu range [-2.35, 4.28], ref vs mu MSE = 0.47
+   ```
+
+   某些帧 actor 输出正常，某些帧偏差巨大。38% 的输出维度超出 [-1, 1]。
+
+3. **追溯训练数据**：检查 `offline_dataset.py` 的 cache 构建流程，发现 `exec_chunk`（专家动作）和 `ref_chunk`（VLA 参考动作）的空间不一致。
+
+## Bug 1：Action 空间不匹配
+
+### 根因
+
+训练时 `exec_chunk` 和 `ref_chunk` 在 **不同的空间**：
+
+| 组件 | 来源 | 空间 | 典型范围 |
+|------|------|------|---------|
+| `exec_chunk` | LeRobot 数据集 `action` 字段 | 原始角度 | [-103°, 97°] |
+| `ref_chunk` | VLA `sampled_action_chunk` | 归一化 | [-1, 1] |
+
+影响链路：
+1. **Critic** 从 `exec_chunk` 学到 `Q(state, 角度空间 action)`
+2. **Actor** 被 BC 正则化拉向 `ref_chunk`（归一化空间），即 `actor_loss = -Q + β * MSE(mu, ref)`
+3. **Target Q** 用 actor 输出（≈归一化）去评估，但 critic 期望角度空间 → out-of-distribution
+
+结果：Q-gradient 对 actor 来说是噪声。Actor 仅靠 BC 项收敛，带有随机扰动。推理时输出大致在 [-1, 1] 但有频繁离群值。
+
+### Bug 位置
+
+`offline_dataset.py:build_transitions_from_demos()`:
 
 ```python
-e = _subsample_chunk(expert_actions[i], chunk_length)  # expert_actions in DEGREES
-encoded.append((s, r, e, rew))  # r (ref_chunk) is NORMALIZED
+e = _subsample_chunk(expert_actions[i], chunk_length)  # expert_actions 在角度空间
+encoded.append((s, r, e, rew))  # r (ref_chunk) 在归一化空间
 ```
 
-The `expert_actions` come from `RLTDemoDataset.__getitem__()` which reads raw `item["action"]` from LeRobot dataset — these are in degree space. But `ref_chunk` comes from `policy.encode_observation()` → `vla.forward_vla()` → `sampled_action_chunk` which is the VLA's normalized output.
+`expert_actions` 来自 `RLTDemoDataset.__getitem__()`，直接读取 LeRobot 数据集的 `action` 字段（角度空间）。而 `ref_chunk` 来自 VLA 的 `sampled_action_chunk`（归一化空间）。
 
-### Reward computation (`rewards.py`)
+### 修复
 
-If using `action_matching` or `hybrid` reward mode, the reward compares `exec_chunk` (degrees) with `ref_chunk` (normalized) — comparing apples to oranges.
-
-## How to Verify the Bug Exists
-
-Run this diagnostic on any machine with the training dataset + VLA model:
+在 `demo_loader.py` 的 `RLTDemoDataset` 中增加 `normalize_actions=True` 参数，使用数据集的 q01/q99 统计量将 `expert_actions` 归一化到 [-1, 1]：
 
 ```python
-from lerobot.rlt.demo_loader import RLTDemoDataset, make_demo_loader
-from lerobot.rlt.interfaces import Observation
-
-dataset = RLTDemoDataset(dataset_path="<path>", chunk_length=50)
-item = dataset[0]
-print("expert_actions range:", item["expert_actions"].min(), item["expert_actions"].max())
-# Expected: degree-scale values like [-103, 97]
-
-# Then check ref_chunk from VLA:
-# obs, expert = next(make_demo_loader(...))
-# state_vec, ref_chunk = policy.encode_observation(obs)
-# print("ref_chunk range:", ref_chunk.min(), ref_chunk.max())
-# Expected: normalized [-1, 1]
-```
-
-If `expert_actions` range ≈ [-100, 100] and `ref_chunk` range ≈ [-1, 1], the bug is confirmed.
-
-## The Fix
-
-Normalize `exec_chunk` to [-1, 1] using the VLA model's q01/q99 quantiles **before** storing it in the transition. This ensures all action-space tensors (exec_chunk, ref_chunk, actor output) are in the same normalized [-1, 1] space.
-
-### Changes required:
-
-1. **`offline_dataset.py`**: Accept q01/q99 tensors; normalize `expert_actions` before creating transitions
-2. **`build_rlt_offline_cache.py`**: Load q01/q99 from VLA model postprocessor; pass to cache builder
-3. **`rewards.py`**: No change needed — once exec_chunk is normalized, comparisons with ref_chunk are correct
-4. **`train_rlt_offline_rl.py`**: No change needed — consumes cached transitions
-
-### Normalization formula (QUANTILES mode):
-
-```python
-# degrees -> [-1, 1]
+# 角度 → [-1, 1]
 normalized = (degrees - q01) / (q99 - q01) * 2.0 - 1.0
 ```
 
-### What NOT to change:
+所有 cache 构建脚本（`build_rlt_offline_cache.py`、`build_cp_offline_cache.py`、`train_best_ac_on_sft.py`）均传入 `normalize_actions=True`。
 
-- `ref_chunk`: already normalized (VLA output)
-- `state_vec`: proprio stays in degrees (the actor input layer handles the scale)
-- `deploy.py`: keep the `clamp(-1, 1)` as safety — but after retraining, outliers should be rare
+同时在 `deploy.py` 的 `_rl_action_chunk()` 中增加 `clamp(-1, 1)` 作为安全兜底。
 
-## How to Verify the Fix Works
+## Bug 2：State/Action 尺度不匹配导致 Q 值爆炸
 
-### 1. Pre-training check
+### 发现过程
 
-After rebuilding the cache with normalized exec_chunk:
+修复 Bug 1 后重建 cache 并训练，结果 critic loss 从初始 ~12 爆炸到 1e34，actor loss 到 -5e16。最终 eval 指标全部 1e17+。
+
+### 根因
+
+修复 Bug 1 后，action 归一化到 [-1, 1]（norm ~5），但 proprio 仍然是原始角度（norm ~200）。Critic 的输入中 action 占比从修复前的 73%（550/750）降到 2.4%（5/205），critic 几乎看不到 action 的差异 → Q 值失去对 action 的区分能力 → TD bootstrap 无约束爆炸。
+
+| 输入 | Bug 1 修复前（角度 action） | Bug 1 修复后（归一化 action） |
+|------|--------------------------|---------------------------|
+| z_rl | norm ~10 | norm ~10 |
+| proprio | norm ~200 | norm ~200 |
+| action | norm ~550 | **norm ~5** |
+| action/state 比例 | 2.75 | **0.025** |
+
+### 修复
+
+在 `demo_loader.py` 中同时归一化 proprio（使用 `observation.state` 的 q01/q99）：
 
 ```python
-# Load a cached transition
-t = buf.sample(1)
-print("exec_chunk range:", t["exec_chunk_flat"].min(), t["exec_chunk_flat"].max())
-print("ref_chunk range:", t["ref_chunk_flat"].min(), t["ref_chunk_flat"].max())
-# Both should be in [-1, 1]
+if self._normalize_actions and self._state_q01 is not None:
+    state = normalize_quantiles(state, self._state_q01, self._state_q99)
 ```
 
-### 2. Post-training check
+归一化后的尺度：
+- state: z_rl (norm ~10) + proprio_normalized (norm ~1.7) → total ~10
+- action: norm ~5
+- action/state 比例: 0.5（健康）
 
-After training actor-critic on the fixed cache:
+同步修改了 `obs_bridge.py` 和 `deploy.py`，使推理时也传入 proprio_q01/q99 进行归一化，保持训练-推理一致。
+
+## 完整修改清单
+
+| 文件 | 修改内容 | Commit |
+|------|---------|--------|
+| `demo_loader.py` | 新增 `normalize_quantiles()` 函数；`RLTDemoDataset` 增加 `normalize_actions` 参数，同时归一化 action 和 proprio | 5f55475, bf23666 |
+| `deploy.py` | `_rl_action_chunk()` 增加 `clamp(-1, 1)`；`_fill_action_queue()` 传入 proprio_q01/q99 | 5f55475, bf23666 |
+| `deploy_config.py` | 增加 `proprio_q01`/`proprio_q99` 字段 | bf23666 |
+| `obs_bridge.py` | `robot_obs_to_rlt_obs()` 增加 `proprio_q01`/`proprio_q99` 参数 | bf23666 |
+| `build_rlt_offline_cache.py` | 传入 `normalize_actions=True`；增加 corrupt episode skip | 5f55475, 24d2cd7 |
+| `build_cp_offline_cache.py` | 传入 `normalize_actions=True` | 5f55475 |
+| `train_best_ac_on_sft.py` | 传入 `normalize_actions=True` | 5f55475 |
+| `offline_dataset.py` | `precompute_offline_buffer()` 传入 `normalize_actions=True` | 5f55475 |
+| `configs/ac_best_v3.yaml` | ResidualMLP 3L/256h, β=0.3, 50K steps | 5d0ca41 |
+
+## 验证方法
+
+### 1. Cache 验证
 
 ```python
-# Run actor on eval data
-mu, _ = actor.forward(state_vec, ref_flat)
-print("actor output range:", mu.min(), mu.max())
-# Should be in [-1, 1] without clamping
-# ref_mse should be < 0.01 (similar to pre-fix but now with meaningful Q-gradient)
+data = torch.load("transitions_train.pt", weights_only=False)
+t = data[0]
+print("exec_chunk range:", t["exec_chunk"].min(), t["exec_chunk"].max())   # 应在 [-1, 1]
+print("ref_chunk range:", t["ref_chunk"].min(), t["ref_chunk"].max())       # 应在 [-1, 1]
+print("state_vec norm:", t["state_vec"].norm())                             # 应 ~10，不是 ~200
+print("state_vec[-12:]:", t["state_vec"][-12:])                             # proprio 应在 [-1, 1]
 ```
 
-### 3. Deployment check
+### 2. 训练验证
 
-Run `visualize_vla_actions.py` with the new checkpoint:
+训练过程中 critic loss 应稳定在 <100，不应爆炸到 1e10+。最终 eval 指标：
+- `ref_mse` < 0.05（actor 输出接近 VLA 参考）
+- `Q_gap` 在 [-0.1, 0] 范围（Q 值健康）
 
-```bash
-PYTHONPATH=src python scripts/visualize_vla_actions.py \
-  --dataset-path <eval_dataset> \
-  --vla-model <model_path> \
-  --rl-token-ckpt <rl_token_ckpt> \
-  --ac-ckpt <new_ac_ckpt> \
-  --stride 10
-```
+### 3. 部署验证
 
-Expected: RLT actions should be within [-1, 1] without needing clamp, and MAE(VLA, RLT) should be < 10° after unnormalization.
+在 eval 数据集上运行 `visualize_vla_actions.py`，RLT 输出应在 [-1, 1] 内无需 clamp，unnormalize 后 MAE(VLA, RLT) < 10°。
 
-## Impact on Existing Checkpoints
+## 影响
 
-All existing actor-critic checkpoints (`v2_base`, `v2_sft`, `v1_baseline`) were trained with this bug. They are NOT reusable with the fixed pipeline — must retrain from scratch with the new normalized cache.
-
-RL token checkpoints (`v8_base`, `v1_sft`) are unaffected — they only use VLA hidden states, not action space.
+- 所有已有 actor-critic checkpoint（`v2_base`、`v2_sft`、`v1_baseline`）都在 bug 下训练，**不可复用**，必须用修复后的 pipeline 重新训练
+- RL token checkpoint（`v8_base`、`v1_sft`）**不受影响**——只使用 VLA hidden states，不涉及 action 空间
+- 478ep 数据集有 53% 的 episode 视频损坏，已通过 skip 机制跳过（24d2cd7）
