@@ -144,7 +144,10 @@ def precompute_offline_buffer(
         reward_fn: Optional callable(exec_chunk, ref_chunk) -> (C,) reward seq.
     """
     off_cfg = config.offline_rl
-    dataset = RLTDemoDataset(dataset_path=dataset_path, chunk_length=config.vla_horizon)
+    dataset = RLTDemoDataset(
+        dataset_path=dataset_path, chunk_length=config.vla_horizon,
+        normalize_actions=True,
+    )
 
     if episode_ids is None:
         num_eps = _count_episodes(dataset)

@@ -102,7 +102,10 @@ def main() -> None:
         )
 
     # --- Split episodes ---
-    dataset = RLTDemoDataset(dataset_path=args.dataset_path, chunk_length=config.vla_horizon)
+    dataset = RLTDemoDataset(
+        dataset_path=args.dataset_path, chunk_length=config.vla_horizon,
+        normalize_actions=True,
+    )
     num_episodes = _count_episodes(dataset)
     splits = split_episode_indices(
         num_episodes, train_ratio=config.offline_rl.train_ratio,

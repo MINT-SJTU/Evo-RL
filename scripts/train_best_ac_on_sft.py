@@ -101,7 +101,10 @@ def build_cache(args) -> None:
             progress_scale=1.0,
         )
 
-    dataset = RLTDemoDataset(dataset_path=args.dataset_path, chunk_length=config.vla_horizon)
+    dataset = RLTDemoDataset(
+        dataset_path=args.dataset_path, chunk_length=config.vla_horizon,
+        normalize_actions=True,
+    )
     num_episodes = _count_episodes(dataset)
     splits = split_episode_indices(num_episodes, train_ratio=0.8, val_ratio=0.1, seed=0)
     logger.info("Episodes: %d -> train=%d, val=%d, test=%d",

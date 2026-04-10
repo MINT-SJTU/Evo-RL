@@ -252,7 +252,10 @@ def main() -> None:
         device = args.device
 
     # --- Load dataset ---
-    dataset = RLTDemoDataset(dataset_path=args.dataset_path, chunk_length=config.vla_horizon)
+    dataset = RLTDemoDataset(
+        dataset_path=args.dataset_path, chunk_length=config.vla_horizon,
+        normalize_actions=True,
+    )
     num_episodes = _count_episodes(dataset)
     logger.info("CP success dataset: %d episodes, %d frames", num_episodes, len(dataset))
 

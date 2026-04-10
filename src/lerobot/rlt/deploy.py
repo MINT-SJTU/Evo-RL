@@ -134,11 +134,17 @@ class RLTDeployPolicy(nn.Module):
         return self._vla_reference_chunk(vla_out), state_vec, ref_chunk
 
     def _rl_action_chunk(self, obs: Observation, vla_out) -> torch.Tensor:
-        """Run RL actor to get action chunk."""
+        """Run RL actor to get action chunk, clamped to [-1, 1] normalized range.
+
+        The actor outputs are approximately in [-1, 1] (BC-regularized toward VLA
+        reference) but can have outliers due to training scale mismatch (critic
+        trained with degree-space actions). Clamping prevents violent robot motion
+        when these outliers are unnormalized to degree space.
+        """
         action_chunk, _, _, _ = self.policy.select_action(
             obs, vla_out=vla_out, deterministic=self.config.deterministic,
         )
-        return action_chunk
+        return action_chunk.clamp(-1.0, 1.0)
 
     def _vla_reference_chunk(self, vla_out) -> torch.Tensor:
         """Extract VLA reference chunk, subsampled to C steps."""
@@ -171,6 +177,26 @@ class RLTDeployPolicy(nn.Module):
         else:
             self._phase_ctrl.trigger_critical()
             log.info("Phase toggled to CRITICAL")
+
+    def set_rl_mode(self) -> None:
+        """Enter RL (critical phase) mode. Clears action queue immediately."""
+        self._action_queue.clear()
+        self._meta_queue.clear()
+        self._phase_ctrl.trigger_critical()
+        log.info("Switched to RL mode (critical phase)")
+
+    def set_vla_mode(self) -> None:
+        """Enter VLA (prefix phase) mode. Clears action queue immediately."""
+        self._action_queue.clear()
+        self._meta_queue.clear()
+        self._phase_ctrl.trigger_vla()
+        log.info("Switched to VLA mode (prefix phase)")
+
+    def interrupt_chunk(self) -> None:
+        """Clear queued actions so next select_action() recomputes a fresh chunk."""
+        self._action_queue.clear()
+        self._meta_queue.clear()
+        log.debug("Action chunk interrupted")
 
     @property
     def timing(self) -> dict[str, float]:
