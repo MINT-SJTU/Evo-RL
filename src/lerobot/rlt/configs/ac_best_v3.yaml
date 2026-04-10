@@ -1,0 +1,51 @@
+seed: 0
+action_dim: 12
+proprio_dim: 12
+vla_horizon: 50
+chunk_length: 10
+
+cameras:
+  - left_wrist
+  - right_wrist
+  - right_front
+
+rl_token:
+  token_dim: 2048
+  nhead: 8
+  enc_layers: 3
+  dec_layers: 3
+  ff_dim: 4096
+  num_rl_tokens: 4
+
+actor:
+  hidden_dim: 256
+  num_layers: 3
+  fixed_std: 0.05
+  lr: 3.0e-4
+  ref_dropout_p: 0.5
+  activation: relu
+  residual: true
+
+critic:
+  hidden_dim: 256
+  num_layers: 3
+  lr: 3.0e-4
+  activation: relu
+  residual: true
+
+training:
+  gamma: 0.99
+  beta: 0.3
+  tau: 0.005
+  batch_size: 256
+  utd_ratio: 5
+  actor_update_interval: 2
+
+replay:
+  capacity: 200000
+
+offline_rl:
+  num_gradient_steps: 50000
+  eval_every: 5000
+  save_every: 10000
+  log_every: 500
