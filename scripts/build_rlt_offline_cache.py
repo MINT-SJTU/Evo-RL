@@ -125,6 +125,7 @@ def main() -> None:
         split_start = time.time()
         all_transitions = []
 
+        skipped = 0
         for ep_idx, ep_id in enumerate(sorted(episode_ids)):
             frame_range = _episode_frame_range(dataset, ep_id)
             indices = list(range(frame_range[0], frame_range[1], args.frame_stride))
@@ -137,9 +138,14 @@ def main() -> None:
                 num_workers=0,
                 drop_last=False,
             )
-            transitions = build_transitions_from_demos(
-                policy, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
-            )
+            try:
+                transitions = build_transitions_from_demos(
+                    policy, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
+                )
+            except Exception as e:
+                logger.warning("Skipping episode %d due to error: %s", ep_id, e)
+                skipped += 1
+                continue
             # Add terminal bonus to last transition of each episode
             if transitions and success_bonus > 0:
                 last_t = transitions[-1]
@@ -147,12 +153,13 @@ def main() -> None:
             all_transitions.extend(transitions)
 
             if (ep_idx + 1) % 20 == 0:
-                logger.info("  [%s] %d/%d episodes, %d transitions so far",
-                            split_name, ep_idx + 1, len(episode_ids), len(all_transitions))
+                logger.info("  [%s] %d/%d episodes (%d skipped), %d transitions so far",
+                            split_name, ep_idx + 1, len(episode_ids), skipped, len(all_transitions))
 
         save_cached_buffer(all_transitions, args.cache_dir, split_name)
         split_elapsed = time.time() - split_start
-        logger.info("Split %s: %d transitions in %.1fs", split_name, len(all_transitions), split_elapsed)
+        logger.info("Split %s: %d transitions in %.1fs (%d episodes skipped)",
+                     split_name, len(all_transitions), split_elapsed, skipped)
 
     total_elapsed = time.time() - t_start
     logger.info("All splits cached to %s in %.1fs", args.cache_dir, total_elapsed)
