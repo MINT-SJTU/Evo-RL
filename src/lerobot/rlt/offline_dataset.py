@@ -53,6 +53,7 @@ def build_transitions_from_demos(
     source: int = 0,
     episode_id: int = -1,
     is_critical: float = 0.0,
+    stride: int = 1,
 ) -> list[ChunkTransition]:
     """Build ChunkTransitions from a *single-episode* sequential demo loader.
 
@@ -64,6 +65,7 @@ def build_transitions_from_demos(
 
     Args:
         policy: RLTPolicy (uses .encode_observation for state extraction).
+        stride: Frame stride — controls bootstrap discount exponent (γ^stride).
     """
     policy.eval()
     encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
@@ -85,6 +87,7 @@ def build_transitions_from_demos(
     return _encoded_to_transitions(
         encoded,
         chunk_length,
+        stride=stride,
         source=source,
         episode_id=episode_id,
         is_critical=is_critical,
@@ -94,11 +97,18 @@ def build_transitions_from_demos(
 def _encoded_to_transitions(
     encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     chunk_length: int,
+    stride: int = 1,
     source: int = 0,
     episode_id: int = -1,
     is_critical: float = 0.0,
 ) -> list[ChunkTransition]:
-    """Convert list of (state, ref, expert, reward) into ChunkTransitions."""
+    """Convert list of (state, ref, expert, reward) into ChunkTransitions.
+
+    Args:
+        stride: Frame stride used during data loading. Controls the bootstrap
+            discount exponent (γ^stride) — paper uses stride=2 so next_state
+            is 2 control steps away, giving γ^2 ≈ 0.98 instead of γ^C ≈ 0.90.
+    """
     transitions: list[ChunkTransition] = []
     for idx in range(len(encoded)):
         s, r, e, rew = encoded[idx]
@@ -109,7 +119,7 @@ def _encoded_to_transitions(
             next_state_vec=ns, next_ref_chunk=nr,
             done=torch.tensor(float(is_last)),
             intervention=torch.tensor(0.0),
-            actual_steps=torch.tensor(chunk_length),
+            actual_steps=torch.tensor(stride),
             source=torch.tensor(source),
             episode_id=torch.tensor(episode_id),
             is_critical=torch.tensor(is_critical),

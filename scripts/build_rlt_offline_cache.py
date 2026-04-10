@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-scale", type=float, default=1.0)
     parser.add_argument("--token-pool-size", type=int, default=64)
     parser.add_argument("--task-instruction", default="pick up the object")
-    parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"], help="VLA model dtype")
     return parser.parse_args()
@@ -141,6 +141,7 @@ def main() -> None:
             try:
                 transitions = build_transitions_from_demos(
                     policy, loader, config.chunk_length, reward_fn=reward_fn, device=args.device,
+                    stride=args.frame_stride,
                 )
             except Exception as e:
                 logger.warning("Skipping episode %d due to error: %s", ep_id, e)
