@@ -52,11 +52,14 @@ class RLTAlgorithm:
         critic_optimizer: torch.optim.Optimizer,
         gamma: float,
         C: int,
+        grad_clip: float = 1.0,
     ) -> float:
-        """Single critic gradient step."""
+        """Single critic gradient step with gradient clipping."""
         loss = critic_loss(self.critic, self.target_critic, self.policy.actor, batch, gamma, C)
         critic_optimizer.zero_grad()
         loss.backward()
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), grad_clip)
         critic_optimizer.step()
         return loss.item()
 
@@ -65,11 +68,14 @@ class RLTAlgorithm:
         batch: dict[str, torch.Tensor],
         actor_optimizer: torch.optim.Optimizer,
         beta: float,
+        grad_clip: float = 1.0,
     ) -> float:
-        """Single actor gradient step."""
+        """Single actor gradient step with gradient clipping."""
         loss = actor_loss(self.policy.actor, self.critic, batch, beta)
         actor_optimizer.zero_grad()
         loss.backward()
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.policy.actor.parameters(), grad_clip)
         actor_optimizer.step()
         return loss.item()
 

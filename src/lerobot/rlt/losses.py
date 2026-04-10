@@ -48,9 +48,12 @@ def critic_loss(
     actual_steps = batch.get("actual_steps")
 
     with torch.no_grad():
-        # Use deterministic mean for target action (TD3-style)
+        # Use deterministic mean for target action (TD3-style), clamped to [-1,1]
         mu_next, _ = actor.forward(x_next, ref_next)
+        mu_next = mu_next.clamp(-1.0, 1.0)
         q_next = target_critic.min_q(x_next, mu_next)
+        # Clamp target Q to prevent bootstrapping divergence
+        q_next = q_next.clamp(-100.0, 100.0)
         r = discounted_chunk_return(reward_seq, gamma, actual_steps)
 
         # Bootstrap with gamma^k where k = actual steps executed

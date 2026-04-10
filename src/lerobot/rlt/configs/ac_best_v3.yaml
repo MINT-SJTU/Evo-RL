@@ -35,7 +35,7 @@ critic:
 
 training:
   gamma: 0.99
-  beta: 0.3
+  beta: 5.0
   tau: 0.005
   batch_size: 256
   utd_ratio: 5
