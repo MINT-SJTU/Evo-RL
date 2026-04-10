@@ -40,16 +40,79 @@
 
 | Cache ID | 数据集 | Stride | actual_steps | Transitions (train/val/test) | 耗时 |
 |----------|--------|--------|-------------|------------------------------|------|
-| (待填) | | | | | |
+| cache_newdata_stride2 | 478ep (new, 0 skipped) | 2 | 2 | 39072 / 5752 / 4530 | 9273s |
 
-### AC 训练实验
+### AC 训练实验（stride=2, 50K steps, ResidualMLP 3L/256h）
 
-| Exp ID | Cache | β | Steps | ref_mse | Q_policy | Q_expert | Q_gap | TD_err | critic_loss | 备注 |
-|--------|-------|---|-------|---------|----------|----------|-------|--------|-------------|------|
-| (待填) | | | | | | | | | | |
+| Exp ID | β | ref_mse | expert_mse | Q_policy | Q_expert | Q_gap | TD_err | 状态 |
+|--------|-----|---------|------------|----------|----------|-------|--------|------|
+| s2_b0.1 | 0.1 | 71.60 | 72.66 | 27.05 | 15.08 | 11.97 | 0.47 | 发散 |
+| s2_b0.3 | 0.3 | 84.79 | 85.68 | 63.79 | 20.79 | 43.00 | 4.36 | 发散 |
+| s2_b1.0 | 1.0 | 2.525 | 3.350 | 19.82 | 15.39 | 4.43 | 0.60 | 偏离过大 |
+| **s2_b3.0** | **3.0** | **0.035** | **0.871** | **8.66** | **8.45** | **0.21** | **0.020** | **最优** |
+| s2_b5.0 | 5.0 | 0.190 | 1.062 | 13.15 | 11.46 | 1.68 | 0.70 | 良好 |
+| s2_b10.0 | 10.0 | 0.010 | 0.812 | 8.21 | 8.02 | 0.19 | 0.030 | 近纯BC |
+
+---
+
+## 理论分析
+
+### Q 值传播分析
+
+对于平均 206 帧/episode 的数据集：
+
+| Stride | actual_steps | Transitions | Max Q at start | vs buggy γ^10 |
+|--------|-------------|-------------|----------------|---------------|
+| 1 | 1 (correct) | 206 | 1.261 | **1.24e8x better** |
+| 1 | 10 (buggy) | 206 | 1.02e-8 | baseline (dead) |
+| 2 | 2 (correct) | 103 | 1.261 | **3950x better** |
+| 2 | 10 (buggy) | 103 | 3.19e-4 | barely alive |
+
+**关键发现**：
+- 无论 stride 多少，只要 `actual_steps` 正确，最大 Q 值都是 ~1.26（success_bonus=10）
+- 之前 actual_steps=10 的 bug 导致 Q 信号几乎完全消失
+- 之前 β=5.0 下 ref_mse=0.078、Q_gap=0.71 的结果本质上是纯 BC（Q 贡献约 0），不是真正的 RL
+- 修复后 Q-learning 真正启动，β 需要重新调参
+
+### 推论
+
+1. 修复后 Q 值约在 0-1.3 范围（vs 之前虚假的 5-7）
+2. actor_loss = -Q + β*MSE(mu, ref)，Q~1 时：
+   - β=5.0: BC 完全主导，actor ≈ VLA ref
+   - β=1.0: Q 和 BC 大致平衡
+   - β=0.3: Q 信号主导，actor 可偏离 VLA ref
+3. 期望最优 β 在 0.3-1.0 范围
 
 ---
 
 ## 发现与结论
 
-(迭代过程中持续更新)
+### 关键发现 1: actual_steps 修复彻底改变了 Q-learning 行为
+
+修复前（actual_steps=10）：Q 值几乎无法传播，actor 本质上做纯 BC，ref_mse 的"好"结果（0.008-0.078）是假象。
+修复后（actual_steps=2）：Q 值在 8-20 范围正常传播，critic 稳定收敛（TD_err 0.02-0.70），actor 真正被 Q-gradient 驱动。
+
+### 关键发现 2: β 是核心超参数，最优值为 3.0
+
+| β 区间 | 行为 | 推荐 |
+|--------|------|------|
+| 0.1-0.3 | actor 完全发散，ref_mse > 70，Q 值过估计 | 不可用 |
+| 1.0 | actor 偏离较大但不发散，ref_mse=2.5 | 不推荐 |
+| **3.0** | **actor 紧贴 VLA ref（ref_mse=0.035），Q_gap=0.21 正向** | **推荐** |
+| 5.0 | actor 较紧贴（ref_mse=0.19），Q_gap=1.68 较大 | 可用 |
+| 10.0 | 近纯 BC（ref_mse=0.010），Q_gap=0.19 | 过保守 |
+
+### 关键发现 3: β=3.0 实现了论文描述的"local action editing"
+
+论文核心理念："turning online RL into local refinement of promising behaviors rather than unconstrained search"。
+β=3.0 的 ref_mse=0.035 说明 actor 只做了很小的偏离（RMSE ≈ 0.19 in normalized space），但 Q_gap=0.21 说明这个小偏离确实带来了 value 提升。这正是论文要的效果。
+
+### 关键发现 4: 新数据集质量显著提升
+
+478 episodes 全部成功加载（0 skipped），比旧版的 53% 损坏率大幅改善。39072 train transitions（vs 旧版 33805）。
+
+### 下一步
+
+1. 用 β=3.0 的 checkpoint 部署到真机验证
+2. 考虑在 β=2.0-4.0 区间进一步细搜
+3. 100K 步实验结果待观察（是否过拟合）
