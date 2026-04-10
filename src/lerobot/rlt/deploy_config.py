@@ -41,6 +41,10 @@ class DeployConfig:
     actor_layer_norm: bool = False
     beta: float = 0.3
 
+    # Proprio normalization (must match training; None = raw degrees)
+    proprio_q01: list[float] | None = None
+    proprio_q99: list[float] | None = None
+
     def __post_init__(self):
         if self.phase_mode not in ("always_rl", "always_vla", "manual"):
             raise ValueError(

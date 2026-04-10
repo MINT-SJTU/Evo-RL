@@ -19,6 +19,8 @@ def robot_obs_to_rlt_obs(
     camera_keys: list[str],
     proprio_keys: list[str],
     device: str = "cuda",
+    proprio_q01: torch.Tensor | None = None,
+    proprio_q99: torch.Tensor | None = None,
 ) -> Observation:
     """Convert a LeRobot observation dict to an RLT Observation.
 
@@ -31,12 +33,20 @@ def robot_obs_to_rlt_obs(
         camera_keys: keys to extract as images, e.g. ["left_wrist", "right_wrist", "right_front"]
         proprio_keys: keys whose values are concatenated into the proprio vector
         device: target device
+        proprio_q01: optional (proprio_dim,) tensor for QUANTILES normalization
+        proprio_q99: optional (proprio_dim,) tensor for QUANTILES normalization
 
     Returns:
         Observation with images dict and (1, proprio_dim) proprio tensor
     """
     images = _extract_images(obs_dict, camera_keys, device)
     proprio = _extract_proprio(obs_dict, proprio_keys, device)
+    if proprio_q01 is not None and proprio_q99 is not None:
+        q01 = proprio_q01.to(device=device, dtype=torch.float32)
+        q99 = proprio_q99.to(device=device, dtype=torch.float32)
+        denom = q99 - q01
+        denom = torch.where(denom.abs() < 1e-8, torch.tensor(1e-8, device=device), denom)
+        proprio = (proprio - q01) / denom * 2.0 - 1.0
     return Observation(images=images, proprio=proprio)
 
 

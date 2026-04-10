@@ -58,6 +58,14 @@ class RLTDeployPolicy(nn.Module):
         self.phase_controller = self._phase_ctrl
         self._phase_mode = config.phase_mode
 
+        # Proprio normalization tensors (None = raw degrees, as in old training)
+        self._proprio_q01: torch.Tensor | None = None
+        self._proprio_q99: torch.Tensor | None = None
+        if config.proprio_q01 is not None and config.proprio_q99 is not None:
+            self._proprio_q01 = torch.tensor(config.proprio_q01, dtype=torch.float32)
+            self._proprio_q99 = torch.tensor(config.proprio_q99, dtype=torch.float32)
+            log.info("Proprio normalization enabled")
+
         self._timing: dict[str, float] = {}
         log.info(
             "RLTDeployPolicy ready: action_dim=%d, chunk=%d, phase=%s",
@@ -83,6 +91,8 @@ class RLTDeployPolicy(nn.Module):
             camera_keys=self.config.camera_keys,
             proprio_keys=self.config.proprio_keys,
             device=self.config.device,
+            proprio_q01=self._proprio_q01,
+            proprio_q99=self._proprio_q99,
         )
 
         action_chunk, state_vec, ref_chunk = self._compute_action_chunk(obs)
