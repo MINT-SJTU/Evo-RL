@@ -22,6 +22,7 @@ import json
 import logging
 import queue
 import select
+import shutil
 import sys
 import termios
 import threading
@@ -417,8 +418,8 @@ class TrainRawEpisodeRecorder:
     Record robot data in a lightweight "raw" format for later conversion to LeRobotDataset.
 
     Recording is controlled by keyboard keys:
-      - Start recording + resume policy with 'R' (handled in the main loop).
-      - End recording with 'D' (success set by pressing '0'/'1' if not forced).
+      - Start a recording window in the runtime script, then resume policy separately.
+      - End recording with 'D' and finalize with '0'/'1'/'2' (failure/success/abandon).
 
     Raw format layout (inside raw_record_root):
       episode_{episode_idx:04d}/
@@ -440,6 +441,7 @@ class TrainRawEpisodeRecorder:
         camera_names: list[str],
         task: str,
         dt_s: float,
+        image_save_size_hw: tuple[int, int] | None = None,
         collector_policy_id_policy: str = "policy",
         collector_policy_id_human: str = "human",
         force_success_on_vr: bool = True,
@@ -450,6 +452,7 @@ class TrainRawEpisodeRecorder:
         self.task = task
         self.dt_s = float(dt_s)
         self.fps = int(round(1.0 / self.dt_s)) if self.dt_s > 0 else 1
+        self.image_save_size_hw = image_save_size_hw
         self.collector_policy_id_policy = collector_policy_id_policy
         self.collector_policy_id_human = collector_policy_id_human
         self.force_success_on_vr = force_success_on_vr
@@ -470,6 +473,47 @@ class TrainRawEpisodeRecorder:
         self._step_idx = 0
         self._active_actions: list[list[float]] = []
         self._active_states: list[list[float]] = []
+        self._writer_queue: queue.Queue[tuple[Path, np.ndarray] | None] | None = None
+        self._writer_thread: threading.Thread | None = None
+
+    def _ensure_writer_started(self) -> None:
+        if not self.enabled:
+            return
+        if self._writer_queue is None:
+            self._writer_queue = queue.Queue(maxsize=2048)
+        if self._writer_thread is None or not self._writer_thread.is_alive():
+            self._writer_thread = threading.Thread(
+                target=self._image_writer_worker,
+                name="train-raw-image-writer",
+                daemon=True,
+            )
+            self._writer_thread.start()
+
+    def _image_writer_worker(self) -> None:
+        assert self._writer_queue is not None
+        while True:
+            item = self._writer_queue.get()
+            try:
+                if item is None:
+                    return
+                img_path, img = item
+                Image.fromarray(img).save(img_path)
+            finally:
+                self._writer_queue.task_done()
+
+    def _flush_image_queue(self) -> None:
+        if self._writer_queue is not None:
+            self._writer_queue.join()
+
+    def _shutdown_writer(self) -> None:
+        if self._writer_queue is None:
+            return
+        if self._writer_thread is not None and self._writer_thread.is_alive():
+            self._writer_queue.put(None)
+            self._writer_queue.join()
+            self._writer_thread.join(timeout=2.0)
+        self._writer_thread = None
+        self._writer_queue = None
 
     def _discover_next_episode_index(self) -> int:
         """
@@ -498,6 +542,7 @@ class TrainRawEpisodeRecorder:
     def start_episode(self) -> None:
         if not self.can_start_new_episode():
             return
+        self._ensure_writer_started()
         self.raw_record_root.mkdir(parents=True, exist_ok=True)
         # In case we detected a stale episode index (e.g. crashed run left a folder behind),
         # keep searching until we find a directory that doesn't exist yet.
@@ -615,8 +660,16 @@ class TrainRawEpisodeRecorder:
                 if img_f.max() <= 1.0:
                     img_f = img_f * 255.0
                 img = np.clip(img_f, 0.0, 255.0).astype(np.uint8)
+            if self.image_save_size_hw is not None:
+                target_h, target_w = self.image_save_size_hw
+                pil_img = Image.fromarray(img).resize((int(target_w), int(target_h)), Image.Resampling.BILINEAR)
+                img = np.asarray(pil_img, dtype=np.uint8)
             img_path = images_dir / cam / f"frame_{self._step_idx:06d}.png"
-            Image.fromarray(img).save(img_path)
+            if self._writer_queue is None:
+                Image.fromarray(img).save(img_path)
+            else:
+                # Step thread only enqueues image jobs; writer thread handles disk IO.
+                self._writer_queue.put((img_path, img.copy()))
         self._step_idx += 1
 
     def record_policy_step(self, *, action_dict: dict[str, float], observation: dict[str, Any]) -> None:
@@ -637,6 +690,7 @@ class TrainRawEpisodeRecorder:
     def finish_active_segment(self) -> None:
         if self._active_segment_dir is None:
             return
+        self._flush_image_queue()
         (self._active_segment_dir / "actions.json").write_text(
             json.dumps(self._active_actions, indent=2) + "\n", encoding="utf-8"
         )
@@ -668,27 +722,69 @@ class TrainRawEpisodeRecorder:
         self.success_forced = False
         self.episode_success = int(success_value)
         self._episode_index += 1
+        if not self.waiting_for_success_label:
+            self._shutdown_writer()
+
+    def abandon_episode(self) -> None:
+        if not self.recording_active and not self.waiting_for_success_label:
+            return
+
+        self.finish_active_segment()
+
+        episode_dir = self._require_episode_dir()
+        shutil.rmtree(episode_dir)
+
+        self.recording_active = False
+        self.waiting_for_success_label = False
+        self.success_forced = False
+        self.episode_success = None
+
+        self._episode_dir = None
+        self._segments_dir = None
+        self._seg_idx = 0
+        self._active_segment_dir = None
+        self._active_segment_source = None
+        self._step_idx = 0
+        self._active_actions = []
+        self._active_states = []
+        self._shutdown_writer()
 
     def request_finish_episode(self) -> None:
-        """Called on 'D'. If success is not forced, wait for user to press '0'/'1'."""
+        """Called on 'D'. Wait for the user to press '0'/'1'/'2' to finalize the episode."""
         if not self.recording_active:
             return
-        if self.success_forced:
-            logger.info("Raw recording ended on 'D': VR takeover detected => forcing episode_success=1.")
-            self.stop_episode(success_value=1)
-            return
+
         self.waiting_for_success_label = True
         self.recording_active = False
-        logger.info("Raw recording ended on 'D': waiting for success label. Press '0' (false) or '1' (true).")
+        if self.success_forced:
+            logger.info(
+                "Raw recording ended on 'D': VR takeover detected. "
+                "Press '1' (success) to keep it, or '2' (abandon) to delete it. "
+                "Pressing '0' (failure) is not allowed after VR takeover."
+            )
+            return
+        logger.info("Raw recording ended on 'D': waiting for success label. Press '0' (failure), '1' (success), or '2' (abandon).")
 
     def handle_success_label_hotkey(self, key: str) -> bool:
         """Returns True if handled (and episode was finalized)."""
         if not self.waiting_for_success_label:
             return False
-        if key not in {"0", "1"}:
+        if key not in {"0", "1", "2"}:
             return False
+
+        if key == "2":
+            self.abandon_episode()
+            logger.info("Raw episode abandoned and deleted.")
+            return True
+
+        if key == "0" and self.success_forced:
+            logger.warning(
+                "This episode had VR takeover, so it cannot be labeled as failure. "
+                "Press '1' to keep it as success, or '2' to abandon and delete it."
+            )
+            return True
+
         success_value = int(key)
-        self.waiting_for_success_label = False
         self.stop_episode(success_value=success_value)
         logger.info("Raw episode finalized: episode_success=%d.", success_value)
         return True
@@ -996,7 +1092,7 @@ def _run_keyboard_command(
             recorder.request_finish_episode()
             return LoopState.STOPPED, False, True, False
         if recorder.waiting_for_success_label:
-            logger.info("[D] Ignored: already waiting for success label; press [0] or [1] to finalize.")
+            logger.info("[D] Ignored: already waiting for success label; press [0], [1], or [2] to finalize.")
             return state, request_next_chunk, running, vr
         logger.info("[D] Ignored: raw recording is not active (press [R] to start an episode).")
         return state, request_next_chunk, running, vr
@@ -1023,7 +1119,7 @@ def _run_keyboard_command(
             robot.hold_position()
         elif key == "r":
             if recorder is not None and recorder.waiting_for_success_label:
-                logger.info("Waiting for success label (press '0' or '1'); ignoring [R] resume.")
+                logger.info("Waiting for success label (press '0', '1', or '2'); ignoring [R] resume.")
                 return LoopState.STOPPED, False, True, False
             if recorder is not None and recorder.can_start_new_episode():
                 logger.info("Starting raw training recording and resuming policy (R).")
@@ -1164,7 +1260,7 @@ def main() -> None:
         "--raw-train-record-dir",
         type=Path,
         default=None,
-        help="If set, enable raw training recording controlled by keyboard: R starts (and resumes policy), D ends, 0/1 set success when not forced.",
+        help="If set, enable raw training recording controlled by keyboard: R starts (and resumes policy), D ends, 0/1/2 finalize failure/success/abandon.",
     )
     parser.add_argument("--robot-id", type=str, default="arx5")
     parser.add_argument("--protect-on-disconnect", action="store_true", default=True)
@@ -1248,7 +1344,8 @@ def main() -> None:
             if raw_recorder is not None:
                 logger.info(
                     "Raw training recording: press [R] to start/resume policy and record, press [D] to end recording. "
-                    "If episode success is not forced (no VR takeover), press [0]/[1] to label success."
+                    "After [D], press [0] (failure), [1] (success), or [2] (abandon). "
+                    "If VR takeover happened, [0] is rejected and you must choose [1] or [2]."
                 )
             if args.safe_mode:
                 logger.info("SAFE MODE is armed. Press [R] to resume, then [I] for each chunk.")
@@ -1362,7 +1459,7 @@ def main() -> None:
             if raw_recorder.recording_active:
                 logger.warning("Raw recording was still active on exit. Press [D] to finalize an episode.")
             if raw_recorder.waiting_for_success_label:
-                logger.warning("Waiting for success label (press [0] or [1]) but exited.")
+                logger.warning("Waiting for success label (press [0], [1], or [2]) but exited.")
         if keyboard is not None:
             keyboard.restore()
         if robot.is_connected:

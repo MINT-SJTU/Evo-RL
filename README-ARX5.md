@@ -125,7 +125,7 @@ Notes:
 - Dual-arm policy input/output state is fixed to 14 dims: left arm `state.0..6`, right arm `state.7..13`.
 - `V` switches from infer to dual-arm VR teleop, reusing the same two ARX5 clients without reopening CAN.
 - After pressing `Ctrl+C` in the VR process, the script reconnects infer cameras, holds both arms, and returns to keyboard `STOPPED` state.
-- `--raw-train-record-dir` is also supported in dual-arm mode; policy segments and VR takeover segments are recorded in the same raw format as the single-arm script.
+- `--raw-train-record-dir` is also supported in dual-arm mode; policy segments and VR takeover segments are recorded in the same raw format as the single-arm script. **Dual-arm raw recording is gated by `S`/`D`** (see §5.1): press `S` to open a recording window, then `R` to run the policy; without `S`, inference and VR still work but trajectories are not written (the script logs a warning on `R` / `V`).
 
 ## 5. Keyboard controls
 
@@ -147,48 +147,37 @@ The script starts in a stopped state when keyboard control is enabled. Press `R`
 
 When you additionally set `--raw-train-record-dir /path/to/raw_root` in the command line, the script enables
 "raw training recording".
-In this mode, the keyboard semantics are overlaid on top of the existing controls (primarily for collecting
-training trajectories):
+Keyboard semantics depend on which entrypoint you use:
 
-- `R`: start recording a new `episode` and resume the policy (if you are already recording, it continues
-the same episode and the main loop stays in `RUNNING`)
-- `D`: end the current recording episode (if there was no VR takeover during this episode, the script will
-wait for you to label success with `0/1`)
-- `0`: set `episode_success=0` (false)
-- `1`: set `episode_success=1` (true)
-- `V`: enter VR teleop (if you press `V` while recording, the current episode is marked as "human takeover"
-(= VR takeover), and `episode_success` is forced to `1`)
+**Dual-arm (`lerobot_arx5_dual_infer` / `lerobot-arx5-dual-infer`)**
 
-VR takeover labeling:
+- `S`: start a new raw `episode_`* directory (recording window). Policy does **not** run until you press `R`.
+- `R`: resume policy control as usual; if no recording window is open, the run continues but **nothing is written**—the script logs a warning (same idea when entering VR with `V` without an active recording window).
+- `D`: end the current recording episode and stop the policy; you must then finalize with `0` / `1` / `2` (see below).
+- If `--raw-train-record-dir` is omitted and you press `S`, the script warns that recording did not start.
+- `S` while the policy is running is ignored (stop with `Space` first, then `S` for a new window).
+
+**Single-arm (`lerobot_arx5_infer`)**
+
+- `R`: start recording a new `episode` (if allowed) **and** resume the policy in one step.
+- `D` / `0` / `1` / `2`: same finalize behavior as below (shared `TrainRawEpisodeRecorder`).
+
+**After `D`: labeling** (shared `TrainRawEpisodeRecorder`)
+
+- `0`: failure (`episode_success=0`)
+- `1`: success (`episode_success=1`)
+- `2`: **abandon**—delete the entire `episode_XXXX` directory for this take (no `episode_success` written)
+
+**VR takeover**
+
+- `V` while a raw episode is active marks the episode with VR takeover (`has_vr_takeover`, `success_forced` in `meta.json`).
+- After `D`, you are still prompted for `0` / `1` / `2`. If you press `0` after VR takeover, the script logs a **warning** and keeps waiting—you must choose `1` (keep as success) or `2` (abandon / delete).
+
+Other details:
 
 - VR segments are stored under `segment_*_vr/`
 - During conversion to LeRobot Dataset, `segment_*_vr` is mapped to
 `complementary_info.is_intervention=1`
-- If VR takeover happens within the episode, `episode_success` is forced to `1`, so after you press `D`
-you usually will not need to press `0/1`.
-
-### VR switch behavior (`V`)
-
-When switching from infer to VR with `V`, the runtime does:
-
-1. Hold the current infer joint+gripper target.
-2. Hand off the same ARX5 arm client to `Arx5Runtime` (no second CAN open, no arm `protect_mode` during handoff).
-3. Start VR controller with a shared interface bound to that same low-level arm object.
-4. Keep robot joint pose frozen until you hold the VR grip trigger to activate arm motion.
-5. Keep gripper at pre-switch value until you start using the VR gripper trigger.
-
-This avoids the jump/drop caused by resetting to home or reopening CAN.
-
-### Exit VR and return to infer
-
-While VR is running, press `Ctrl+C` in the VR terminal:
-
-1. VR loop exits.
-2. The arm client is taken back from `Arx5Runtime`.
-3. Infer reconnects using `robot.connect(reuse_arm_client=...)` and reopens cameras.
-4. Infer calls `hold_position()` and returns to keyboard STOPPED state.
-
-After returning from VR, press `R` to continue infer policy execution.
 
 ### 5.2 Raw dataset format
 
@@ -222,9 +211,9 @@ raw_root/
 Key fields:
 
 - `meta.json`
-  - `episode_success`: the final success label (0/1). It is written after you press `D` and complete labeling.
+  - `episode_success`: the final success label (`0` or `1`). Written after you press `D` and choose `0` or `1`. Abandoned episodes (`2`) remove the folder, so they do not appear here.
   - `has_vr_takeover`: whether the episode had a VR takeover
-  - `success_forced`: if VR takeover happened, success is forced to 1
+  - `success_forced`: set when VR takeover applies the stricter labeling rule (failure `0` not allowed after `D`; use `1` or `2`)
 - `segments/segment_*_policy` vs `segments/segment_*_vr`
   - `source` is encoded in the directory name: `policy` = autonomous control, `vr` = human takeover
   - The conversion script uses it to generate training-time `complementary_info.is_intervention`
@@ -244,19 +233,11 @@ python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
   --robot-type arx5
 ```
 
-If you want the dataset to store images instead of videos (no `mp4`):
+If you want   - `episode_success`: the final success label (`0` or `1`). Written after you press `D` and choose `0` or `1`. Abandoned episodes (`2`) remove the folder, so they do not appear here.
 
-```bash
-python3 src/lerobot/scripts/convert_arx5_raw_train_to_lerobot_dataset.py \
-  --raw-record-dir /path/to/raw_root \
-  --output-root /path/to/lerobot_dataset_root_images \
-  --repo-id your_dataset_repo_id_images \
-  --robot-type arx5 \
-  --images-only
-```
-
-LeRobotDataset storage location and structure (simplified):
-
+- `has_vr_takeover`: whether the episode had a VR takeover
+- `success_forced`: set when VR takeover applies the stricter labeling rule (failure `0` not allowed after `D`; use `1` or `2`)
+ied):
 - `data/chunk-XXX/file-XXX.parquet`: per-frame numeric data (e.g. action/state)
 - `meta/episodes/*.parquet` and `meta/info.json`: episode index/statistics metadata
 - If using video mode (default): `videos/` contains `mp4`
