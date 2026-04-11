@@ -100,12 +100,14 @@ class RLTActionModifier(nn.Module):
         chunk_length: int,
         action_dim: int,
         proprio_dim: int,
+        chunk_exec_steps: int = 25,
     ):
         super().__init__()
         self.rl_token = rl_token
         self.actor = actor
         self.phase_ctrl = phase_ctrl
         self.chunk_length = chunk_length
+        self.chunk_exec_steps = chunk_exec_steps
         self.action_dim = action_dim
         self.proprio_dim = proprio_dim
         self._action_queue: deque[Tensor] = deque()
@@ -151,30 +153,33 @@ class RLTActionModifier(nn.Module):
             prefix_tokens: (B, pool_size, token_dim) pooled VLA prefix tokens.
 
         Returns:
-            chunk: (B, chunk_length, action_dim) in [-1, 1].
+            VLA phase:  (B, chunk_exec_steps, action_dim)
+            RL phase:   (B, chunk_length, action_dim) in [-1, 1].
         """
-        indices = self._get_subsample_indices(vla_chunk.shape[1], vla_chunk.device)
-        ref_chunk = vla_chunk[:, indices, :]
-
         phase_val = 1.0 if self.is_rl_phase else 0.0
         source_val = phase_val
 
         if not self.is_rl_phase:
-            self._enqueue_metadata(phase_val, source_val)
-            return ref_chunk
+            # VLA phase: take the first chunk_exec_steps consecutive actions.
+            n = min(self.chunk_exec_steps, vla_chunk.shape[1])
+            self._enqueue_metadata(phase_val, source_val, n)
+            return vla_chunk[:, :n, :]
 
+        # RL phase: subsample for actor reference, actor outputs consecutive actions
+        indices = self._get_subsample_indices(vla_chunk.shape[1], vla_chunk.device)
+        ref_chunk = vla_chunk[:, indices, :]
         z_rl = self.rl_token.encode(prefix_tokens)
         state_vec = torch.cat([z_rl, proprio], dim=-1)
         ref_flat = flatten_chunk(ref_chunk)
         mu, _ = self.actor(state_vec, ref_flat, training=False)
         chunk = unflatten_chunk(mu, self.chunk_length).clamp(-1, 1)
 
-        self._enqueue_metadata(phase_val, source_val)
+        self._enqueue_metadata(phase_val, source_val, self.chunk_length)
         return chunk
 
-    def _enqueue_metadata(self, phase: float, source: float) -> None:
+    def _enqueue_metadata(self, phase: float, source: float, count: int) -> None:
         """Enqueue metadata entries for every step in the upcoming chunk."""
-        for _ in range(self.chunk_length):
+        for _ in range(count):
             self._step_metadata.append(RLTStepMetadata(phase=phase, source_type=source))
 
     def enqueue(self, chunk: Tensor) -> None:

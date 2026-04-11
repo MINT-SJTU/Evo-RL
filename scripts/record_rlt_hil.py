@@ -76,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     # RLT inference
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--chunk-length", type=int, default=10)
+    p.add_argument("--chunk-exec-steps", type=int, default=25,
+                    help="VLA phase: execute first N of H actions per inference (default 25)")
     p.add_argument("--token-pool-size", type=int, default=64)
     p.add_argument("--deterministic", action="store_true", default=True)
     # Actor architecture (must match 278ep checkpoint)
@@ -223,6 +225,7 @@ def main():
             "--rlt.phase_mode=manual",
             f"--rlt.device={args.device}",
             f"--rlt.chunk_length={args.chunk_length}",
+            f"--rlt.chunk_exec_steps={args.chunk_exec_steps}",
             f"--rlt.token_pool_size={args.token_pool_size}",
             f"--rlt.deterministic={args.deterministic}",
             f"--rlt.actor_hidden_dim={args.actor_hidden_dim}",

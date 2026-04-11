@@ -59,6 +59,7 @@ class RLTPretrainedConfig(PreTrainedConfig):
 
     # --- Deployment ---
     chunk_length: int = 10
+    chunk_exec_steps: int = 25  # VLA phase: execute first N of H actions per inference
     action_dim: int = 12
     proprio_dim: int = 12
     phase_mode: str = "always_rl"

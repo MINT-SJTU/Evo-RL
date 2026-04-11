@@ -202,6 +202,7 @@ class RLTRecordConfig:
     phase_mode: str = "manual"
     device: str = "cuda"
     chunk_length: int = 10
+    chunk_exec_steps: int = 25
     token_pool_size: int = 64
     deterministic: bool = True
     actor_hidden_dim: int = 256
@@ -301,6 +302,7 @@ class RecordConfig:
                 phase_mode=self.rlt.phase_mode,
                 device=self.rlt.device,
                 chunk_length=self.rlt.chunk_length,
+                chunk_exec_steps=self.rlt.chunk_exec_steps,
                 token_pool_size=self.rlt.token_pool_size,
                 deterministic=self.rlt.deterministic,
                 actor_hidden_dim=self.rlt.actor_hidden_dim,
@@ -554,16 +556,17 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         # RLT HIL mode: use SPACE for intervention, r/s/f for phase control
         rlt_hil_mode = cfg.rlt.enable and policy is not None and teleop is not None
+        rlt_active = cfg.rlt.enable and policy is not None
         listener, events = init_keyboard_listener(
             intervention_toggle_key=" " if rlt_hil_mode else cfg.intervention_toggle_key,
-            critical_phase_toggle_key=cp_key if not rlt_hil_mode else None,
+            critical_phase_toggle_key=cp_key if not rlt_active else None,
             episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
             episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
-            cp_success_key="s" if cfg.enable_critical_phase_labeling and not rlt_hil_mode else None,
-            cp_failure_key="f" if cfg.enable_critical_phase_labeling and not rlt_hil_mode else None,
-            rl_phase_key=cfg.rlt.rl_phase_key if rlt_hil_mode else None,
-            end_success_key=cfg.rlt.end_success_key if rlt_hil_mode else None,
-            end_failure_key=cfg.rlt.end_failure_key if rlt_hil_mode else None,
+            cp_success_key="s" if cfg.enable_critical_phase_labeling and not rlt_active else None,
+            cp_failure_key="f" if cfg.enable_critical_phase_labeling and not rlt_active else None,
+            rl_phase_key=cfg.rlt.rl_phase_key if rlt_active else None,
+            end_success_key=cfg.rlt.end_success_key if rlt_active else None,
+            end_failure_key=cfg.rlt.end_failure_key if rlt_active else None,
         )
 
         with VideoEncodingManager(dataset):

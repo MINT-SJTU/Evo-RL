@@ -124,6 +124,7 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
             actor=actor,
             phase_ctrl=phase_ctrl,
             chunk_length=config.chunk_length,
+            chunk_exec_steps=config.chunk_exec_steps,
             action_dim=config.action_dim,
             proprio_dim=config.proprio_dim,
         )
