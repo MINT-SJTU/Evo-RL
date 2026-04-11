@@ -185,6 +185,11 @@ dev_plan.md
 # Claude Code local config
 .claude/
 docs/.claude/
+CLAUDE.md
 
 # Local replay datasets
 replay/
+
+# Local notes and scratch docs
+docs/**/*.md
+scripts/dataset/rollout_data_clean.md
