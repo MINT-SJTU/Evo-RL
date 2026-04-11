@@ -145,7 +145,7 @@ def main():
     now = datetime.now()
     date_folder = now.strftime("%m%d") + f"_{args.dataset_tag}"
     time_tag = now.strftime("%H%M%S")
-    dataset_leaf = f"rlt_hil_{time_tag}"
+    dataset_leaf = f"eval_rlt_hil_{time_tag}"
 
     day_dir = resolve_dataset_root(setup) / date_folder
     day_dir.mkdir(parents=True, exist_ok=True)

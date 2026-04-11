@@ -26,11 +26,53 @@ log = logging.getLogger(__name__)
 _PI05_PREFIX = "_pi05."
 
 
+def _load_pi05_config(config_cls, pretrained_path: str):
+    """Load PI05Config from a directory, stripping the ``type`` field.
+
+    draccus ChoiceRegistry uses ``type`` for polymorphic dispatch but
+    concrete sub-classes (PI05Config) don't declare it — so parsing a
+    config.json that contains ``"type": "pi05"`` fails.  We strip it
+    before handing the file to draccus.
+    """
+    import json
+    import tempfile
+
+    import draccus
+
+    config_path = Path(pretrained_path) / "config.json"
+    with open(config_path) as fh:
+        raw = json.load(fh)
+    raw.pop("type", None)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        json.dump(raw, tmp)
+        tmp_path = tmp.name
+
+    try:
+        with draccus.config_type("json"):
+            return draccus.parse(config_cls, tmp_path, args=[])
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _tie_embed_tokens(pi05) -> None:
+    """Copy lm_head weight into embed_tokens when the latter is missing.
+
+    SFT checkpoints only store ``lm_head.weight``; the language model's
+    ``embed_tokens.weight`` is a tied copy.  After ``strict=False``
+    loading, embed_tokens is left at random init — fix it here.
+    """
+    lm = pi05.model.paligemma_with_expert.paligemma
+    embed = lm.model.language_model.embed_tokens
+    if embed is not None and lm.lm_head.weight.data_ptr() != embed.weight.data_ptr():
+        embed.weight = lm.lm_head.weight
+
+
 class RLTPretrainedPolicy(PreTrainedPolicy):
     """LeRobot-compatible policy wrapping the RLT RL head on top of a frozen VLA.
 
     Internally holds a standard ``PI05Policy`` for VLA inference and uses a
-    ``register_forward_hook`` to capture prefix hidden states.  The RL Token
+    monkey-patched ``forward`` to capture prefix hidden states.  The RL Token
     encoder and Actor operate in normalised space, producing action chunks that
     are then post-processed by the standard lerobot postprocessor.
 
@@ -167,7 +209,7 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
         cfg = self.config
         log.info("Loading PI05 backbone from %s", cfg.vla_pretrained_path)
 
-        pi05_config = PI05Config.from_pretrained(cfg.vla_pretrained_path)
+        pi05_config = _load_pi05_config(PI05Config, cfg.vla_pretrained_path)
         if cfg.task_instruction:
             pi05_config.task_instruction = cfg.task_instruction
 
@@ -175,7 +217,10 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
             cfg.vla_pretrained_path,
             config=pi05_config,
             revision=cfg.vla_revision,
+            strict=False,
         )
+        # SFT checkpoints store lm_head but not embed_tokens (tied weight).
+        _tie_embed_tokens(pi05)
         pi05.to(cfg.device or "cpu")
         pi05.eval()
         for p in pi05.parameters():

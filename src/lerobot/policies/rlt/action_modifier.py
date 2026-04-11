@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.utils.hooks import RemovableHandle
 
 from lerobot.rlt.actor import ChunkActor
 from lerobot.rlt.phase_controller import PhaseController
@@ -15,13 +14,12 @@ from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
 
 
 class PrefixOutputCapture:
-    """Non-invasive hook to capture prefix hidden states from PI05Policy.
+    """Capture prefix hidden states from PI05Policy's PaliGemmaWithExpertModel.
 
-    Attaches a forward hook on ``PaliGemmaWithExpertModel``.  During
-    ``sample_actions()``, that module is called once for prefix-only
-    (``inputs_embeds=[prefix_embs, None]``, returning ``[prefix_output, None]``)
-    and N times for denoising (``inputs_embeds=[None, suffix_embs]``, returning
-    ``[None, suffix_output]``).  The hook fires only on the prefix-only call.
+    PI05's ``sample_actions`` calls ``paligemma_with_expert.forward()``
+    directly (not via ``__call__``), so standard PyTorch forward hooks
+    never fire.  Instead we monkey-patch ``forward`` to intercept the
+    prefix-only call (``inputs_embeds=[prefix_embs, None]``).
 
     After capture the raw prefix tokens are pooled from (B, ~968, 2048) to
     (B, token_pool_size, 2048) via adaptive average pooling.
@@ -30,19 +28,26 @@ class PrefixOutputCapture:
     def __init__(self, token_pool_size: int = 64):
         self.token_pool_size = token_pool_size
         self._captured: Tensor | None = None
-        self._hook_handle: RemovableHandle | None = None
+        self._original_forward = None
+        self._target = None
 
     def attach(self, policy) -> None:
-        """Register a forward hook on ``policy.model.paligemma_with_expert``."""
+        """Monkey-patch ``forward`` on ``policy.model.paligemma_with_expert``."""
         target = policy.model.paligemma_with_expert
-        self._hook_handle = target.register_forward_hook(self._on_forward)
+        self._target = target
+        self._original_forward = target.forward
 
-    def _on_forward(self, module, args, output):
-        outputs, _past_kv = output
-        prefix_tokens = outputs[0]
-        if prefix_tokens is None:
-            return  # skip denoising calls
-        self._captured = self._pool(prefix_tokens.detach().float())
+        capture = self  # closure reference
+
+        def patched_forward(*args, **kwargs):
+            result = capture._original_forward(*args, **kwargs)
+            outputs, _past_kv = result
+            prefix_tokens = outputs[0]
+            if prefix_tokens is not None:
+                capture._captured = capture._pool(prefix_tokens.detach().float())
+            return result
+
+        target.forward = patched_forward
 
     def _pool(self, tensor: Tensor) -> Tensor:
         # adaptive_avg_pool1d expects (B, C, L); tensor is (B, L, D)
@@ -64,10 +69,11 @@ class PrefixOutputCapture:
         return result
 
     def detach(self) -> None:
-        """Remove the registered hook."""
-        if self._hook_handle is not None:
-            self._hook_handle.remove()
-            self._hook_handle = None
+        """Restore the original forward method."""
+        if self._original_forward is not None and self._target is not None:
+            self._target.forward = self._original_forward
+            self._original_forward = None
+            self._target = None
 
 
 @dataclass
