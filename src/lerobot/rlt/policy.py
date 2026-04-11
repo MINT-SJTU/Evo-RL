@@ -7,7 +7,7 @@ from lerobot.rlt.actor import ChunkActor
 from lerobot.rlt.config import RLTConfig
 from lerobot.rlt.interfaces import Observation, VLAOutput
 from lerobot.rlt.rl_token import RLTokenModule
-from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
+from lerobot.rlt.utils import flatten_chunk, unflatten_chunk
 from lerobot.rlt.vla_adapter import VLAAdapter
 
 
@@ -50,14 +50,6 @@ class RLTPolicy(nn.Module):
             residual=config.actor.residual,
         )
 
-        self._subsample_indices: torch.Tensor | None = None
-
-    def _get_subsample_indices(self, H: int) -> torch.Tensor:
-        """Lazily compute subsample indices for H -> C."""
-        C = self.config.chunk_length
-        if self._subsample_indices is None or self._subsample_indices.shape[0] != C:
-            self._subsample_indices = subsample_indices(H, C)
-        return self._subsample_indices
 
     def _extract_state_and_ref(
         self, obs: Observation, vla_out: VLAOutput,
@@ -70,8 +62,8 @@ class RLTPolicy(nn.Module):
         """
         z_rl = self.rl_token.encode(vla_out.final_tokens.detach())
         state_vec = torch.cat([z_rl, obs.proprio], dim=-1)
-        indices = self._get_subsample_indices(vla_out.sampled_action_chunk.shape[1])
-        ref_chunk = vla_out.sampled_action_chunk[:, indices, :]
+        C = self.config.chunk_length
+        ref_chunk = vla_out.sampled_action_chunk[:, :C, :]
         return state_vec, ref_chunk
 
     def encode_observation(
@@ -106,8 +98,8 @@ class RLTPolicy(nn.Module):
             ref_chunk: (B, C, action_dim)
         """
         vla_out = self.vla.forward_vla(obs)
-        indices = self._get_subsample_indices(vla_out.sampled_action_chunk.shape[1])
-        return vla_out.sampled_action_chunk[:, indices, :]
+        C = self.config.chunk_length
+        return vla_out.sampled_action_chunk[:, :C, :]
 
     def select_action(
         self, obs: Observation, vla_out: VLAOutput | None = None,

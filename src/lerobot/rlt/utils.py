@@ -22,12 +22,6 @@ def unflatten_chunk(flat: torch.Tensor, chunk_length: int) -> torch.Tensor:
     return flat.view(B, chunk_length, action_dim)
 
 
-def subsample_indices(source_len: int, target_len: int) -> torch.Tensor:
-    """Compute integer indices to subsample from source_len to target_len via linspace."""
-    if source_len == target_len:
-        return torch.arange(target_len)
-    return torch.linspace(0, source_len - 1, target_len).long()
-
 
 def compute_discount_vector(gamma: float, length: int, device: torch.device | None = None) -> torch.Tensor:
     """Return [1, gamma, gamma^2, ..., gamma^(length-1)]."""

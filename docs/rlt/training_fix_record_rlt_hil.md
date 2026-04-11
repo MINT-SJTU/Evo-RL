@@ -72,10 +72,28 @@ hf_hub_download('Shiki42/rlt_pi0.5_screw', 'actor_critic/278ep0411/rl_checkpoint
 # symlink: checkpoints/rlt_278ep_sft/ → HF cache
 ```
 
-## 变更���件汇总
+## 修复 5: ref_chunk 应取 VLA 前 C 帧而非均匀下采样
+
+**文件**: `action_modifier.py`, `rlt/policy.py`, `rlt/offline_dataset.py`, `rlt/utils.py`, `rlt/__init__.py`
+
+**问题**: `chunk_length=10` 的含义是 RL Actor 预测 10 帧动作，对应 VLA 50 帧输出的**前 10 帧**（连续帧 `[:10]`）。但代码使用 `subsample_indices(50, 10)` 做均匀下采样（取 `[0, 5, 11, 16, 22, 27, 33, 38, 44, 49]`），导致 ref_chunk 的时间分布和 Actor 训练假设不一致。
+
+**影响范围**:
+- 部署代码: `action_modifier.py` — `compute_chunk()` 的 ref_chunk 构建
+- 训练代码: `rlt/policy.py` — `_extract_state_and_ref()` 和 `get_reference_chunk()`
+- 离线数据: `rlt/offline_dataset.py` — `_subsample_chunk()`
+
+**修复**: 三处全部改为 `[:chunk_length]`。删除 `subsample_indices` 函数及其导出（`rlt/utils.py`, `rlt/__init__.py`）。
+
+## 变更文件汇总
 
 | 文件 | 改动 |
 |------|------|
 | `scripts/record_rlt_hil.py` | dataset 名加 `eval_` 前缀 |
 | `src/lerobot/policies/rlt/modeling_rlt.py` | +`_load_pi05_config()`, +`_tie_embed_tokens()`, `_ensure_pi05()` 改用 strict=False |
 | `src/lerobot/policies/rlt/action_modifier.py` | `PrefixOutputCapture` 从 forward_hook 改为 monkey-patch forward |
+| `src/lerobot/policies/rlt/action_modifier.py` | ref_chunk: `subsample_indices` → `[:chunk_length]` |
+| `src/lerobot/rlt/policy.py` | 同上，两处 |
+| `src/lerobot/rlt/offline_dataset.py` | `_subsample_chunk`: `subsample_indices` → `[:target_len]` |
+| `src/lerobot/rlt/utils.py` | 删除 `subsample_indices` 函数 |
+| `src/lerobot/rlt/__init__.py` | 移除 `subsample_indices` 导出 |

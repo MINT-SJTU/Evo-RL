@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader, Subset
 from lerobot.rlt.demo_loader import RLTDemoDataset, rlt_demo_collate
 from lerobot.rlt.interfaces import ChunkTransition, Observation
 from lerobot.rlt.replay_buffer import ReplayBuffer
-from lerobot.rlt.utils import subsample_indices
 
 logger = logging.getLogger(__name__)
 
@@ -249,9 +248,8 @@ def load_cached_buffer(
 # ---------------------------------------------------------------------------
 
 def _subsample_chunk(actions: torch.Tensor, target_len: int) -> torch.Tensor:
-    """Subsample action trajectory from (H, D) to (target_len, D)."""
-    indices = subsample_indices(actions.shape[0], target_len)
-    return actions[indices]
+    """Take first target_len frames from action trajectory (H, D) -> (target_len, D)."""
+    return actions[:target_len]
 
 
 def _compute_reward(reward_fn, expert_chunk: torch.Tensor, ref_chunk: torch.Tensor, C: int) -> torch.Tensor:

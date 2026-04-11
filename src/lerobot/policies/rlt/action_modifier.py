@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from lerobot.rlt.actor import ChunkActor
 from lerobot.rlt.phase_controller import PhaseController
 from lerobot.rlt.rl_token import RLTokenModule
-from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
+from lerobot.rlt.utils import flatten_chunk, unflatten_chunk
 
 
 class PrefixOutputCapture:
@@ -112,7 +112,6 @@ class RLTActionModifier(nn.Module):
         self.proprio_dim = proprio_dim
         self._action_queue: deque[Tensor] = deque()
         self._step_metadata: deque[RLTStepMetadata] = deque()
-        self._subsample_cache: Tensor | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -129,14 +128,6 @@ class RLTActionModifier(nn.Module):
     # ------------------------------------------------------------------
     # Core logic
     # ------------------------------------------------------------------
-
-    def _get_subsample_indices(self, H: int, device: torch.device | None = None) -> Tensor:
-        C = self.chunk_length
-        if self._subsample_cache is None or self._subsample_cache.shape[0] != C:
-            self._subsample_cache = subsample_indices(H, C)
-        if device is not None and self._subsample_cache.device != device:
-            self._subsample_cache = self._subsample_cache.to(device)
-        return self._subsample_cache
 
     @torch.no_grad()
     def compute_chunk(
@@ -165,9 +156,8 @@ class RLTActionModifier(nn.Module):
             self._enqueue_metadata(phase_val, source_val, n)
             return vla_chunk[:, :n, :]
 
-        # RL phase: subsample for actor reference, actor outputs consecutive actions
-        indices = self._get_subsample_indices(vla_chunk.shape[1], vla_chunk.device)
-        ref_chunk = vla_chunk[:, indices, :]
+        # RL phase: take first chunk_length frames as actor reference
+        ref_chunk = vla_chunk[:, :self.chunk_length, :]
         z_rl = self.rl_token.encode(prefix_tokens)
         state_vec = torch.cat([z_rl, proprio], dim=-1)
         ref_flat = flatten_chunk(ref_chunk)
