@@ -36,6 +36,10 @@ class RLTPretrainedConfig(PreTrainedConfig):
     task_instruction: str = ""
     token_pool_size: int = 64
 
+    # --- Checkpoint paths (loaded during __init__) ---
+    rl_token_ckpt_path: str = ""
+    ac_ckpt_path: str = ""
+
     # --- RL Token encoder architecture ---
     rl_token_dim: int = 2048
     rl_token_nhead: int = 8
@@ -89,7 +93,7 @@ class RLTPretrainedConfig(PreTrainedConfig):
                 type=FeatureType.STATE,
                 shape=(self.proprio_dim,),
             )
-        for i, cam_key in enumerate(self.camera_keys):
+        for cam_key in self.camera_keys:
             img_key = f"{OBS_IMAGES}.{cam_key}"
             if img_key not in self.input_features:
                 self.input_features[img_key] = PolicyFeature(

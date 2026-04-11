@@ -1,35 +1,42 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from pathlib import Path
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 from typing_extensions import Unpack
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.pretrained import ActionSelectKwargs, PreTrainedPolicy
+from lerobot.policies.rlt.action_modifier import (
+    PrefixOutputCapture,
+    RLTActionModifier,
+    RLTStepMetadata,
+)
 from lerobot.policies.rlt.configuration_rlt import RLTPretrainedConfig
 from lerobot.rlt.actor import ChunkActor
-from lerobot.rlt.interfaces import Observation, VLAOutput
-from lerobot.rlt.obs_bridge import robot_obs_to_rlt_obs
+from lerobot.rlt.phase_controller import PhaseController
 from lerobot.rlt.rl_token import RLTokenModule
-from lerobot.rlt.utils import flatten_chunk, subsample_indices, unflatten_chunk
-from lerobot.rlt.vla_adapter import VLAAdapter
+from lerobot.rlt.utils import filter_encoder_only
 
 log = logging.getLogger(__name__)
 
-# Prefix used for VLA sub-module in state_dict
-_VLA_PREFIX = "vla."
+# Prefix used for PI05 sub-module in state_dict
+_PI05_PREFIX = "_pi05."
 
 
 class RLTPretrainedPolicy(PreTrainedPolicy):
     """LeRobot-compatible policy wrapping the RLT RL head on top of a frozen VLA.
 
-    The safetensors checkpoint contains ONLY the RL head weights (rl_token encoder
-    + actor, ~400 MB). The VLA backbone (~7 GB) is loaded separately from
-    config.vla_pretrained_path at construction time.
+    Internally holds a standard ``PI05Policy`` for VLA inference and uses a
+    ``register_forward_hook`` to capture prefix hidden states.  The RL Token
+    encoder and Actor operate in normalised space, producing action chunks that
+    are then post-processed by the standard lerobot postprocessor.
+
+    The safetensors checkpoint contains ONLY the RL head weights (rl_token
+    encoder + actor, ~400 MB).  The VLA backbone (~7 GB) is loaded lazily from
+    ``config.vla_pretrained_path``.
     """
 
     config_class = RLTPretrainedConfig
@@ -40,7 +47,7 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
         self.config: RLTPretrainedConfig = config
 
         # Build RL Token encoder (inference-only: no decoder)
-        self.rl_token = RLTokenModule(
+        rl_token = RLTokenModule(
             token_dim=config.rl_token_dim,
             nhead=config.rl_token_nhead,
             num_enc_layers=config.rl_token_enc_layers,
@@ -50,12 +57,11 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
             inference_only=True,
         )
 
-        # Build Actor
-        token_dim = config.rl_token_dim
+        # Build Actor (ResidualMLP by default)
         chunk_dim = config.chunk_length * config.action_dim
-        state_dim = token_dim + config.proprio_dim
+        state_dim = config.rl_token_dim + config.proprio_dim
 
-        self.actor = ChunkActor(
+        actor = ChunkActor(
             state_dim=state_dim,
             chunk_dim=chunk_dim,
             hidden_dim=config.actor_hidden_dim,
@@ -67,108 +73,194 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
             residual=config.actor_residual,
         )
 
-        # VLA adapter is built lazily (see _ensure_vla) to allow
-        # state_dict / safetensors loading before the heavy VLA is in memory.
-        self.vla: VLAAdapter | None = None
-        self._vla_loaded = False
+        # Phase controller
+        phase_ctrl = self._build_phase_controller(config)
 
-        # Action queue for chunk-to-step conversion
-        self._action_queue: deque[Tensor] = deque()
-        self._subsample_cache: Tensor | None = None
-
-    # ------------------------------------------------------------------
-    # VLA loading (deferred so safetensors load does not require 7 GB)
-    # ------------------------------------------------------------------
-
-    def _ensure_vla(self) -> VLAAdapter:
-        """Lazily load the VLA backbone on first inference call."""
-        if self._vla_loaded and self.vla is not None:
-            return self.vla
-        cfg = self.config
-        log.info("Loading VLA backbone from %s", cfg.vla_pretrained_path)
-        from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
-
-        self.vla = Pi05VLAAdapter(
-            model_path=cfg.vla_pretrained_path,
-            actual_action_dim=cfg.action_dim,
-            actual_proprio_dim=cfg.proprio_dim,
-            task_instruction=cfg.task_instruction,
-            device=cfg.device or "cpu",
-            token_pool_size=cfg.token_pool_size,
+        # Action modifier (owns rl_token + actor + phase_ctrl + queues)
+        self.modifier = RLTActionModifier(
+            rl_token=rl_token,
+            actor=actor,
+            phase_ctrl=phase_ctrl,
+            chunk_length=config.chunk_length,
+            action_dim=config.action_dim,
+            proprio_dim=config.proprio_dim,
         )
-        self.vla.to(cfg.device or "cpu")
-        for p in self.vla.parameters():
-            p.requires_grad = False
-        self._vla_loaded = True
-        return self.vla
 
-    def set_vla(self, vla: VLAAdapter) -> None:
-        """Inject a VLA adapter (e.g. DummyVLAAdapter for testing)."""
-        self.vla = vla
-        self._vla_loaded = True
+        # Prefix output capture (hook attached lazily when PI05 loads)
+        self.prefix_capture = PrefixOutputCapture(
+            token_pool_size=config.token_pool_size,
+        )
+
+        # Inner PI05Policy -- deferred to avoid 7 GB memory at init time
+        self._pi05 = None
+
+        # Load RL Token + Actor weights from checkpoint files if paths given
+        self._load_rlt_checkpoints()
+
+    # ------------------------------------------------------------------
+    # Convenience accessors (sub-modules registered via modifier)
+    # ------------------------------------------------------------------
+
+    @property
+    def rl_token(self) -> RLTokenModule:
+        return self.modifier.rl_token
+
+    @property
+    def actor(self) -> ChunkActor:
+        return self.modifier.actor
+
+    # ------------------------------------------------------------------
+    # Phase controller construction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_phase_controller(config: RLTPretrainedConfig) -> PhaseController:
+        ctrl = PhaseController(mode="manual")
+        if config.phase_mode == "always_rl":
+            ctrl.trigger_critical()
+        elif config.phase_mode == "always_vla":
+            ctrl.trigger_vla()
+        # "manual" starts in VLA phase by default
+        return ctrl
+
+    # ------------------------------------------------------------------
+    # Checkpoint loading
+    # ------------------------------------------------------------------
+
+    def _load_rlt_checkpoints(self) -> None:
+        """Load RL Token encoder and Actor weights from .pt checkpoint files."""
+        cfg = self.config
+
+        if cfg.rl_token_ckpt_path:
+            self._load_rl_token_ckpt(cfg.rl_token_ckpt_path)
+
+        if cfg.ac_ckpt_path:
+            self._load_ac_ckpt(cfg.ac_ckpt_path)
+
+    def _load_rl_token_ckpt(self, path: str) -> None:
+        log.info("Loading RL Token checkpoint from %s", path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        raw_sd = ckpt.get("rl_token_state_dict", ckpt)
+        filtered, skipped = filter_encoder_only(raw_sd)
+        if skipped:
+            log.info("Stripped %d decoder keys from RL Token checkpoint", len(skipped))
+        self.rl_token.load_state_dict(filtered, strict=False)
+
+    def _load_ac_ckpt(self, path: str) -> None:
+        log.info("Loading Actor checkpoint from %s", path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        actor_sd = ckpt.get("actor_state_dict", ckpt)
+        self.actor.load_state_dict(actor_sd)
+
+    # ------------------------------------------------------------------
+    # PI05 lazy loading
+    # ------------------------------------------------------------------
+
+    def _ensure_pi05(self):
+        """Lazily load the PI05Policy backbone on first inference call."""
+        if self._pi05 is not None:
+            return self._pi05
+
+        from lerobot.policies.pi05.configuration_pi05 import PI05Config
+        from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+
+        cfg = self.config
+        log.info("Loading PI05 backbone from %s", cfg.vla_pretrained_path)
+
+        pi05_config = PI05Config.from_pretrained(cfg.vla_pretrained_path)
+        if cfg.task_instruction:
+            pi05_config.task_instruction = cfg.task_instruction
+
+        pi05 = PI05Policy.from_pretrained(
+            cfg.vla_pretrained_path,
+            config=pi05_config,
+            revision=cfg.vla_revision,
+        )
+        pi05.to(cfg.device or "cpu")
+        pi05.eval()
+        for p in pi05.parameters():
+            p.requires_grad = False
+
+        # Ensure RL head (rl_token + actor) is on the same device as PI05
+        self.modifier.to(cfg.device or "cpu")
+
+        # Attach prefix output hook
+        self.prefix_capture.attach(pi05)
+
+        self._pi05 = pi05
+        return self._pi05
 
     # ------------------------------------------------------------------
     # Core inference
     # ------------------------------------------------------------------
 
-    def _obs_from_batch(self, batch: dict[str, Tensor]) -> Observation:
-        """Convert a lerobot batch dict into an RLT Observation."""
-        return robot_obs_to_rlt_obs(
-            batch,
-            camera_keys=self.config.camera_keys,
-            proprio_keys=self.config.proprio_keys,
-            device=self.config.device or "cpu",
-        )
-
-    def _get_subsample_indices(self, H: int) -> Tensor:
-        C = self.config.chunk_length
-        if self._subsample_cache is None or self._subsample_cache.shape[0] != C:
-            self._subsample_cache = subsample_indices(H, C)
-        return self._subsample_cache
-
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
+    def predict_action_chunk(
+        self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]
+    ) -> Tensor:
         """Predict a full chunk of actions.
 
         Returns:
-            actions: (B, chunk_length, action_dim)
+            chunk: (B, chunk_length, action_dim)
         """
         self.eval()
-        vla = self._ensure_vla()
-        obs = self._obs_from_batch(batch)
+        pi05 = self._ensure_pi05()
 
-        vla_out = vla.forward_vla(obs)
-        z_rl = self.rl_token.encode(vla_out.final_tokens.detach())
-        state_vec = torch.cat([z_rl, obs.proprio], dim=-1)
+        # VLA forward -- hook captures prefix_output as a side effect
+        vla_chunk = pi05.predict_action_chunk(batch, **kwargs)
+        # PI05 already unpads to its output_features action_dim; truncate
+        # further if RLT action_dim is smaller (e.g. 12 vs PI05's 14)
+        vla_chunk = vla_chunk[:, :, : self.config.action_dim]
 
-        indices = self._get_subsample_indices(vla_out.sampled_action_chunk.shape[1])
-        ref_chunk = vla_out.sampled_action_chunk[:, indices, :]
-        ref_flat = flatten_chunk(ref_chunk)
+        # Retrieve hook-captured prefix tokens
+        prefix_tokens = self.prefix_capture.consume()
 
-        mu, _ = self.actor(state_vec, ref_flat, training=False)
-        if not self.config.deterministic:
-            action_flat, _ = self.actor.sample(state_vec, ref_flat, training=False)
-        else:
-            action_flat = mu
+        # Normalised proprio from preprocessed batch
+        proprio = batch["observation.state"][:, : self.config.proprio_dim]
 
-        return unflatten_chunk(action_flat, self.config.chunk_length)
+        # Compute chunk (VLA pass-through or RL Actor)
+        return self.modifier.compute_chunk(vla_chunk, proprio, prefix_tokens)
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
+    def select_action(
+        self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]
+    ) -> Tensor:
         """Return a single-step action, using internal chunk queue.
+
+        When the modifier's action queue is empty a full VLA forward is run,
+        prefix tokens are captured via hook, and the modifier computes a new
+        chunk (VLA pass-through or Actor-refined depending on phase).
 
         Returns:
             action: (B, action_dim)
         """
-        if len(self._action_queue) == 0:
+        if self.modifier.needs_new_chunk:
             chunk = self.predict_action_chunk(batch, **kwargs)
-            # chunk shape: (B, C, action_dim) -- enqueue each timestep
-            self._action_queue.extend(chunk.transpose(0, 1))
+            self.modifier.enqueue(chunk)
 
-        return self._action_queue.popleft()
+        return self.modifier.pop_action()
+
+    # ------------------------------------------------------------------
+    # Phase control delegation (duck-typed for recording_loop)
+    # ------------------------------------------------------------------
+
+    def set_rl_mode(self) -> None:
+        self.modifier.set_rl_mode()
+
+    def set_vla_mode(self) -> None:
+        self.modifier.set_vla_mode()
+
+    def trigger_critical_phase(self) -> None:
+        self.modifier.trigger_critical_phase()
+
+    def interrupt_chunk(self) -> None:
+        self.modifier.interrupt_chunk()
+
+    def pop_step_metadata(self) -> RLTStepMetadata | None:
+        return self.modifier.pop_step_metadata()
 
     def reset(self) -> None:
-        self._action_queue.clear()
+        self.modifier.reset()
 
     # ------------------------------------------------------------------
     # Training stubs (RLT trains via its own offline RL loop, not lerobot)
@@ -187,12 +279,12 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
         }
 
     # ------------------------------------------------------------------
-    # State dict: exclude VLA weights from serialization
+    # State dict: exclude PI05 weights from serialization
     # ------------------------------------------------------------------
 
     def state_dict(self, *args, **kwargs):
         full = super().state_dict(*args, **kwargs)
-        return {k: v for k, v in full.items() if not k.startswith(_VLA_PREFIX)}
+        return {k: v for k, v in full.items() if not k.startswith(_PI05_PREFIX)}
 
     @classmethod
     def from_pretrained(
@@ -205,9 +297,8 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
     ) -> RLTPretrainedPolicy:
         """Load RLT policy.
 
-        Uses strict=False by default because the VLA sub-module is not in the
-        safetensors file. After loading, validates that all missing keys belong
-        to the VLA prefix (which is loaded separately at inference time).
+        Uses strict=False by default because the PI05 sub-module is not in the
+        safetensors file.
         """
         return super().from_pretrained(
             pretrained_name_or_path,

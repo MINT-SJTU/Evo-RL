@@ -1,7 +1,8 @@
 """Record RLT human-in-loop data: RL rollout + human intervention.
 
 In-process launcher that reads setup.json, builds config, and calls
-the lerobot record() function with RLTDeployPolicy as the action source.
+the lerobot record() function with RLTPretrainedPolicy as the action source.
+RLT config is translated into a standard policy via RLTPretrainedConfig.
 
 Keyboard controls during recording:
     r     - Start RL critical phase (switch to RL actor)
