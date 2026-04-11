@@ -77,3 +77,56 @@ def filter_encoder_only(state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, 
         else:
             filtered[k] = v
     return filtered, skipped
+
+
+def infer_actor_architecture(
+    actor_state_dict: dict[str, torch.Tensor],
+    *,
+    default_activation: str = "relu",
+    default_fixed_std: float = 0.05,
+    default_ref_dropout_p: float = 0.5,
+) -> dict[str, int | float | bool | str]:
+    """Infer ChunkActor construction kwargs from a saved actor state_dict."""
+    if "net.input_proj.weight" in actor_state_dict:
+        hidden_dim = actor_state_dict["net.input_proj.weight"].shape[0]
+        block_indices = {
+            int(key.split(".")[2])
+            for key in actor_state_dict
+            if key.startswith("net.blocks.") and key.endswith(".0.weight")
+        }
+        layer_norm = any(
+            key.startswith("net.blocks.") and key.endswith(".1.weight")
+            for key in actor_state_dict
+        )
+        return {
+            "hidden_dim": hidden_dim,
+            "num_layers": len(block_indices),
+            "activation": default_activation,
+            "layer_norm": layer_norm,
+            "residual": True,
+            "fixed_std": default_fixed_std,
+            "ref_dropout_p": default_ref_dropout_p,
+        }
+
+    linear_keys = sorted(
+        key for key, value in actor_state_dict.items()
+        if key.startswith("net.") and key.endswith(".weight") and value.ndim == 2
+    )
+    if not linear_keys:
+        raise ValueError("Could not infer actor architecture: no linear weights found")
+
+    hidden_dim = actor_state_dict[linear_keys[0]].shape[0]
+    num_layers = len(linear_keys) - 1
+    layer_norm = any(
+        key.startswith("net.") and key.endswith(".weight") and value.ndim == 1
+        for key, value in actor_state_dict.items()
+    )
+    return {
+        "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
+        "activation": default_activation,
+        "layer_norm": layer_norm,
+        "residual": False,
+        "fixed_std": default_fixed_std,
+        "ref_dropout_p": default_ref_dropout_p,
+    }

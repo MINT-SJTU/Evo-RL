@@ -16,14 +16,16 @@ from lerobot.policies.rlt.action_modifier import (
 )
 from lerobot.policies.rlt.configuration_rlt import RLTPretrainedConfig
 from lerobot.rlt.actor import ChunkActor
+from lerobot.rlt.interfaces import Observation
 from lerobot.rlt.phase_controller import PhaseController
 from lerobot.rlt.rl_token import RLTokenModule
 from lerobot.rlt.utils import filter_encoder_only
+from lerobot.rlt.vla_adapter import VLAAdapter
 
 log = logging.getLogger(__name__)
 
-# Prefix used for PI05 sub-module in state_dict
-_PI05_PREFIX = "_pi05."
+# Prefix used for the internal VLA sub-module in state_dict.
+_VLA_PREFIX = "_pi05."
 
 
 def _load_pi05_config(config_cls, pretrained_path: str):
@@ -136,6 +138,7 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
 
         # Inner PI05Policy -- deferred to avoid 7 GB memory at init time
         self._pi05 = None
+        self.__dict__["_injected_vla"] = None
 
         # Load RL Token + Actor weights from checkpoint files if paths given
         self._load_rlt_checkpoints()
@@ -236,6 +239,21 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
         self._pi05 = pi05
         return self._pi05
 
+    def set_vla(self, vla: VLAAdapter) -> None:
+        """Inject a test VLA adapter, bypassing PI05 lazy loading."""
+        self.__dict__["_injected_vla"] = vla
+
+    def _make_observation(self, batch: dict[str, Tensor]) -> Observation:
+        proprio = batch.get("observation.state")
+        if proprio is None:
+            proprio_key = self.config.proprio_keys[0]
+            proprio = batch[proprio_key]
+        images = {
+            cam_key: batch[cam_key]
+            for cam_key in self.config.camera_keys
+        }
+        return Observation(images=images, proprio=proprio[:, : self.config.proprio_dim])
+
     # ------------------------------------------------------------------
     # Core inference
     # ------------------------------------------------------------------
@@ -250,6 +268,13 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
             chunk: (B, chunk_length, action_dim)
         """
         self.eval()
+        injected_vla = self.__dict__["_injected_vla"]
+        if injected_vla is not None:
+            obs = self._make_observation(batch)
+            vla_out = injected_vla.forward_vla(obs)
+            vla_chunk = vla_out.sampled_action_chunk[:, :, : self.config.action_dim]
+            return self.modifier.compute_chunk(vla_chunk, obs.proprio, vla_out.final_tokens)
+
         pi05 = self._ensure_pi05()
 
         # VLA forward -- hook captures prefix_output as a side effect
@@ -330,7 +355,7 @@ class RLTPretrainedPolicy(PreTrainedPolicy):
 
     def state_dict(self, *args, **kwargs):
         full = super().state_dict(*args, **kwargs)
-        return {k: v for k, v in full.items() if not k.startswith(_PI05_PREFIX)}
+        return {k: v for k, v in full.items() if not k.startswith(_VLA_PREFIX)}
 
     @classmethod
     def from_pretrained(

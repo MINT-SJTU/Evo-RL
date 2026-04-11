@@ -114,8 +114,8 @@ class TestStateDictExclusion:
         """state_dict() must contain rl_token.* and actor.* keys."""
         policy = _make_policy_with_dummy_vla()
         sd = policy.state_dict()
-        rl_token_keys = [k for k in sd if k.startswith("rl_token.")]
-        actor_keys = [k for k in sd if k.startswith("actor.")]
+        rl_token_keys = [k for k in sd if k.startswith("modifier.rl_token.")]
+        actor_keys = [k for k in sd if k.startswith("modifier.actor.")]
         assert len(rl_token_keys) > 0, "Missing rl_token keys"
         assert len(actor_keys) > 0, "Missing actor keys"
 
@@ -163,9 +163,9 @@ class TestSelectAction:
         policy = _make_policy_with_dummy_vla()
         batch = _make_batch()
         policy.select_action(batch)
-        assert len(policy._action_queue) > 0
+        assert len(policy.modifier._action_queue) > 0
         policy.reset()
-        assert len(policy._action_queue) == 0
+        assert len(policy.modifier._action_queue) == 0
 
 
 class TestSaveLoad:

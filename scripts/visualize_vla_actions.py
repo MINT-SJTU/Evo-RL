@@ -31,8 +31,10 @@ import time
 from copy import copy
 from pathlib import Path
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# Block all HF network requests (no internet on target machine)
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import numpy as np
 import torch
@@ -89,10 +91,16 @@ def parse_args() -> argparse.Namespace:
 def load_dataset(dataset_path: str, repo_id: str, episode_index: int):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    return LeRobotDataset(
+    # Temporarily allow HF hub access for local dataset metadata loading
+    saved = {k: os.environ.pop(k, None) for k in ["HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE"]}
+    ds = LeRobotDataset(
         repo_id=repo_id, root=dataset_path,
         episodes=[episode_index], video_backend="pyav",
     )
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
+    return ds
 
 
 def detect_camera_keys(dataset) -> list[str]:
@@ -131,20 +139,6 @@ def item_to_numpy_obs(item: dict, camera_full_keys: list[str]) -> dict[str, np.n
     obs["observation.state"] = item["observation.state"].numpy()
     return obs
 
-
-def item_to_tensor_obs(item: dict, camera_full_keys: list[str]) -> dict[str, torch.Tensor]:
-    """Convert dataset item to tensor dict for RLT obs_bridge.
-
-    Splits observation.state into per-joint keys (e.g. left_shoulder_pan.pos)
-    because robot_obs_to_rlt_obs expects individual joint keys.
-    """
-    obs: dict[str, torch.Tensor] = {}
-    for full_key in camera_full_keys:
-        obs[full_key] = item[full_key]
-    state = item["observation.state"]
-    for i, jname in enumerate(DEFAULT_JOINT_NAMES):
-        obs[jname] = state[i]
-    return obs
 
 
 # ---------------------------------------------------------------------------
@@ -201,37 +195,80 @@ def run_pi05_inference(
 # ---------------------------------------------------------------------------
 
 
-def load_rlt_policy(args: argparse.Namespace, camera_keys: list[str]):
-    from lerobot.rlt.deploy import load_rlt_deploy_policy
-    from lerobot.rlt.deploy_config import DeployConfig
+def load_rlt_policy(args: argparse.Namespace):
+    """Load RLT: Pi05VLAAdapter + RLTPolicy with RL token + actor checkpoints."""
+    from lerobot.rlt.config import ActorConfig, CriticConfig, RLTConfig, RLTokenConfig
+    from lerobot.rlt.pi05_adapter import Pi05VLAAdapter
+    from lerobot.rlt.policy import RLTPolicy
+    from lerobot.rlt.utils import filter_encoder_only, infer_actor_architecture
 
-    deploy_cfg = DeployConfig(
-        vla_model_path=args.vla_model,
-        rl_token_checkpoint=args.rl_token_ckpt,
-        ac_checkpoint=args.ac_ckpt,
-        camera_keys=camera_keys,
-        proprio_keys=DEFAULT_JOINT_NAMES,
-        action_keys=DEFAULT_JOINT_NAMES,
-        phase_mode="always_rl",
-        deterministic=True,
-        device=args.device,
-        task_instruction=args.task,
-        token_pool_size=64, chunk_length=10,
-        tokenizer_path=args.tokenizer_path,
-        actor_hidden_dim=args.actor_hidden_dim,
-        actor_num_layers=args.actor_num_layers,
-        actor_residual=args.actor_residual,
-        actor_activation=args.actor_activation,
+    ac_ckpt = torch.load(args.ac_ckpt, map_location="cpu", weights_only=False)
+    ac_config = ac_ckpt.get("config", {})
+    actor_kwargs = infer_actor_architecture(
+        ac_ckpt["actor_state_dict"],
+        default_activation=args.actor_activation,
+        default_fixed_std=0.05,
+        default_ref_dropout_p=0.5,
     )
-    return load_rlt_deploy_policy(deploy_cfg)
+    actor_kwargs["hidden_dim"] = ac_config.get("actor_hidden", actor_kwargs["hidden_dim"])
+    actor_kwargs["num_layers"] = ac_config.get("actor_layers", actor_kwargs["num_layers"])
+    actor_kwargs["activation"] = ac_config.get("activation", actor_kwargs["activation"])
+    actor_kwargs["residual"] = ac_config.get("architecture", "") == "residual_mlp" or actor_kwargs["residual"]
+    if not ac_config:
+        log.warning("AC checkpoint has no config metadata; activation/fixed_std fall back to script defaults")
+
+    vla = Pi05VLAAdapter(
+        model_path=args.vla_model,
+        actual_action_dim=12, actual_proprio_dim=12,
+        task_instruction=args.task,
+        device=args.device, token_pool_size=64,
+        tokenizer_path=args.tokenizer_path,
+    )
+    rlt_config = RLTConfig(
+        action_dim=12, proprio_dim=12, chunk_length=10,
+        rl_token=RLTokenConfig(token_dim=2048, nhead=8, enc_layers=3, dec_layers=3, ff_dim=4096, num_rl_tokens=4),
+        actor=ActorConfig(
+            hidden_dim=actor_kwargs["hidden_dim"],
+            num_layers=actor_kwargs["num_layers"],
+            residual=actor_kwargs["residual"],
+            activation=actor_kwargs["activation"],
+            layer_norm=actor_kwargs["layer_norm"],
+            fixed_std=actor_kwargs["fixed_std"],
+            ref_dropout_p=actor_kwargs["ref_dropout_p"],
+        ),
+        critic=CriticConfig(),
+    )
+    policy = RLTPolicy(rlt_config, vla)
+    policy.to(args.device)
+
+    # Load RL token encoder
+    ckpt = torch.load(args.rl_token_ckpt, map_location="cpu", weights_only=True)
+    filtered, skipped = filter_encoder_only(ckpt["rl_token_state_dict"])
+    policy.rl_token.load_state_dict(filtered, strict=False)
+    log.info("RL token loaded (step %d, skipped %d decoder keys)", ckpt.get("step", -1), len(skipped))
+    del ckpt
+
+    # Load actor (+ overwrite rl_token if present in AC checkpoint)
+    policy.actor.load_state_dict(ac_ckpt["actor_state_dict"])
+    if "rl_token_state_dict" in ac_ckpt:
+        filtered, skipped = filter_encoder_only(ac_ckpt["rl_token_state_dict"])
+        policy.rl_token.load_state_dict(filtered, strict=False)
+        log.info("RL token overwritten from AC checkpoint (skipped %d decoder keys)", len(skipped))
+    log.info("Actor loaded")
+    del ac_ckpt
+
+    policy.freeze_vla()
+    policy.freeze_rl_token_encoder()
+    policy.eval()
+    return policy
 
 
 def run_rlt_inference(
-    rlt_policy, dataset, camera_keys: list[str], camera_full_keys: list[str],
+    rlt_policy, dataset, camera_full_keys: list[str],
     device: str, stride: int,
 ) -> np.ndarray:
-    """Returns (N, action_dim) in NORMALIZED [-1,1] space."""
-    from lerobot.rlt.obs_bridge import robot_obs_to_rlt_obs
+    """Returns (N, action_dim) — raw actor output."""
+    from lerobot.rlt.interfaces import Observation
 
     actions = []
     frame_indices = list(range(0, len(dataset), stride))
@@ -240,11 +277,15 @@ def run_rlt_inference(
     t0 = time.monotonic()
     for idx in tqdm(frame_indices, desc="RLT"):
         item = dataset[idx]
-        obs_dict = item_to_tensor_obs(item, camera_full_keys)
-        obs_rlt = robot_obs_to_rlt_obs(obs_dict, camera_keys, DEFAULT_JOINT_NAMES, device)
+        images = {}
+        for full_key in camera_full_keys:
+            short = full_key.split(".")[-1]
+            images[short] = item[full_key].unsqueeze(0).to(device)
+        proprio = item["observation.state"].unsqueeze(0).to(device)
+        obs = Observation(images=images, proprio=proprio)
         with torch.inference_mode():
-            chunk, _, _ = rlt_policy._compute_action_chunk(obs_rlt)
-        actions.append(chunk[0, 0, :].cpu().numpy())
+            action_chunk, _, _, _ = rlt_policy.select_action(obs, deterministic=True)
+        actions.append(action_chunk[0, 0, :].cpu().numpy())
 
     elapsed = time.monotonic() - t0
     log.info("RLT done: %.1fs (%.0f ms/frame)", elapsed, elapsed / max(len(actions), 1) * 1000)
@@ -481,13 +522,13 @@ def main() -> None:
     torch.cuda.empty_cache()
     import gc; gc.collect()  # free CPU RAM before loading RLT
 
-    # 4. RLT inference (normalized) -> unnormalize
+    # 4. RLT inference (normalized training space) -> unnormalize for comparison
     rlt_actions = None
     if has_rlt:
         log.info("Loading RLT rl_token=%s ac=%s ...", args.rl_token_ckpt, args.ac_ckpt)
-        rlt_policy = load_rlt_policy(args, camera_keys)
+        rlt_policy = load_rlt_policy(args)
         rlt_norm = run_rlt_inference(
-            rlt_policy, dataset, camera_keys, camera_full_keys, args.device, args.stride,
+            rlt_policy, dataset, camera_full_keys, args.device, args.stride,
         )
         rlt_actions = unnormalize_actions(rlt_norm, q01, q99)
         log.info("RLT unnormalized range: [%.1f, %.1f]", rlt_actions.min(), rlt_actions.max())
