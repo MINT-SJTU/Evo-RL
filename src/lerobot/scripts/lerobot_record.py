@@ -194,6 +194,25 @@ class RLTRecordConfig:
     enable: bool = False
     critical_phase_toggle_key: str = "p"
     default_reset_mode: str = "full"
+    # RLT deploy settings (used when enable=True)
+    vla_model: str = ""
+    rl_token_ckpt: str = ""
+    ac_ckpt: str = ""
+    task_instruction: str = ""
+    phase_mode: str = "manual"
+    device: str = "cuda"
+    chunk_length: int = 10
+    token_pool_size: int = 64
+    deterministic: bool = True
+    actor_hidden_dim: int = 512
+    actor_num_layers: int = 4
+    actor_residual: bool = True
+    actor_activation: str = "relu"
+    actor_layer_norm: bool = False
+    # Keyboard keys for RLT HIL mode
+    rl_phase_key: str = "r"
+    end_success_key: str = "s"
+    end_failure_key: str = "f"
 
 
 @dataclass
@@ -270,8 +289,8 @@ class RecordConfig:
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
 
-        if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+        if self.teleop is None and self.policy is None and not (self.rlt.enable and self.rlt.vla_model):
+            raise ValueError("Choose a policy, a teleoperator, or enable RLT to control the robot")
         sanity_check_bimanual_piper_pair(self.robot, self.teleop)
         if not self.intervention_toggle_key or len(self.intervention_toggle_key) != 1:
             raise ValueError("`intervention_toggle_key` must be a single character.")
@@ -438,7 +457,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
         else:
             # Create empty dataset or load existing saved episodes
-            sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
+            # Skip dataset name check in RLT mode (policy=None but RLT provides actions)
+            if not (cfg.rlt.enable and cfg.rlt.vla_model):
+                sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
             dataset = LeRobotDataset.create(
                 cfg.dataset.repo_id,
                 cfg.dataset.fps,
@@ -497,24 +518,79 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             )
 
         critical_phase_tracker = None
-        if cfg.enable_critical_phase_labeling:
+        if cfg.enable_critical_phase_labeling or (cfg.rlt.enable and cfg.rlt.vla_model):
             from lerobot.utils.critical_phase_tracker import CriticalPhaseTracker
 
             critical_phase_tracker = CriticalPhaseTracker(
                 auto_save_path=dataset.root / "critical_phase_intervals.json",
             )
 
+        # Instantiate RLT deploy policy when RLT is enabled with model paths
+        rlt_deploy_policy = None
+        rlt_action_q01 = rlt_action_q99 = None
+        if cfg.rlt.enable and cfg.rlt.vla_model:
+            from lerobot.rlt.deploy import load_rlt_deploy_policy
+            from lerobot.rlt.deploy_config import DeployConfig
+
+            action_names = dataset.features[ACTION]["names"]
+            action_names = list(robot.action_features) if action_names is None else list(action_names)
+            proprio_names = list(robot.action_features)
+            # Detect camera keys from dataset features (e.g. "left_wrist" from "observation.images.left_wrist")
+            camera_names = [
+                k.removeprefix("observation.images.")
+                for k in dataset.features
+                if k.startswith("observation.images.")
+            ]
+
+            deploy_cfg = DeployConfig(
+                vla_model_path=cfg.rlt.vla_model,
+                rl_token_checkpoint=cfg.rlt.rl_token_ckpt,
+                ac_checkpoint=cfg.rlt.ac_ckpt,
+                task_instruction=cfg.rlt.task_instruction or cfg.dataset.single_task,
+                phase_mode=cfg.rlt.phase_mode,
+                device=cfg.rlt.device,
+                chunk_length=cfg.rlt.chunk_length,
+                token_pool_size=cfg.rlt.token_pool_size,
+                deterministic=cfg.rlt.deterministic,
+                actor_hidden_dim=cfg.rlt.actor_hidden_dim,
+                actor_num_layers=cfg.rlt.actor_num_layers,
+                actor_residual=cfg.rlt.actor_residual,
+                actor_activation=cfg.rlt.actor_activation,
+                actor_layer_norm=cfg.rlt.actor_layer_norm,
+                action_keys=action_names,
+                proprio_keys=proprio_names,
+                camera_keys=camera_names or ["left_wrist", "right_wrist", "right_front"],
+            )
+            rlt_deploy_policy = load_rlt_deploy_policy(deploy_cfg)
+
+            # Load unnormalization stats (q01/q99) from VLA model for QUANTILES denorm
+            from safetensors.torch import load_file as _load_safetensors
+            _unnorm_path = Path(cfg.rlt.vla_model) / "policy_postprocessor_step_0_unnormalizer_processor.safetensors"
+            if _unnorm_path.exists():
+                _unnorm_stats = _load_safetensors(str(_unnorm_path))
+                rlt_action_q01 = _unnorm_stats["action.q01"].to(cfg.rlt.device)
+                rlt_action_q99 = _unnorm_stats["action.q99"].to(cfg.rlt.device)
+                logging.info("Loaded action unnorm stats: q01=%s, q99=%s", rlt_action_q01[:3].tolist(), rlt_action_q99[:3].tolist())
+            else:
+                rlt_action_q01 = rlt_action_q99 = None
+                logging.warning("No unnorm stats found at %s — actions will NOT be unnormalized!", _unnorm_path)
+
         cp_key = cfg.critical_phase_toggle_key if cfg.enable_critical_phase_labeling else None
         if cp_key is None and cfg.rlt.enable:
             cp_key = cfg.rlt.critical_phase_toggle_key
 
+        # RLT HIL mode: use SPACE for intervention, r/s/f for phase control
+        rlt_hil_mode = rlt_deploy_policy is not None and teleop is not None
         listener, events = init_keyboard_listener(
-            intervention_toggle_key=cfg.intervention_toggle_key,
-            critical_phase_toggle_key=cp_key,
+            intervention_toggle_key=" " if rlt_hil_mode else cfg.intervention_toggle_key,
+            critical_phase_toggle_key=cp_key if not rlt_hil_mode else None,
             episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
             episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
-            cp_success_key="s" if cfg.enable_critical_phase_labeling else None,
-            cp_failure_key="f" if cfg.enable_critical_phase_labeling else None,
+            cp_success_key="s" if cfg.enable_critical_phase_labeling and not rlt_hil_mode else None,
+            cp_failure_key="f" if cfg.enable_critical_phase_labeling and not rlt_hil_mode else None,
+            rl_phase_key=cfg.rlt.rl_phase_key if rlt_hil_mode else None,
+            end_success_key=cfg.rlt.end_success_key if rlt_hil_mode else None,
+            end_failure_key=cfg.rlt.end_failure_key if rlt_hil_mode else None,
         )
 
         with VideoEncodingManager(dataset):
@@ -524,6 +600,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 if critical_phase_tracker is not None:
                     critical_phase_tracker.on_episode_start(dataset.num_episodes)
+                if rlt_deploy_policy is not None:
+                    rlt_deploy_policy.reset()
                 record_loop(
                     robot=robot,
                     events=events,
@@ -548,6 +626,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     communication_retry_timeout_s=cfg.communication_retry_timeout_s,
                     communication_retry_interval_s=cfg.communication_retry_interval_s,
                     critical_phase_tracker=critical_phase_tracker,
+                    rlt_deploy_policy=rlt_deploy_policy,
+                    rlt_action_q01=rlt_action_q01 if rlt_deploy_policy is not None else None,
+                    rlt_action_q99=rlt_action_q99 if rlt_deploy_policy is not None else None,
                 )
 
                 if critical_phase_tracker is not None:

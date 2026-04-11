@@ -24,6 +24,8 @@ from pathlib import Path
 
 from lerobot.utils.critical_phase_extraction_fast import extract_critical_phase_dataset_direct as extract_critical_phase_dataset
 
+from .setup_helpers import load_setup_json, resolve_dataset_root
+
 
 def find_cp_datasets_in_dir(parent: Path) -> list[Path]:
     """Find eval_autonomy_* datasets containing critical_phase_intervals.json."""
@@ -42,6 +44,13 @@ def find_all_cp_datasets(ds_root_base: Path) -> list[Path]:
         if day_dir.is_dir() and len(day_dir.name) >= 4 and day_dir.name[:4].isdigit():
             results.extend(find_cp_datasets_in_dir(day_dir))
     return results
+
+
+def _cp_output_dir(day_dir: Path) -> Path:
+    """Return the _cp sibling folder for a date folder, creating it if needed."""
+    cp_dir = day_dir.parent / f"{day_dir.name}_cp"
+    cp_dir.mkdir(exist_ok=True)
+    return cp_dir
 
 
 def extract_from_dataset(source_dir: Path, task: str) -> None:
@@ -64,8 +73,9 @@ def extract_from_dataset(source_dir: Path, task: str) -> None:
         return
 
     day_dir = source_dir.parent
+    cp_dir = _cp_output_dir(day_dir)
     # eval_autonomy_143000 -> time_tag = 143000
-    time_tag = source_dir.name.replace("eval_autonomy_", "")
+    time_tag = source_dir.name.replace("eval_autonomy_", "").replace("_repaired", "")
     source_repo_id = f"local/{source_dir.name}"
 
     print(f"\n  Source: {day_dir.name}/{source_dir.name} ({len(intervals)} intervals)")
@@ -80,7 +90,7 @@ def extract_from_dataset(source_dir: Path, task: str) -> None:
                 continue
 
             out_name = f"eval_cp_{outcome}_{time_tag}"
-            out_dir = day_dir / out_name
+            out_dir = cp_dir / out_name
             if out_dir.exists():
                 print(f"  [skip] {out_name} already exists")
                 continue
@@ -98,7 +108,7 @@ def extract_from_dataset(source_dir: Path, task: str) -> None:
         unlabeled = [iv for iv in intervals if iv[3] is None]
         if unlabeled:
             out_name = f"eval_cp_{time_tag}"
-            out_dir = day_dir / out_name
+            out_dir = cp_dir / out_name
             if not out_dir.exists():
                 extract_critical_phase_dataset(
                     source_repo_id=source_repo_id,
@@ -111,7 +121,7 @@ def extract_from_dataset(source_dir: Path, task: str) -> None:
                 print(f"  [done] unlabeled: {len(unlabeled)} segments -> {out_dir}")
     else:
         out_name = f"eval_cp_{time_tag}"
-        out_dir = day_dir / out_name
+        out_dir = cp_dir / out_name
         if out_dir.exists():
             print(f"  [skip] {out_name} already exists")
             return
@@ -146,14 +156,8 @@ def main():
         extract_from_dataset(args.dataset_dir, args.task)
         return
 
-    setup_path = args.setup_json or str(Path.home() / ".roboclaw/workspace/embodied/setup.json")
-    with open(setup_path) as fh:
-        setup = json.load(fh)
-
-    ds_root_base = setup.get("datasets", {}).get("root", "")
-    if not ds_root_base:
-        ds_root_base = str(Path.home() / ".roboclaw/workspace/embodied/datasets")
-    ds_root_base = Path(ds_root_base).expanduser()
+    setup = load_setup_json(args.setup_json)
+    ds_root_base = resolve_dataset_root(setup)
 
     if not ds_root_base.exists():
         print(f"Error: Dataset root {ds_root_base} does not exist")

@@ -167,6 +167,8 @@ def record_loop(
     communication_retry_interval_s: float = 0.1,
     rlt_online_collector: Any | None = None,
     rlt_deploy_policy: Any | None = None,
+    rlt_action_q01: Any | None = None,
+    rlt_action_q99: Any | None = None,
     critical_phase_tracker: Any | None = None,
 ):
     if acp_inference is None:
@@ -215,7 +217,8 @@ def record_loop(
             action_feature_names = list(robot.action_features)
     zero_policy_action = dict.fromkeys(action_feature_names, 0.0)
     has_teleop = isinstance(teleop, (Teleoperator, list))
-    intervention_enabled = intervention_state_machine_enabled and policy is not None and has_teleop
+    has_autonomous_source = policy is not None or rlt_deploy_policy is not None
+    intervention_enabled = intervention_state_machine_enabled and has_autonomous_source and has_teleop
     intervention_state = INTERVENTION_STATE_POLICY
     last_teleop_action: RobotAction | None = None
     teleop_fallback_warned = False
@@ -339,6 +342,9 @@ def record_loop(
                 if intervention_state == INTERVENTION_STATE_POLICY:
                     intervention_state = INTERVENTION_STATE_ACTIVE
                     set_teleop_manual_control(True)
+                    if rlt_deploy_policy is not None:
+                        rlt_deploy_policy.interrupt_chunk()
+                        log_say("intervene", play_sounds=True)
                     logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
                 else:
                     intervention_state = INTERVENTION_STATE_RELEASE
@@ -350,8 +356,11 @@ def record_loop(
                         if acp_inference.enable and acp_inference.use_cfg:
                             cond_policy_runtime_state = _capture_policy_runtime_state(policy)
                             uncond_policy_runtime_state = _capture_policy_runtime_state(policy)
-                    if policy is not None and preprocessor is not None and postprocessor is not None:
                         logging.info("Policy cache reset on release: next policy action is recomputed.")
+                    if rlt_deploy_policy is not None:
+                        rlt_deploy_policy.interrupt_chunk()
+                        log_say("resume", play_sounds=True)
+                        logging.info("RLT chunk interrupted on release: next action recomputed.")
                     logging.info("Intervention release requested (S2): returning control to policy.")
             else:
                 logging.info("Intervention toggle ignored because policy+teleop are not both active.")
@@ -379,6 +388,39 @@ def record_loop(
                 critical_phase_tracker.mark_failure(dataset.episode_buffer["size"])
                 from lerobot.utils.audio_feedback import say_failure
                 say_failure()
+
+        if events.get("start_rl_phase", False):
+            events["start_rl_phase"] = False
+            if rlt_deploy_policy is not None:
+                rlt_deploy_policy.set_rl_mode()
+                if critical_phase_tracker is not None and dataset is not None:
+                    critical_phase_tracker.toggle(dataset.episode_buffer["size"])
+                log_say("RL start", play_sounds=True)
+                logging.info("RL phase started (r key)")
+
+        if events.get("end_phase_success", False):
+            events["end_phase_success"] = False
+            if rlt_deploy_policy is not None:
+                rlt_deploy_policy.set_vla_mode()
+                if critical_phase_tracker is not None and dataset is not None:
+                    critical_phase_tracker.mark_success(dataset.episode_buffer["size"])
+                if intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE:
+                    intervention_state = INTERVENTION_STATE_RELEASE
+                    set_teleop_manual_control(False)
+                log_say("success", play_sounds=True)
+                logging.info("RL phase ended (success)")
+
+        if events.get("end_phase_failure", False):
+            events["end_phase_failure"] = False
+            if rlt_deploy_policy is not None:
+                rlt_deploy_policy.set_vla_mode()
+                if critical_phase_tracker is not None and dataset is not None:
+                    critical_phase_tracker.mark_failure(dataset.episode_buffer["size"])
+                if intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE:
+                    intervention_state = INTERVENTION_STATE_RELEASE
+                    set_teleop_manual_control(False)
+                log_say("failure", play_sounds=True)
+                logging.info("RL phase ended (failure)")
 
         # Get robot observation
         _t0 = time.perf_counter()
@@ -416,6 +458,19 @@ def record_loop(
             )
             _t_infer = (time.perf_counter() - _t0) * 1000
             act_processed_policy = make_robot_action(policy_action, dataset.features)
+
+        elif (
+            rlt_deploy_policy is not None
+            and not (intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE)
+        ):
+            _t0 = time.perf_counter()
+            rlt_action_tensor = rlt_deploy_policy.select_action(obs)
+            _t_infer = (time.perf_counter() - _t0) * 1000
+            # Unnormalize: [-1, 1] -> original degree space via q01/q99
+            if rlt_action_q01 is not None and rlt_action_q99 is not None:
+                rlt_action_tensor = (rlt_action_tensor + 1.0) / 2.0 * (rlt_action_q99 - rlt_action_q01) + rlt_action_q01
+            from lerobot.rlt.obs_bridge import rlt_action_to_robot_action
+            act_processed_policy = rlt_action_to_robot_action(rlt_action_tensor, action_feature_names)
 
         if isinstance(teleop, Teleoperator):
             act = run_with_connection_retry("teleop.get_action", teleop.get_action)

@@ -79,6 +79,9 @@ class TTYKeyboardListener:
         episode_failure_key: str | None,
         cp_success_key: str | None = None,
         cp_failure_key: str | None = None,
+        rl_phase_key: str | None = None,
+        end_success_key: str | None = None,
+        end_failure_key: str | None = None,
     ):
         self.events = events
         self.intervention_toggle_key = intervention_toggle_key.lower()
@@ -89,6 +92,9 @@ class TTYKeyboardListener:
         self.episode_failure_key = episode_failure_key.lower() if episode_failure_key else None
         self.cp_success_key = cp_success_key.lower() if cp_success_key else None
         self.cp_failure_key = cp_failure_key.lower() if cp_failure_key else None
+        self.rl_phase_key = rl_phase_key.lower() if rl_phase_key else None
+        self.end_success_key = end_success_key.lower() if end_success_key else None
+        self.end_failure_key = end_failure_key.lower() if end_failure_key else None
         self._fd = sys.stdin.fileno()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -190,6 +196,15 @@ class TTYKeyboardListener:
         elif self.cp_failure_key and normalized == self.cp_failure_key:
             print(f"'{self.cp_failure_key}' key pressed. Marking critical phase as failure...")
             self.events["cp_mark_failure"] = True
+        elif self.rl_phase_key and normalized == self.rl_phase_key:
+            print(f"'{self.rl_phase_key}' key pressed. Starting RL critical phase...")
+            self.events["start_rl_phase"] = True
+        elif self.end_success_key and normalized == self.end_success_key:
+            print(f"'{self.end_success_key}' key pressed. Ending phase (success)...")
+            self.events["end_phase_success"] = True
+        elif self.end_failure_key and normalized == self.end_failure_key:
+            print(f"'{self.end_failure_key}' key pressed. Ending phase (failure)...")
+            self.events["end_phase_failure"] = True
         elif self.episode_success_key and normalized == self.episode_success_key:
             print(f"'{self.episode_success_key}' key pressed. Marking episode as success and exiting loop...")
             self.events["episode_outcome"] = EPISODE_SUCCESS
@@ -268,6 +283,9 @@ def init_keyboard_listener(
     episode_failure_key: str | None = None,
     cp_success_key: str | None = None,
     cp_failure_key: str | None = None,
+    rl_phase_key: str | None = None,
+    end_success_key: str | None = None,
+    end_failure_key: str | None = None,
 ):
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
@@ -294,6 +312,9 @@ def init_keyboard_listener(
     events["episode_outcome"] = None
     events["cp_mark_success"] = False
     events["cp_mark_failure"] = False
+    events["start_rl_phase"] = False
+    events["end_phase_success"] = False
+    events["end_phase_failure"] = False
 
     listener = None
     if not is_headless():
@@ -347,6 +368,30 @@ def init_keyboard_listener(
                     print(f"'{cp_failure_key}' key pressed. Marking critical phase as failure...")
                     events["cp_mark_failure"] = True
                 elif (
+                    rl_phase_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == rl_phase_key.lower()
+                ):
+                    print(f"'{rl_phase_key}' key pressed. Starting RL critical phase...")
+                    events["start_rl_phase"] = True
+                elif (
+                    end_success_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == end_success_key.lower()
+                ):
+                    print(f"'{end_success_key}' key pressed. Ending phase (success)...")
+                    events["end_phase_success"] = True
+                elif (
+                    end_failure_key
+                    and hasattr(key, "char")
+                    and key.char
+                    and key.char.lower() == end_failure_key.lower()
+                ):
+                    print(f"'{end_failure_key}' key pressed. Ending phase (failure)...")
+                    events["end_phase_failure"] = True
+                elif (
                     episode_success_key
                     and hasattr(key, "char")
                     and key.char
@@ -380,6 +425,9 @@ def init_keyboard_listener(
             episode_failure_key=episode_failure_key,
             cp_success_key=cp_success_key,
             cp_failure_key=cp_failure_key,
+            rl_phase_key=rl_phase_key,
+            end_success_key=end_success_key,
+            end_failure_key=end_failure_key,
         )
         listener.start()
         logging.warning(
