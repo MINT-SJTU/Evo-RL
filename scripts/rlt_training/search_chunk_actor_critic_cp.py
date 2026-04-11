@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -20,13 +19,13 @@ from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from common import configure_logging
+
+logger = configure_logging(__name__)
 
 
 @dataclass
@@ -59,7 +58,7 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
     from lerobot.rlt.config import RLTConfig
     from lerobot.rlt.evaluator import evaluate_offline
     from lerobot.rlt.losses import actor_loss, critic_loss
-    from lerobot.rlt.offline_dataset import load_cached_buffer
+    from lerobot.rlt.offline_dataset import load_transition_cache
     from lerobot.rlt.policy import RLTPolicy
     from lerobot.rlt.utils import soft_update
     from lerobot.rlt.vla_adapter import DummyVLAAdapter
@@ -113,8 +112,8 @@ def run_experiment(exp, cache_dir, checkpoint, device, results_file):
     algorithm = RLTAlgorithm(policy, config)
     algorithm.to(device)
 
-    train_buffer = load_cached_buffer(cache_dir, "train", capacity=config.replay.capacity)
-    val_buffer = load_cached_buffer(cache_dir, "val", capacity=config.replay.capacity)
+    train_buffer = load_transition_cache(cache_dir, "train", capacity=config.replay.capacity)
+    val_buffer = load_transition_cache(cache_dir, "val", capacity=config.replay.capacity)
 
     actor_opt = torch.optim.Adam(algorithm.policy.actor.parameters(), lr=config.actor.lr)
     critic_opt = torch.optim.Adam(algorithm.critic.parameters(), lr=config.critic.lr)

@@ -83,12 +83,10 @@ class OfflineRLConfig:
     eval_every: int = 5000
     save_every: int = 10000
     log_every: int = 100
-    reward_mode: str = "hybrid"
-    success_bonus: float = 10.0
-    progress_scale: float = 1.0
+    success_bonus: float = 1.0
     train_ratio: float = 0.8
     val_ratio: float = 0.1
-    frame_stride: int = 1
+    frame_stride: int = 2
     cache_dir: str | None = None
     demo_adapt_checkpoint: str | None = None
 

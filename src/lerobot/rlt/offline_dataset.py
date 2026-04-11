@@ -46,28 +46,36 @@ def split_episode_indices(
 def build_transitions_from_demos(
     policy,
     demo_loader: DataLoader,
+    frame_indices: list[int],
+    episode_last_frame: int,
     chunk_length: int,
-    reward_fn=None,
     device: str = "cpu",
     source: int = 0,
     episode_id: int = -1,
     is_critical: float = 0.0,
     stride: int = 1,
+    episode_success: bool = True,
+    success_bonus: float = 1.0,
 ) -> list[ChunkTransition]:
     """Build ChunkTransitions from a *single-episode* sequential demo loader.
 
-    Frames must arrive in temporal order (shuffle=False). The last frame
-    produces a terminal transition (done=True, absorbing next_state).
+    Frames must arrive in temporal order (shuffle=False). Each transition
+    follows the paper's chunk-level semantics:
 
-    In offline RL, exec_chunk = expert_chunk. If reward_fn is None, rewards
-    default to zeros.
+      state = x_t
+      action = a_t:t+C-1
+      reward_seq = r_t:t+C-1
+      next_state = x_{t+C}
+      bootstrap exponent = C
 
     Args:
         policy: RLTPolicy (uses .encode_observation for state extraction).
-        stride: Frame stride — controls bootstrap discount exponent (γ^stride).
+        frame_indices: Raw frame indices for the sampled anchor states.
+        episode_last_frame: Raw index of the last frame in the episode.
+        stride: Anchor spacing in control steps. Must divide chunk_length.
     """
     policy.eval()
-    encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     for obs, expert_actions in demo_loader:
         obs = Observation(
@@ -80,13 +88,21 @@ def build_transitions_from_demos(
             s = state_vec[i].cpu()
             r = ref_chunk[i].cpu()
             e = _subsample_chunk(expert_actions[i], chunk_length)
-            rew = _compute_reward(reward_fn, e, r, chunk_length)
-            encoded.append((s, r, e, rew))
+            encoded.append((s, r, e))
+
+    if len(encoded) != len(frame_indices):
+        raise ValueError(
+            f"Encoded {len(encoded)} states but received {len(frame_indices)} frame indices"
+        )
 
     return _encoded_to_transitions(
         encoded,
+        frame_indices,
+        episode_last_frame,
         chunk_length,
         stride=stride,
+        episode_success=episode_success,
+        success_bonus=success_bonus,
         source=source,
         episode_id=episode_id,
         is_critical=is_critical,
@@ -94,67 +110,133 @@ def build_transitions_from_demos(
 
 
 def _encoded_to_transitions(
-    encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    encoded: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    frame_indices: list[int],
+    episode_last_frame: int,
     chunk_length: int,
     stride: int = 1,
+    episode_success: bool = True,
+    success_bonus: float = 1.0,
     source: int = 0,
     episode_id: int = -1,
     is_critical: float = 0.0,
 ) -> list[ChunkTransition]:
-    """Convert list of (state, ref, expert, reward) into ChunkTransitions.
+    """Convert list of sampled anchors into chunk-level ChunkTransitions.
 
     Args:
-        stride: Frame stride used during data loading. Controls the bootstrap
-            discount exponent (γ^stride) — paper uses stride=2 so next_state
-            is 2 control steps away, giving γ^2 ≈ 0.98 instead of γ^C ≈ 0.90.
+        stride: Anchor spacing used for overlapping chunk windows. The critic
+            still bootstraps from x_{t+C}, so chunk_length must be divisible
+            by stride.
     """
+    if stride <= 0:
+        raise ValueError(f"stride must be positive, got {stride}")
+    if chunk_length % stride != 0:
+        raise ValueError(
+            f"chunk_length={chunk_length} must be divisible by stride={stride}"
+        )
+
+    frame_to_encoded_idx = {frame_idx: idx for idx, frame_idx in enumerate(frame_indices)}
     transitions: list[ChunkTransition] = []
-    for idx in range(len(encoded)):
-        s, r, e, rew = encoded[idx]
-        is_last = idx == len(encoded) - 1
-        ns, nr = (s, r) if is_last else (encoded[idx + 1][0], encoded[idx + 1][1])
+    for idx, start_frame in enumerate(frame_indices):
+        next_frame = start_frame + chunk_length
+        if next_frame > episode_last_frame:
+            continue
+
+        next_idx = frame_to_encoded_idx.get(next_frame)
+        if next_idx is None:
+            raise ValueError(
+                f"Missing next_state anchor for frame {start_frame} -> {next_frame}; "
+                f"sampled anchors must include every t+C state"
+            )
+
+        s, r, e = encoded[idx]
+        ns, nr = encoded[next_idx][0], encoded[next_idx][1]
+        is_terminal = next_frame == episode_last_frame
+        rew = _terminal_reward_seq(
+            chunk_length=chunk_length,
+            is_terminal=is_terminal,
+            episode_success=episode_success,
+            success_bonus=success_bonus,
+        )
         transitions.append(ChunkTransition(
             state_vec=s, exec_chunk=e, ref_chunk=r, reward_seq=rew,
             next_state_vec=ns, next_ref_chunk=nr,
-            done=torch.tensor(float(is_last)),
+            done=torch.tensor(float(is_terminal)),
             intervention=torch.tensor(0.0),
-            actual_steps=torch.tensor(stride),
+            actual_steps=torch.tensor(chunk_length),
             source=torch.tensor(source),
             episode_id=torch.tensor(episode_id),
             is_critical=torch.tensor(is_critical),
         ))
+    if episode_success and transitions and not any(t.done.item() == 1.0 for t in transitions):
+        raise ValueError(
+            "Successful episode does not contain a terminal chunk under the current "
+            f"stride={stride} and chunk_length={chunk_length}"
+        )
     return transitions
+
+
+def build_overlap_frame_indices(
+    episode_start: int,
+    episode_stop: int,
+    chunk_length: int,
+    stride: int,
+) -> list[int]:
+    """Return sampled frames needed for overlapping chunk transitions.
+
+    The returned indices include:
+    - start anchors sampled with the paper's stride-based overlap pattern
+    - the final valid terminal anchor ``episode_last_frame - C`` when needed
+    - any bootstrap state ``x_{t+C}`` required by those anchors
+
+    This guarantees every stored chunk transition has its matching ``next_state``
+    under the paper's ``x_t -> x_{t+C}`` semantics.
+    """
+    if stride <= 0:
+        raise ValueError(f"stride must be positive, got {stride}")
+    if episode_stop <= episode_start:
+        return []
+
+    episode_last_frame = episode_stop - 1
+    indices = set(range(episode_start, episode_stop, stride))
+    terminal_anchor = episode_last_frame - chunk_length
+    if terminal_anchor < episode_start:
+        return sorted(indices)
+
+    indices.add(terminal_anchor)
+    start_anchors = sorted(idx for idx in indices if idx + chunk_length <= episode_last_frame)
+    for start_frame in start_anchors:
+        indices.add(start_frame + chunk_length)
+    return sorted(indices)
 
 
 # ---------------------------------------------------------------------------
 # 3. High-level: precompute buffer from dataset
 # ---------------------------------------------------------------------------
 
-def precompute_offline_buffer(
+def build_transition_replay_buffer(
     policy,
-    dataset_path: str,
+    demo_dataset_path: str,
     config,
     split: str = "train",
     device: str = "cpu",
     episode_ids: list[int] | None = None,
-    reward_fn=None,
 ) -> ReplayBuffer:
-    """Build a filled ReplayBuffer from demo data for offline RL.
+    """Build a replay buffer from a raw demo dataset.
 
     Iterates per-episode to correctly handle episode boundaries (done flags).
 
     Args:
         policy: RLTPolicy (frozen VLA + RL token encoder).
-        dataset_path: Path to LeRobotDataset on disk.
+        demo_dataset_path: Path to the raw LeRobot demo dataset on disk.
         config: RLTConfig (needs vla_horizon, chunk_length, replay.capacity, seed).
         split: Which split to use ("train", "val", "test").
         device: Device for VLA forward passes.
         episode_ids: Override episode ids; if None, auto-split by config.seed.
-        reward_fn: Optional callable(exec_chunk, ref_chunk) -> (C,) reward seq.
     """
     off_cfg = config.offline_rl
     dataset = RLTDemoDataset(
-        dataset_path=dataset_path, chunk_length=config.vla_horizon,
+        dataset_path=demo_dataset_path, chunk_length=config.vla_horizon,
         normalize_actions=True,
     )
 
@@ -171,7 +253,12 @@ def precompute_offline_buffer(
 
     for ep_idx, ep_id in enumerate(sorted(episode_ids)):
         frame_range = _episode_frame_range(dataset, ep_id)
-        indices = list(range(frame_range[0], frame_range[1]))
+        indices = build_overlap_frame_indices(
+            episode_start=frame_range[0],
+            episode_stop=frame_range[1],
+            chunk_length=config.chunk_length,
+            stride=off_cfg.frame_stride,
+        )
         total_frames += len(indices)
 
         loader = DataLoader(
@@ -181,10 +268,13 @@ def precompute_offline_buffer(
         transitions = build_transitions_from_demos(
             policy,
             loader,
-            config.chunk_length,
-            reward_fn=reward_fn,
+            frame_indices=indices,
+            episode_last_frame=frame_range[1] - 1,
+            chunk_length=config.chunk_length,
             device=device,
             episode_id=ep_id,
+            stride=off_cfg.frame_stride,
+            success_bonus=off_cfg.success_bonus,
         )
         for t in transitions:
             buf.add(t)
@@ -193,7 +283,7 @@ def precompute_offline_buffer(
             logger.info("Processed %d/%d episodes, %d transitions", ep_idx + 1, len(episode_ids), len(buf))
 
     logger.info(
-        "Precomputed buffer: split=%s, episodes=%d, frames=%d, transitions=%d",
+        "Built replay buffer: split=%s, episodes=%d, frames=%d, transitions=%d",
         split, len(episode_ids), total_frames, len(buf),
     )
     return buf
@@ -203,13 +293,13 @@ def precompute_offline_buffer(
 # 4. Cache: save / load precomputed transitions
 # ---------------------------------------------------------------------------
 
-def save_cached_buffer(
-    transitions: list[ChunkTransition], cache_dir: str | Path, split: str,
+def save_transition_cache(
+    transitions: list[ChunkTransition], transition_cache_dir: str | Path, split: str,
 ) -> None:
-    """Save precomputed transitions to disk as a .pt file."""
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"transitions_{split}.pt"
+    """Save chunk transitions to disk."""
+    transition_cache_dir = Path(transition_cache_dir)
+    transition_cache_dir.mkdir(parents=True, exist_ok=True)
+    path = transition_cache_dir / f"chunk_transitions_{split}.pt"
     data = [
         {
             "state_vec": t.state_vec, "exec_chunk": t.exec_chunk,
@@ -227,17 +317,14 @@ def save_cached_buffer(
     logger.info("Saved %d transitions to %s", len(data), path)
 
 
-def load_cached_buffer(
-    cache_dir: str | Path, split: str, capacity: int = 200_000,
+def load_transition_cache(
+    transition_cache_dir: str | Path, split: str, capacity: int = 200_000,
 ) -> ReplayBuffer:
-    """Load pre-computed transitions from cache and return a filled ReplayBuffer."""
-    path = Path(cache_dir) / f"transitions_{split}.pt"
+    """Load a chunk-transition cache into a replay buffer."""
+    path = Path(transition_cache_dir) / f"chunk_transitions_{split}.pt"
     data = torch.load(path, weights_only=False)
     buf = ReplayBuffer(capacity=capacity)
     for d in data:
-        d["source"] = d.get("source", torch.tensor(0))
-        d["episode_id"] = d.get("episode_id", torch.tensor(-1))
-        d["is_critical"] = d.get("is_critical", torch.tensor(0.0))
         buf.add(ChunkTransition(**d))
     logger.info("Loaded %d transitions from %s", len(buf), path)
     return buf
@@ -252,11 +339,17 @@ def _subsample_chunk(actions: torch.Tensor, target_len: int) -> torch.Tensor:
     return actions[:target_len]
 
 
-def _compute_reward(reward_fn, expert_chunk: torch.Tensor, ref_chunk: torch.Tensor, C: int) -> torch.Tensor:
-    """Compute reward sequence, falling back to zeros if no reward_fn."""
-    if reward_fn is not None:
-        return reward_fn(expert_chunk, ref_chunk)
-    return torch.zeros(C)
+def _terminal_reward_seq(
+    chunk_length: int,
+    is_terminal: bool,
+    episode_success: bool,
+    success_bonus: float,
+) -> torch.Tensor:
+    """Return step-level sparse terminal reward aggregated over a chunk."""
+    reward = torch.zeros(chunk_length)
+    if is_terminal and episode_success:
+        reward[-1] = success_bonus
+    return reward
 
 
 def _episode_frame_range(dataset: RLTDemoDataset, ep_id: int) -> tuple[int, int]:

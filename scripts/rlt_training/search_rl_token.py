@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import gc
 import json
-import logging
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -23,13 +22,13 @@ from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from common import configure_logging
+
+logger = configure_logging(__name__)
 
 
 @dataclass

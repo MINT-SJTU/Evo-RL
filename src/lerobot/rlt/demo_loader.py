@@ -138,6 +138,7 @@ class RLTDemoDataset(Dataset):
         state = state.float()
         if self._normalize_actions and self._state_q01 is not None:
             state = normalize_quantiles(state, self._state_q01, self._state_q99)
+            state = state.clamp(-1.0, 1.0)
         result["proprio"] = state
 
         # Action chunk: (chunk_length, action_dim)
@@ -147,6 +148,7 @@ class RLTDemoDataset(Dataset):
         action = action.float()
         if self._normalize_actions and self._action_q01 is not None:
             action = normalize_quantiles(action, self._action_q01, self._action_q99)
+            action = action.clamp(-1.0, 1.0)
         result["expert_actions"] = action
 
         return result

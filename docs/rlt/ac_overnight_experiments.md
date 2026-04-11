@@ -21,8 +21,8 @@
 
 ### 代码修改
 
-- `offline_dataset.py`: `_encoded_to_transitions()` 新增 `stride` 参数，`actual_steps=stride`
-- `build_rlt_offline_cache.py`: `--frame-stride` 默认值从 1 改为 2，传递 stride 到 transition 构建
+- `offline_dataset.py`: `_encoded_to_transitions()` 使用论文语义，`next_state=x_{t+C}` 且 `actual_steps=C`
+- `scripts/rlt_training/build_transition_cache.py`: `--frame-stride` 默认值为 2，仅控制 overlap anchor 密度
 
 ---
 
