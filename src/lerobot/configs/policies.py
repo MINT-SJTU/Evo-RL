@@ -161,25 +161,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
         return None
 
     def _save_pretrained(self, save_directory: Path) -> None:
-        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as tmp, draccus.config_type("json"):
-            draccus.dump(self, tmp, indent=4)
-            tmp_path = tmp.name
-
-        with open(tmp_path) as f:
-            config = json.load(f)
-
-        if "type" not in config:
-            matching_choices = [
-                name for name in self.get_known_choices() if self.get_choice_class(name) is self.__class__
-            ]
-            if len(matching_choices) != 1:
-                raise ValueError(
-                    f"Expected exactly one registered choice for {self.__class__.__name__}, got {matching_choices}"
-                )
-            config["type"] = matching_choices[0]
-
-        with open(save_directory / CONFIG_NAME, "w") as f:
-            json.dump(config, f, indent=4)
+        with open(save_directory / CONFIG_NAME, "w") as f, draccus.config_type("json"):
+            draccus.dump(self, f, indent=4)
 
     @classmethod
     def from_pretrained(
@@ -224,34 +207,16 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
         # apply cli overrides.
         # This is very ugly, ideally we'd like to be able to do that natively with draccus
         # something like --policy.path (in addition to --policy.type)
+        with draccus.config_type("json"):
+            orig_config = draccus.parse(cls, config_file, args=[])
+
         if config_file is None:
             raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
 
         with open(config_file) as f:
             config = json.load(f)
 
-        if "type" in config:
-            with draccus.config_type("json"):
-                orig_config = draccus.parse(cls, config_file, args=[])
-        else:
-            parse_successes = []
-            for choice_name in cls.get_known_choices():
-                config_cls = cls.get_choice_class(choice_name)
-                try:
-                    with draccus.config_type("json"):
-                        parsed_config = draccus.parse(config_cls, config_file, args=[])
-                except Exception:
-                    continue
-                parse_successes.append((choice_name, parsed_config))
-
-            if len(parse_successes) != 1:
-                raise ValueError(
-                    f"Expected to infer exactly one policy type from {config_file}, got "
-                    f"{[choice for choice, _ in parse_successes]}"
-                )
-            orig_config = parse_successes[0][1]
-
-        config.pop("type", None)
+        config.pop("type")
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
             json.dump(config, f)
             config_file = f.name

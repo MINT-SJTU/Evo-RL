@@ -54,9 +54,6 @@ class TrainPipelineConfig(HubMixin):
     # Note that when resuming a run, the default behavior is to use the configuration from the checkpoint,
     # regardless of what's provided with the training command at the time of resumption.
     resume: bool = False
-    # `resume_pretrain` mirrors Evo-1's stage2 handoff semantics: initialize from policy weights only while
-    # starting a fresh training run with a new optimizer, scheduler and step counter.
-    resume_pretrain: bool = False
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
     seed: int | None = 1000
@@ -92,16 +89,6 @@ class TrainPipelineConfig(HubMixin):
     def validate(self) -> None:
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
-        if self.resume and self.resume_pretrain:
-            raise ValueError("'resume' and 'resume_pretrain' are mutually exclusive.")
-
-        if self.resume_pretrain and not policy_path and (
-            self.policy is None or self.policy.pretrained_path is None
-        ):
-            raise ValueError(
-                "'resume_pretrain=true' expects weights via '--policy.path' or 'policy.pretrained_path'."
-            )
-
         if policy_path:
             # Only load the policy config
             cli_overrides = parser.get_cli_overrides("policy")
