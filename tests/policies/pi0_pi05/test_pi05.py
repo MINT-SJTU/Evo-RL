@@ -166,3 +166,22 @@ def test_config_creation():
     except Exception as e:
         print(f"Config creation failed: {e}")
         raise
+
+
+@pytest.mark.parametrize(
+    "lm_head_key",
+    [
+        "paligemma_with_expert.paligemma.lm_head.weight",
+        "model.paligemma_with_expert.paligemma.lm_head.weight",
+    ],
+)
+def test_fix_pytorch_state_dict_keys_restores_tied_embed_tokens(lm_head_key: str):
+    policy = object.__new__(PI05Policy)
+    lm_head = torch.randn(8, 4)
+
+    fixed = PI05Policy._fix_pytorch_state_dict_keys(policy, {lm_head_key: lm_head}, model_config=None)
+
+    embed_tokens_key = "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+    assert embed_tokens_key in fixed
+    assert torch.equal(fixed[embed_tokens_key], lm_head)
+    assert fixed[embed_tokens_key].data_ptr() != lm_head.data_ptr()
