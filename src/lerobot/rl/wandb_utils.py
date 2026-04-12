@@ -296,5 +296,11 @@ def make_logger(cfg: TrainPipelineConfig) -> WandBLogger | SwanLabLogger | None:
         return None
 
     if os.getenv("SWANLAB_API_KEY"):
-        return SwanLabLogger(cfg)
+        try:
+            return SwanLabLogger(cfg)
+        except ImportError:
+            logging.warning(
+                "swanlab package is not installed but SWANLAB_API_KEY is set. "
+                "Falling back to WandB. Install swanlab with: pip install swanlab"
+            )
     return WandBLogger(cfg)
