@@ -17,6 +17,14 @@ from lerobot.rlt.interfaces import Observation, VLAOutput
 from lerobot.rlt.vla_adapter import VLAAdapter
 
 
+def _tie_embed_tokens(pi05_policy: PI05Policy) -> None:
+    """Restore tied language embeddings when SFT checkpoints omit embed_tokens."""
+    lm = pi05_policy.model.paligemma_with_expert.paligemma
+    embed = lm.model.language_model.embed_tokens
+    if embed is not None and lm.lm_head.weight.data_ptr() != embed.weight.data_ptr():
+        embed.weight = lm.lm_head.weight
+
+
 class Pi05VLAAdapter(VLAAdapter):
     def __init__(
         self,
@@ -76,7 +84,13 @@ class Pi05VLAAdapter(VLAAdapter):
         self.pi05_config = pi05_config
         self.num_inference_steps = pi05_config.num_inference_steps
 
-        policy = PI05Policy.from_pretrained(model_path, config=pi05_config, cache_dir=cache_dir)
+        policy = PI05Policy.from_pretrained(
+            model_path,
+            config=pi05_config,
+            cache_dir=cache_dir,
+            strict=False,
+        )
+        _tie_embed_tokens(policy)
         self.pi05: PI05Pytorch = policy.model
 
         tokenizer_id = tokenizer_path or "google/paligemma-3b-pt-224"
