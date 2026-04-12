@@ -1,4 +1,5 @@
 import builtins
+import logging
 from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
@@ -29,6 +30,16 @@ class EVO1Policy(PreTrainedPolicy):
         self.config = config
         self.model = EVO1(self._build_model_config(config))
         self.model.set_finetune_flags()
+
+        if config.training_stage == "stage2":
+            logging.info(
+                "Evo1 stage2 runtime settings: embedder_tensor_fastpath=%s "
+                "enable_vlm_gradient_checkpointing=%s gradient_checkpointing_use_reentrant=%s",
+                config.embedder_tensor_fastpath,
+                config.enable_vlm_gradient_checkpointing,
+                config.gradient_checkpointing_use_reentrant,
+            )
+
         self.reset()
 
     @classmethod

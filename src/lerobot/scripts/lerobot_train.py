@@ -37,7 +37,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.acp_dataset_stats import compute_acp_indicator_stats
 from lerobot.rl.acp_hook import build_acp_raw_batch_hook
-from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.rl.wandb_utils import make_logger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
@@ -200,13 +200,10 @@ def train(
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
-    # Initialize wandb only on main process
-    if cfg.wandb.enable and cfg.wandb.project and is_main_process:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        if is_main_process:
-            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    # Initialize logger only on main process
+    wandb_logger = make_logger(cfg) if is_main_process else None
+    if wandb_logger is None and is_main_process:
+        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)

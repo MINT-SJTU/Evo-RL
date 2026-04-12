@@ -150,13 +150,11 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
     logging.info(f"Learner logging initialized, writing to {log_file}")
     logging.info(pformat(cfg.to_dict()))
 
-    # Setup WandB logging if enabled
-    if cfg.wandb.enable and cfg.wandb.project:
-        from lerobot.rl.wandb_utils import WandBLogger
+    # Setup logging
+    from lerobot.rl.wandb_utils import make_logger
 
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
+    wandb_logger = make_logger(cfg)
+    if wandb_logger is None:
         logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     # Handle resume logic

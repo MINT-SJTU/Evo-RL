@@ -80,40 +80,8 @@ class WandBLogger:
         self.job_name = cfg.job_name
         self.env_fps = cfg.env.fps if cfg.env else None
         self._group = cfg_to_group(cfg)
-        self._backend = "wandb"
-        self._wandb_custom_step_key: set[str] | None = None
 
-        swanlab_api_key = os.getenv("SWANLAB_API_KEY")
-        if swanlab_api_key:
-            import swanlab
-
-            self._backend = "swanlab"
-            swanlab.login(api_key=swanlab_api_key)
-            self._run = swanlab.init(
-                project=self.cfg.project,
-                workspace=self.cfg.entity,
-                experiment_name=self.job_name,
-                description=self.cfg.notes,
-                tags=cfg_to_group(cfg, return_list=True, truncate_tags=True),
-                logdir=str(self.log_dir),
-                config=cfg.to_dict(),
-                mode=self.cfg.mode if self.cfg.mode in ["offline", "disabled"] else "cloud",
-                id=cfg.wandb.run_id,
-                resume="must" if cfg.resume else None,
-            )
-            run_id = getattr(self._run, "id", None)
-            cfg.wandb.run_id = run_id
-            logging.info(colored("Logs will be synced with swanlab.", "blue", attrs=["bold"]))
-            try:
-                import swanlab.data as swanlab_data
-
-                run_url = swanlab_data.get_url()
-                if run_url:
-                    logging.info(f"Track this run --> {colored(run_url, 'yellow', attrs=['bold'])}")
-            except Exception:
-                pass
-            return
-
+        # Set up WandB.
         os.environ["WANDB_SILENT"] = "True"
         import wandb
 
@@ -133,21 +101,25 @@ class WandBLogger:
             tags=cfg_to_group(cfg, return_list=True, truncate_tags=True),
             dir=self.log_dir,
             config=cfg.to_dict(),
+            # TODO(rcadene): try set to True
             save_code=False,
+            # TODO(rcadene): split train and eval, and run async eval with job_type="eval"
             job_type="train_eval",
             resume="must" if cfg.resume else None,
             mode=self.cfg.mode if self.cfg.mode in ["online", "offline", "disabled"] else "online",
         )
         run_id = wandb.run.id
+        # NOTE: We will override the cfg.wandb.run_id with the wandb run id.
+        # This is because we want to be able to resume the run from the wandb run id.
         cfg.wandb.run_id = run_id
+        # Handle custom step key for rl asynchronous training.
+        self._wandb_custom_step_key: set[str] | None = None
         logging.info(colored("Logs will be synced with wandb.", "blue", attrs=["bold"]))
         logging.info(f"Track this run --> {colored(wandb.run.get_url(), 'yellow', attrs=['bold'])}")
         self._wandb = wandb
 
     def log_policy(self, checkpoint_dir: Path):
         """Checkpoints the policy to wandb."""
-        if self._backend == "swanlab":
-            return
         if self.cfg.disable_artifact:
             return
 
@@ -191,26 +163,11 @@ class WandBLogger:
         if step is None and custom_step_key is None:
             raise ValueError("Either step or custom_step_key must be provided.")
 
-        if self._backend == "swanlab":
-            data = {}
-            if custom_step_key is not None and custom_step_key in d:
-                value_custom_step = d[custom_step_key]
-                data[f"{mode}/{custom_step_key}"] = value_custom_step
-                if step is None:
-                    step = int(value_custom_step)
-            for k, v in d.items():
-                if not isinstance(v, (int | float | str)):
-                    logging.warning(
-                        f'SwanLab logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
-                    )
-                    continue
-                if custom_step_key is not None and k == custom_step_key:
-                    continue
-                data[f"{mode}/{k}"] = v
-            if data:
-                self._run.log(data, step=step)
-            return
-
+        # NOTE: This is not simple. Wandb step must always monotonically increase and it
+        # increases with each wandb.log call, but in the case of asynchronous RL for example,
+        # multiple time steps is possible. For example, the interaction step with the environment,
+        # the training step, the evaluation step, etc. So we need to define a custom step key
+        # to log the correct step for each metric.
         if custom_step_key is not None:
             if self._wandb_custom_step_key is None:
                 self._wandb_custom_step_key = set()
@@ -226,6 +183,7 @@ class WandBLogger:
                 )
                 continue
 
+            # Do not log the custom step key itself.
             if self._wandb_custom_step_key is not None and k in self._wandb_custom_step_key:
                 continue
 
@@ -241,14 +199,102 @@ class WandBLogger:
         if mode not in {"train", "eval"}:
             raise ValueError(mode)
 
-        if self._backend == "swanlab":
-            try:
-                import swanlab
-
-                self._run.log({f"{mode}/video": swanlab.Video(video_path)}, step=step)
-            except Exception as exc:
-                logging.warning("Failed to log video to SwanLab: %s", exc)
-            return
-
         wandb_video = self._wandb.Video(video_path, fps=self.env_fps, format="mp4")
         self._wandb.log({f"{mode}/video": wandb_video}, step=step)
+
+
+class SwanLabLogger:
+    """A helper class to log training metrics using SwanLab."""
+
+    def __init__(self, cfg: TrainPipelineConfig):
+        try:
+            import swanlab
+        except ImportError:
+            raise ImportError(
+                "SwanLab is required when SWANLAB_API_KEY is set. "
+                "Install it with: pip install swanlab"
+            )
+
+        self.cfg = cfg.wandb
+        self.log_dir = cfg.output_dir
+        self.job_name = cfg.job_name
+        self.env_fps = cfg.env.fps if cfg.env else None
+
+        swanlab.login(api_key=os.environ["SWANLAB_API_KEY"])
+        self._run = swanlab.init(
+            project=self.cfg.project,
+            workspace=self.cfg.entity,
+            experiment_name=self.job_name,
+            description=self.cfg.notes,
+            tags=cfg_to_group(cfg, return_list=True, truncate_tags=True),
+            logdir=str(self.log_dir),
+            config=cfg.to_dict(),
+            mode=self.cfg.mode if self.cfg.mode in ["offline", "disabled"] else "cloud",
+            id=cfg.wandb.run_id,
+            resume="must" if cfg.resume else None,
+        )
+        run_id = getattr(self._run, "id", None)
+        cfg.wandb.run_id = run_id
+        logging.info(colored("Logs will be synced with swanlab.", "blue", attrs=["bold"]))
+        try:
+            import swanlab.data as swanlab_data
+
+            run_url = swanlab_data.get_url()
+            if run_url:
+                logging.info(f"Track this run --> {colored(run_url, 'yellow', attrs=['bold'])}")
+        except Exception:
+            pass
+
+    def log_policy(self, checkpoint_dir: Path):
+        return
+
+    def log_dict(
+        self, d: dict, step: int | None = None, mode: str = "train", custom_step_key: str | None = None
+    ):
+        if mode not in {"train", "eval"}:
+            raise ValueError(mode)
+        if step is None and custom_step_key is None:
+            raise ValueError("Either step or custom_step_key must be provided.")
+
+        data = {}
+        if custom_step_key is not None and custom_step_key in d:
+            value_custom_step = d[custom_step_key]
+            data[f"{mode}/{custom_step_key}"] = value_custom_step
+            if step is None:
+                step = int(value_custom_step)
+        for k, v in d.items():
+            if not isinstance(v, (int | float | str)):
+                logging.warning(
+                    f'SwanLab logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
+                )
+                continue
+            if custom_step_key is not None and k == custom_step_key:
+                continue
+            data[f"{mode}/{k}"] = v
+        if data:
+            self._run.log(data, step=step)
+
+    def log_video(self, video_path: str, step: int, mode: str = "train"):
+        if mode not in {"train", "eval"}:
+            raise ValueError(mode)
+
+        try:
+            import swanlab
+
+            self._run.log({f"{mode}/video": swanlab.Video(video_path)}, step=step)
+        except Exception as exc:
+            logging.warning("Failed to log video to SwanLab: %s", exc)
+
+
+def make_logger(cfg: TrainPipelineConfig) -> WandBLogger | SwanLabLogger | None:
+    """Create a training logger based on config and environment.
+
+    Returns SwanLabLogger if SWANLAB_API_KEY is set, WandBLogger otherwise.
+    Returns None if logging is disabled.
+    """
+    if not (cfg.wandb.enable and cfg.wandb.project):
+        return None
+
+    if os.getenv("SWANLAB_API_KEY"):
+        return SwanLabLogger(cfg)
+    return WandBLogger(cfg)
