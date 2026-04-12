@@ -56,6 +56,9 @@ class Evo1Config(PreTrainedConfig):
     vlm_num_layers: int | None = 14
     vlm_dtype: str = "bfloat16"
     use_flash_attn: bool = True
+    embedder_tensor_fastpath: bool = True
+    enable_vlm_gradient_checkpointing: bool | None = None
+    gradient_checkpointing_use_reentrant: bool = False
     action_head: str = "flowmatching"
     embed_dim: int = 896
     hidden_dim: int = 1024
@@ -96,6 +99,9 @@ class Evo1Config(PreTrainedConfig):
         elif self.training_stage == "stage2":
             self.finetune_vlm = True
             self.finetune_action_head = True
+
+        if self.enable_vlm_gradient_checkpointing is None:
+            self.enable_vlm_gradient_checkpointing = self.training_stage == "stage2"
 
         if self.n_action_steps > self.chunk_size:
             raise ValueError(

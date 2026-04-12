@@ -88,12 +88,18 @@ class InternVL3Embedder(nn.Module):
         num_language_layers: int | None = 14,
         model_dtype: str | torch.dtype = "bfloat16",
         use_flash_attn: bool = True,
+        enable_gradient_checkpointing: bool = False,
+        enable_tensor_fastpath: bool = True,
+        gradient_checkpointing_use_reentrant: bool = False,
     ):
         super().__init__()
         self._requested_device = device
         self.image_size = image_size
         self.num_language_layers = num_language_layers
         self.max_text_length = 1024  # InternVL3 supports up to 1024 tokens
+        self.enable_gradient_checkpointing = bool(enable_gradient_checkpointing)
+        self.enable_tensor_fastpath = bool(enable_tensor_fastpath)
+        self.gradient_checkpointing_use_reentrant = bool(gradient_checkpointing_use_reentrant)
         self.transform = build_transform(image_size)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
         if isinstance(model_dtype, str):
@@ -123,11 +129,52 @@ class InternVL3Embedder(nn.Module):
         else:
             self.model.language_model.layers = torch.nn.ModuleList(layers)
         self.model.language_model.lm_head = torch.nn.Identity()
-
-        if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "encoder"):
-            self.model.vision_model.encoder.gradient_checkpointing = False
+        self._configure_memory_features()
 
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+
+    def _configure_memory_features(self) -> None:
+        checkpoint_kwargs = {"use_reentrant": self.gradient_checkpointing_use_reentrant}
+
+        def _enable_ckpt(module) -> bool:
+            if module is None or not hasattr(module, "gradient_checkpointing_enable"):
+                return False
+            module.gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
+            return True
+
+        if not self.enable_gradient_checkpointing:
+            if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "encoder"):
+                self.model.vision_model.encoder.gradient_checkpointing = False
+            return
+
+        enabled_any = False
+        enabled_any = _enable_ckpt(self.model) or enabled_any
+
+        if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "encoder"):
+            self.model.vision_model.encoder.gradient_checkpointing = True
+            enabled_any = True
+
+        if hasattr(self.model, "language_model"):
+            language_model = self.model.language_model
+            enabled_any = _enable_ckpt(language_model) or enabled_any
+            if hasattr(language_model, "model"):
+                enabled_any = _enable_ckpt(language_model.model) or enabled_any
+            if hasattr(language_model, "config"):
+                language_model.config.use_cache = False
+
+        if hasattr(self.model, "config"):
+            self.model.config.use_cache = False
+
+        if hasattr(self.model, "enable_input_require_grads"):
+            self.model.enable_input_require_grads()
+
+        if enabled_any:
+            logging.info(
+                "Enabled InternVL3 gradient checkpointing (use_reentrant=%s).",
+                self.gradient_checkpointing_use_reentrant,
+            )
+        else:
+            logging.warning("Requested InternVL3 gradient checkpointing, but no checkpointable module was found.")
 
     def _dynamic_preprocess_tensor(
         self, image_t, min_num=1, max_num=1, use_thumbnail=False
@@ -191,7 +238,7 @@ class InternVL3Embedder(nn.Module):
         for image_tensors in image_tensors_batch:
             num_tiles_list = []
             for image in image_tensors:
-                if isinstance(image, torch.Tensor):
+                if isinstance(image, torch.Tensor) and self.enable_tensor_fastpath:
                     if (
                         image.ndim == 3
                         and image.shape[0] == 3
@@ -216,6 +263,8 @@ class InternVL3Embedder(nn.Module):
                         tiles = self._dynamic_preprocess_tensor(image_t)
                         tile_tensors = (tiles - mean) / std
                 else:
+                    if isinstance(image, torch.Tensor):
+                        image = to_pil_image(image.detach().to(device="cpu"))
                     image_t = TF.to_tensor(image).to(device=self.device, dtype=torch.float32)
                     tiles = self._dynamic_preprocess_tensor(image_t)
                     tile_tensors = (tiles - mean) / std
