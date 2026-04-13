@@ -363,7 +363,8 @@ def _save_chunk_io(
 
 def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
-        "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作 | [S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
+        "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作（VR 内按 [X] 退出） | "
+        "[S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
         "[O] open grippers (when stopped) | [B] teach | [N] record pose"
     )
     if safe_mode:
@@ -844,7 +845,7 @@ def _run_vr_teleop_session(
     Hold current joints, release the infer stack's clients, then run dual-arm VR teleop.
 
     This matches the single-arm infer->VR handoff style in the current repo: no second CAN open,
-    no home reset on handoff, and return to infer in STOPPED state after Ctrl+C.
+    no home reset on handoff, and return to infer in STOPPED state after [X].
     """
     if args.use_stub:
         logger.error("VR 遥操作需要真实机械臂；请勿使用 --use-stub。")
@@ -857,8 +858,10 @@ def _run_vr_teleop_session(
         DEFAULT_DUAL_ARX_X5_URDF_PATH,
     )
 
+    vr_keyboard: KeyboardListener | None = None
     if keyboard is not None:
         keyboard.pause()
+        vr_keyboard = KeyboardListener()
 
     cameras_to_reconnect = [name for name, camera in cameras.items() if camera.is_connected]
     for name in cameras_to_reconnect:
@@ -904,8 +907,19 @@ def _run_vr_teleop_session(
         vr_cam = False
     vr_camera_serial_dict = {name: camera_specs[name] for name in camera_names if name in camera_specs}
 
+    class _VRExitRequested(KeyboardInterrupt):
+        """Internal control-flow exception used for [X] VR exit."""
+
     class _VRHoldController(ARXX5TeleopController):
         """Same-process VR: no go_home; hold current pose until each controller is activated."""
+
+        def _raise_if_vr_exit_requested(self) -> None:
+            if vr_keyboard is None:
+                return
+            key = vr_keyboard.get_key()
+            if key == "x":
+                logger.info("检测到 [X]：正在退出 VR 遥操作并返回推理。")
+                raise _VRExitRequested
 
         def _robot_setup(self):
             self.arm_controllers = {}
@@ -945,6 +959,7 @@ def _run_vr_teleop_session(
             self.sync_end_effector_poses_to_placo_tasks()
 
         def _update_gripper_target(self):
+            self._raise_if_vr_exit_requested()
             super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
                 if not should_hold:
@@ -962,6 +977,7 @@ def _run_vr_teleop_session(
                 self.gripper_pos_target[arm_name][joint_name] = self._initial_gripper_by_arm[arm_name]
 
         def _send_command(self):
+            self._raise_if_vr_exit_requested()
             q_cmd_by_arm: dict[str, np.ndarray] = {}
             gripper_by_arm: dict[str, float] = {}
             for arm_name, controller in self.arm_controllers.items():
@@ -1035,7 +1051,7 @@ def _run_vr_teleop_session(
 
     logger.info(
         "正在启动双臂 VR 遥操作。握住对应手柄移动该臂；扳机控制夹爪。"
-        "仅在任一手柄握持期间录制原始 VR 数据。在此按 Ctrl+C 可结束 VR 并返回推理。"
+        "仅在任一手柄握持期间录制原始 VR 数据。在此按 [X] 可结束 VR 并返回推理。"
     )
     controller: _VRHoldController | None = None
     try:
@@ -1055,8 +1071,10 @@ def _run_vr_teleop_session(
             visualize_placo=args.vr_visualize_placo,
         )
         controller.run()
+    except _VRExitRequested:
+        logger.info("VR 遥操作已停止（X）。")
     except KeyboardInterrupt:
-        logger.info("VR 遥操作已停止（Ctrl+C）。")
+        logger.warning("**********VR 遥操作收到 Ctrl+C。当前推荐使用 [X] 退出 VR。**********")
     except Exception:
         logger.exception("VR teleop failed.")
     finally:
@@ -1082,6 +1100,8 @@ def _run_vr_teleop_session(
                 logger.info("Reconnecting infer camera '%s' after VR teleop.", name)
                 cameras[name].connect()
         finally:
+            if vr_keyboard is not None:
+                vr_keyboard.restore()
             if keyboard is not None:
                 keyboard.resume()
         logger.info("推理键盘已重新生效。仍为停止状态，请按 [R] 运行策略。")
@@ -1311,7 +1331,7 @@ def main() -> None:
             if raw_recorder is not None:
                 logger.info(
                     "原始训练录制：按 [S] 开始录制窗口，再按 [R] 开始推理。按 [D] 结束录制。"
-                    "使用 [V] 进入 VR 后，仅在握持任一手柄时录制 VR 数据。"
+                    "使用 [V] 进入 VR 后，仅在握持任一手柄时录制 VR 数据，按 [X] 退出 VR。"
                     "按 [D] 后请按 [0]（失败）、[1]（成功）或 [2]（放弃）。"
                     "若发生过 VR 接管，[0] 不可用，须选择 [1] 或 [2]。"
                 )
