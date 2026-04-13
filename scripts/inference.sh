@@ -21,5 +21,5 @@ python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --cameras base:150622073629 left_wrist:352122273179  right_wrist:409122272986 \
 --cam-width 424 --cam-height 240 \
 --duration 0.05 \
---raw-train-record-dir /home/user/workspace/zsj/datasets/arx5/raw_towel_vr \
+--raw-train-record-dir /home/user/workspace/zsj/datasets/arx5/raw_socks_robot \
 2>&1 | grep -v "ARX方舟无限"

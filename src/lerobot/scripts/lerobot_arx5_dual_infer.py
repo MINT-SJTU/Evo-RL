@@ -70,7 +70,22 @@ ARX5_GRIPPER_FULLY_OPEN = float(
     next(f.default for f in dataclasses.fields(ARX5FollowerConfigBase) if f.name == "gripper_max")
 )
 DUAL_STATE_DIM = 14
-STATE_KEYS = tuple(f"state.{index}" for index in range(DUAL_STATE_DIM))
+STATE_KEYS = (
+    "right_joint_1.pos",
+    "right_joint_2.pos",
+    "right_joint_3.pos",
+    "right_joint_4.pos",
+    "right_joint_5.pos",
+    "right_joint_6.pos",
+    "right_joint_7.pos",
+    "left_joint_1.pos",
+    "left_joint_2.pos",
+    "left_joint_3.pos",
+    "left_joint_4.pos",
+    "left_joint_5.pos",
+    "left_joint_6.pos",
+    "left_joint_7.pos",
+)
 # TODO: action
 LEFT_STATE_KEYS = STATE_KEYS[7:]
 RIGHT_STATE_KEYS = STATE_KEYS[:7]
@@ -910,6 +925,25 @@ def _run_vr_teleop_session(
     class _VRExitRequested(KeyboardInterrupt):
         """Internal control-flow exception used for [X] VR exit."""
 
+    def _hold_arm_with_vr_gripper_target(
+        arm_name: str,
+        arm_client: ARX5ArmClient,
+        controller: Any | None,
+    ) -> None:
+        current_state = np.asarray(arm_client.get_state(), dtype=np.float64)
+        hold_pose = current_state.copy()
+        if hold_pose.size < 7:
+            hold_pose = np.pad(hold_pose, (0, max(0, 7 - hold_pose.size)))
+        if controller is not None:
+            try:
+                gripper_config = controller.manipulator_config[arm_name]["gripper_config"]
+                joint_name = gripper_config["joint_names"][0]
+                hold_pose[6] = float(controller.gripper_pos_target[arm_name][joint_name])
+            except Exception:
+                logger.exception("Failed to read final VR gripper target for %s; falling back to arm state.", arm_name)
+        arm_client.send_joint(hold_pose[:7].astype(np.float64, copy=False).tolist())
+        time.sleep(0.2)
+
     class _VRHoldController(ARXX5TeleopController):
         """Same-process VR: no go_home; hold current pose until each controller is activated."""
 
@@ -1091,8 +1125,8 @@ def _run_vr_teleop_session(
         left_arm_back = left_runtime.take_client() or left_arm
         right_arm_back = right_runtime.take_client() or right_arm
         try:
-            left_arm_back.hold_position()
-            right_arm_back.hold_position()
+            _hold_arm_with_vr_gripper_target("left_arm", left_arm_back, controller)
+            _hold_arm_with_vr_gripper_target("right_arm", right_arm_back, controller)
 
             for name in camera_names:
                 if name not in cameras_to_reconnect:

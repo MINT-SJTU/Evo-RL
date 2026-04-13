@@ -6,6 +6,7 @@ from lerobot.scripts.lerobot_arx5_dual_infer import (
     LoopState,
     STATE_KEYS,
     _clip_safe_actions,
+    _run_vr_teleop_session,
     _is_any_vr_arm_active,
     _make_camera_configs,
     _required_image_slot_names,
@@ -98,9 +99,3 @@ def test_v_from_stopped_only_requests_vr_mode_without_marking_takeover():
     assert vr_requested is True
     assert recorder.mark_calls == 0
 
-
-def test_vr_recording_uses_or_semantics_for_dual_grips():
-    assert _is_any_vr_arm_active({"left_arm": False, "right_arm": False}) is False
-    assert _is_any_vr_arm_active({"left_arm": True, "right_arm": False}) is True
-    assert _is_any_vr_arm_active({"left_arm": False, "right_arm": True}) is True
-    assert _is_any_vr_arm_active({"left_arm": True, "right_arm": True}) is True

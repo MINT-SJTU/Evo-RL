@@ -35,6 +35,24 @@ from lerobot.utils.constants import ACTION, OBS_STR
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_DUAL_STATE_KEYS = tuple(f"state.{index}" for index in range(14))
+_DUAL_ARM_STATE_KEYS = (
+    "right_joint_1.pos",
+    "right_joint_2.pos",
+    "right_joint_3.pos",
+    "right_joint_4.pos",
+    "right_joint_5.pos",
+    "right_joint_6.pos",
+    "right_joint_7.pos",
+    "left_joint_1.pos",
+    "left_joint_2.pos",
+    "left_joint_3.pos",
+    "left_joint_4.pos",
+    "left_joint_5.pos",
+    "left_joint_6.pos",
+    "left_joint_7.pos",
+)
+
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -45,6 +63,13 @@ def _load_episode_dirs(raw_root: Path) -> list[Path]:
     return [p.parent for p in eps]
 
 
+def _normalize_action_keys(action_keys: list[str]) -> list[str]:
+    if tuple(action_keys) == _LEGACY_DUAL_STATE_KEYS:
+        logger.info("Detected legacy dual-arm action_keys. Remapping to standard joint names.")
+        return list(_DUAL_ARM_STATE_KEYS)
+    return action_keys
+
+
 def _episode_success_to_label(success_value: int) -> str:
     # LeRobot uses canonical labels: "success"/"failure"
     if int(success_value) == 1:
@@ -52,11 +77,19 @@ def _episode_success_to_label(success_value: int) -> str:
     return "failure"
 
 
+def _get_episode_success_value(meta: dict) -> int | None:
+    value = meta.get("episode_success")
+    if value is None:
+        return None
+    if value not in (0, 1, "0", "1"):
+        raise ValueError(f"Invalid episode_success={value!r}; expected 0 or 1.")
+    return int(value)
+
+
 def _build_dataset_features(
     *,
     action_keys: list[str],
     camera_shapes: dict[str, tuple[int, int, int]],
-    images_only: bool,
 ) -> dict:
     # Hardware observation features:
     # - state: joint/gripper values
@@ -66,9 +99,8 @@ def _build_dataset_features(
 
     action_hw_features = {k: float for k in action_keys}
 
-    use_video = not images_only
-    obs_features = hw_to_dataset_features(obs_hw_features, prefix=OBS_STR, use_video=use_video)
-    action_features = hw_to_dataset_features(action_hw_features, prefix=ACTION, use_video=use_video)
+    obs_features = hw_to_dataset_features(obs_hw_features, prefix=OBS_STR, use_video=False)
+    action_features = hw_to_dataset_features(action_hw_features, prefix=ACTION, use_video=False)
     dataset_features = combine_feature_dicts(obs_features, action_features)
 
     # Human-in-loop compatible features (stable schema for ACP / intervention conditioning).
@@ -110,14 +142,7 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, required=True, help="Where LeRobotDataset will be written.")
     parser.add_argument("--repo-id", type=str, required=True, help="Local dataset repo_id name.")
     parser.add_argument("--robot-type", type=str, default="arx5")
-    parser.add_argument("--vcodec", type=str, default="libsvtav1")
     parser.add_argument("--skip-missing-success", action="store_true", default=False)
-    parser.add_argument(
-        "--images-only",
-        action="store_true",
-        default=False,
-        help="Store camera observations as images (PNG) instead of videos.",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
@@ -131,7 +156,7 @@ def main() -> None:
         raise RuntimeError(f"No episode_* dirs found under {raw_record_dir}")
 
     first_meta = _load_json(episode_dirs[0] / "meta.json")
-    action_keys = list(first_meta["action_keys"])
+    action_keys = _normalize_action_keys(list(first_meta["action_keys"]))
     camera_names = list(first_meta["camera_names"])
     fps = int(first_meta.get("fps", int(round(1.0 / first_meta["dt_s"]))))
     dt_s = float(first_meta["dt_s"])
@@ -150,7 +175,6 @@ def main() -> None:
     dataset_features = _build_dataset_features(
         action_keys=action_keys,
         camera_shapes=camera_shapes,
-        images_only=args.images_only,
     )
 
     dataset = LeRobotDataset.create(
@@ -159,8 +183,7 @@ def main() -> None:
         root=args.output_root,
         robot_type=args.robot_type,
         features=dataset_features,
-        use_videos=not args.images_only,
-        vcodec=args.vcodec,
+        use_videos=False,
     )
 
     # Keep dataset frames consistent with the recorded dt.
@@ -168,7 +191,7 @@ def main() -> None:
 
     for ep_idx, episode_dir in enumerate(episode_dirs):
         meta = _load_json(episode_dir / "meta.json")
-        episode_success_int = meta.get("episode_success", None)
+        episode_success_int = _get_episode_success_value(meta)
         if episode_success_int is None:
             msg = f"Episode {episode_dir} has episode_success=None."
             if args.skip_missing_success:
@@ -238,4 +261,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
