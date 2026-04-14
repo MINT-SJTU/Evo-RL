@@ -470,8 +470,9 @@ class RealSenseCamera(Camera):
         if self.stop_event is None:
             raise RuntimeError(f"{self}: stop_event is not initialized before starting read loop.")
 
+        stop_event = self.stop_event
         failure_count = 0
-        while not self.stop_event.is_set():
+        while not stop_event.is_set():
             try:
                 frame = self._read_from_hardware()
                 color_frame_raw = frame.get_color_frame()
@@ -494,6 +495,7 @@ class RealSenseCamera(Camera):
                 failure_count = 0
 
             except DeviceNotConnectedError:
+                logger.warning("%s disconnected while reading frames; stopping RealSense read loop.", self)
                 break
             except Exception as e:
                 if failure_count <= 10:
@@ -625,10 +627,11 @@ class RealSenseCamera(Camera):
         if self.thread is not None:
             self._stop_read_thread()
 
-        if self.rs_pipeline is not None:
+        if self.rs_pipeline is not None and self.rs_profile is not None:
             self.rs_pipeline.stop()
-            self.rs_pipeline = None
-            self.rs_profile = None
+
+        self.rs_pipeline = None
+        self.rs_profile = None
 
         with self.frame_lock:
             self.latest_color_frame = None

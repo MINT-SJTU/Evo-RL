@@ -56,6 +56,7 @@ from lerobot.scripts.lerobot_arx5_infer import (
     _predict_action_chunk,
 )
 from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.errors import DeviceNotConnectedError
 from lerobot.utils.robot_utils import precise_sleep
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
@@ -316,6 +317,23 @@ def _build_dual_observation(
     for name, camera in cameras.items():
         observation[name] = camera.async_read()
     return observation
+
+
+def _home_dual_arms_after_camera_failure(
+    *,
+    left_arm: ARX5ArmClient,
+    right_arm: ARX5ArmClient,
+    error: Exception,
+) -> None:
+    logger.error("相机读取失败，停止推理并将双臂移回 home。错误：%s", error)
+    left_arm.hold_position()
+    right_arm.hold_position()
+    time.sleep(0.1)
+    left_arm.go_home()
+    right_arm.go_home()
+    time.sleep(5.0)
+    left_arm.hold_position()
+    right_arm.hold_position()
 
 
 def _split_dual_action(action: dict[str, float]) -> tuple[list[float], list[float]]:
@@ -1341,6 +1359,7 @@ def main() -> None:
     request_next_chunk = keyboard is None or not args.safe_mode
     round_index = _discover_next_round_index(args.record_dir) if args.record_dir is not None else 0
     running = True
+    camera_failure: Exception | None = None
 
     try:
         logger.info("Connecting cameras.")
@@ -1443,16 +1462,27 @@ def main() -> None:
                 time.sleep(0.05)
                 continue
 
-            if prefetched is not None:
-                actions, current_raw_chunk = prefetched
-                prefetched = None
-                observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-            else:
-                if has_executed_chunk:
-                    logger.warning(
-                        "**********prefetched is None：后台预取未就绪，回退到同步推理。**********"
-                    )
-                observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+            used_prefetched = prefetched is not None
+            try:
+                if used_prefetched:
+                    actions, current_raw_chunk = prefetched
+                    prefetched = None
+                    observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+                else:
+                    if has_executed_chunk:
+                        logger.warning(
+                            "**********prefetched is None：后台预取未就绪，回退到同步推理。**********"
+                        )
+                    observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+            except (DeviceNotConnectedError, TimeoutError, RuntimeError) as error:
+                camera_failure = error
+                _home_dual_arms_after_camera_failure(left_arm=left_arm, right_arm=right_arm, error=error)
+                state = LoopState.STOPPED
+                request_next_chunk = False
+                running = False
+                break
+
+            if not used_prefetched:
                 sync_infer_start = time.perf_counter()
                 if args.RTC:
                     actions, current_raw_chunk = _predict_action_chunk_with_kwargs(
@@ -1611,6 +1641,8 @@ def main() -> None:
                 logger.info("Saved joint trajectory to %s", output_path)
             except Exception:
                 logger.exception("Failed to save joint trajectory.")
+        if camera_failure is not None:
+            logger.error("因相机故障终止推理：%s", camera_failure)
 
 
 if __name__ == "__main__":
