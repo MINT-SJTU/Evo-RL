@@ -141,8 +141,10 @@ def main() -> None:
     parser.add_argument("--raw-record-dir", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True, help="Where LeRobotDataset will be written.")
     parser.add_argument("--repo-id", type=str, required=True, help="Local dataset repo_id name.")
-    parser.add_argument("--robot-type", type=str, default="arx5")
+    parser.add_argument("--robot-type", type=str, default="arx_x5_dual")
     parser.add_argument("--skip-missing-success", action="store_true", default=False)
+    parser.add_argument("--image-writer-threads", type=int, default=16)
+    parser.add_argument("--image-writer-processes", type=int, default=1)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
@@ -184,6 +186,8 @@ def main() -> None:
         robot_type=args.robot_type,
         features=dataset_features,
         use_videos=False,
+        image_writer_threads=args.image_writer_threads,
+        image_writer_processes=args.image_writer_processes,
     )
 
     # Keep dataset frames consistent with the recorded dt.

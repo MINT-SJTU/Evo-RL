@@ -50,7 +50,7 @@ def main() -> None:
         default=None,
         help="Dataset repo_id passed to convert. Default: basename of raw-record-dir",
     )
-    parser.add_argument("--robot-type", type=str, default="arx5")
+    parser.add_argument("--robot-type", type=str, default="arx_x5_dual")
     parser.add_argument(
         "--overwrite",
         action="store_true",
