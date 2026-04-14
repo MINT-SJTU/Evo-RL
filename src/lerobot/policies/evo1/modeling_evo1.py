@@ -1,4 +1,5 @@
 import builtins
+import logging
 from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
@@ -29,6 +30,16 @@ class EVO1Policy(PreTrainedPolicy):
         self.config = config
         self.model = EVO1(self._build_model_config(config))
         self.model.set_finetune_flags()
+
+        if config.training_stage == "stage2":
+            logging.info(
+                "Evo1 stage2 runtime settings: embedder_tensor_fastpath=%s "
+                "enable_vlm_gradient_checkpointing=%s gradient_checkpointing_use_reentrant=%s",
+                config.embedder_tensor_fastpath,
+                config.enable_vlm_gradient_checkpointing,
+                config.gradient_checkpointing_use_reentrant,
+            )
+
         self.reset()
 
     @classmethod
@@ -70,6 +81,9 @@ class EVO1Policy(PreTrainedPolicy):
             "vlm_num_layers": config.vlm_num_layers,
             "vlm_dtype": config.vlm_dtype,
             "use_flash_attn": config.use_flash_attn,
+            "embedder_tensor_fastpath": config.embedder_tensor_fastpath,
+            "enable_vlm_gradient_checkpointing": config.enable_vlm_gradient_checkpointing,
+            "gradient_checkpointing_use_reentrant": config.gradient_checkpointing_use_reentrant,
             "action_head": config.action_head,
             "action_horizon": config.chunk_size,
             "per_action_dim": config.max_action_dim,
@@ -300,7 +314,7 @@ class EVO1Policy(PreTrainedPolicy):
                     raise ValueError(
                         f"EVO1 batch mismatch across cameras: key={camera_key} batch={image.shape[0]} expected={batch_size}"
                     )
-                sample_images.append(image[batch_index].detach().cpu())
+                sample_images.append(image[batch_index])
             if not sample_images:
                 raise ValueError("EVO1 received a batch without any image tensor.")
             while len(sample_images) < self.config.max_views:

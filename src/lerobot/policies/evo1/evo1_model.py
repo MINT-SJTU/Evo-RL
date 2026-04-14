@@ -22,6 +22,9 @@ class EVO1(nn.Module):
             num_language_layers=config.get("vlm_num_layers", 14),
             model_dtype=config.get("vlm_dtype", "bfloat16"),
             use_flash_attn=config.get("use_flash_attn", True),
+            enable_gradient_checkpointing=config.get("enable_vlm_gradient_checkpointing", False),
+            enable_tensor_fastpath=config.get("embedder_tensor_fastpath", True),
+            gradient_checkpointing_use_reentrant=config.get("gradient_checkpointing_use_reentrant", False),
         )
 
         action_head_type = config.get("action_head", "flowmatching").lower()

@@ -18,7 +18,7 @@ from lerobot.datasets.utils import cycle
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.rl.wandb_utils import make_logger
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
@@ -98,12 +98,9 @@ def value_train(
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
-    if cfg.wandb.enable and cfg.wandb.project and is_main_process:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        if is_main_process:
-            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    wandb_logger = make_logger(cfg) if is_main_process else None
+    if wandb_logger is None and is_main_process:
+        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
