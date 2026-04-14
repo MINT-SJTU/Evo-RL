@@ -922,9 +922,6 @@ def _run_vr_teleop_session(
         vr_cam = False
     vr_camera_serial_dict = {name: camera_specs[name] for name in camera_names if name in camera_specs}
 
-    class _VRExitRequested(KeyboardInterrupt):
-        """Internal control-flow exception used for [X] VR exit."""
-
     def _hold_arm_with_vr_gripper_target(
         arm_name: str,
         arm_client: ARX5ArmClient,
@@ -947,13 +944,17 @@ def _run_vr_teleop_session(
     class _VRHoldController(ARXX5TeleopController):
         """Same-process VR: no go_home; hold current pose until each controller is activated."""
 
-        def _raise_if_vr_exit_requested(self) -> None:
+        def _request_vr_exit_if_needed(self) -> bool:
             if vr_keyboard is None:
-                return
+                return False
             key = vr_keyboard.get_key()
             if key == "x":
                 logger.info("检测到 [X]：正在退出 VR 遥操作并返回推理。")
-                raise _VRExitRequested
+                stop_event = getattr(self, "_stop_event", None)
+                if stop_event is not None:
+                    stop_event.set()
+                return True
+            return False
 
         def _robot_setup(self):
             self.arm_controllers = {}
@@ -993,7 +994,8 @@ def _run_vr_teleop_session(
             self.sync_end_effector_poses_to_placo_tasks()
 
         def _update_gripper_target(self):
-            self._raise_if_vr_exit_requested()
+            if self._request_vr_exit_if_needed():
+                return
             super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
                 if not should_hold:
@@ -1011,7 +1013,8 @@ def _run_vr_teleop_session(
                 self.gripper_pos_target[arm_name][joint_name] = self._initial_gripper_by_arm[arm_name]
 
         def _send_command(self):
-            self._raise_if_vr_exit_requested()
+            if self._request_vr_exit_if_needed():
+                return
             q_cmd_by_arm: dict[str, np.ndarray] = {}
             gripper_by_arm: dict[str, float] = {}
             for arm_name, controller in self.arm_controllers.items():
@@ -1105,8 +1108,6 @@ def _run_vr_teleop_session(
             visualize_placo=args.vr_visualize_placo,
         )
         controller.run()
-    except _VRExitRequested:
-        logger.info("VR 遥操作已停止（X）。")
     except KeyboardInterrupt:
         logger.warning("**********VR 遥操作收到 Ctrl+C。当前推荐使用 [X] 退出 VR。**********")
     except Exception:

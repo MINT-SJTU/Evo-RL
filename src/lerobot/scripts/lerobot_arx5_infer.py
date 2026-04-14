@@ -473,6 +473,7 @@ class TrainRawEpisodeRecorder:
         self._step_idx = 0
         self._active_actions: list[list[float]] = []
         self._active_states: list[list[float]] = []
+        self._segment_lock = threading.RLock()
         self._writer_queue: queue.Queue[tuple[Path, np.ndarray] | None] | None = None
         self._writer_thread: threading.Thread | None = None
 
@@ -599,30 +600,33 @@ class TrainRawEpisodeRecorder:
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     def _start_segment(self, *, source: str) -> None:
-        if not self.recording_active:
-            return
-        episode_dir = self._require_episode_dir()
-        segments_dir = self._segments_dir
-        assert segments_dir is not None
+        with self._segment_lock:
+            if not self.recording_active:
+                return
+            episode_dir = self._require_episode_dir()
+            segments_dir = self._segments_dir
+            assert segments_dir is not None
 
-        self._active_segment_dir = segments_dir / f"segment_{self._seg_idx:04d}_{source}"
-        self._active_segment_dir.mkdir(parents=True, exist_ok=False)
-        self._active_segment_source = source
-        self._active_actions = []
-        self._active_states = []
-        self._seg_idx += 1
-        self._step_idx = 0
+            self._active_segment_dir = segments_dir / f"segment_{self._seg_idx:04d}_{source}"
+            self._active_segment_dir.mkdir(parents=True, exist_ok=False)
+            self._active_segment_source = source
+            self._active_actions = []
+            self._active_states = []
+            self._seg_idx += 1
+            self._step_idx = 0
 
-        images_dir = self._active_segment_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=False)
-        for camera_name in self.camera_names:
-            (images_dir / camera_name).mkdir(parents=True, exist_ok=False)
+            images_dir = self._active_segment_dir / "images"
+            images_dir.mkdir(parents=True, exist_ok=False)
+            for camera_name in self.camera_names:
+                (images_dir / camera_name).mkdir(parents=True, exist_ok=False)
 
-        seg_meta = {
-            "source": source,
-            "dt_s": self.dt_s,
-        }
-        (self._active_segment_dir / "meta.json").write_text(json.dumps(seg_meta, indent=2) + "\n", encoding="utf-8")
+            seg_meta = {
+                "source": source,
+                "dt_s": self.dt_s,
+            }
+            (self._active_segment_dir / "meta.json").write_text(
+                json.dumps(seg_meta, indent=2) + "\n", encoding="utf-8"
+            )
 
     def start_policy_segment(self) -> None:
         self._start_segment(source="policy")
@@ -631,7 +635,8 @@ class TrainRawEpisodeRecorder:
         self._start_segment(source="vr")
 
     def is_segment_active(self) -> bool:
-        return self._active_segment_dir is not None
+        with self._segment_lock:
+            return self._active_segment_dir is not None
 
     def _append_step(
         self,
@@ -640,37 +645,41 @@ class TrainRawEpisodeRecorder:
         state_vector: list[float],
         images: dict[str, np.ndarray],
     ) -> None:
-        if not self.recording_active or self._active_segment_dir is None:
-            return
-        if len(action_vector) != len(self.action_keys):
-            raise ValueError("action_vector length mismatch")
-        if len(state_vector) != len(self.action_keys):
-            raise ValueError("state_vector length mismatch")
-        for cam in self.camera_names:
-            if cam not in images:
-                raise ValueError(f"Missing image for camera '{cam}' in recorder.record_*_step().")
-        self._active_actions.append([float(x) for x in action_vector])
-        self._active_states.append([float(x) for x in state_vector])
+        with self._segment_lock:
+            if not self.recording_active or self._active_segment_dir is None:
+                return
+            if len(action_vector) != len(self.action_keys):
+                raise ValueError("action_vector length mismatch")
+            if len(state_vector) != len(self.action_keys):
+                raise ValueError("state_vector length mismatch")
+            for cam in self.camera_names:
+                if cam not in images:
+                    raise ValueError(f"Missing image for camera '{cam}' in recorder.record_*_step().")
+            self._active_actions.append([float(x) for x in action_vector])
+            self._active_states.append([float(x) for x in state_vector])
 
-        images_dir = self._active_segment_dir / "images"
-        for cam in self.camera_names:
-            img = np.asarray(images[cam])
-            if img.dtype != np.uint8:
-                img_f = img.astype(np.float32, copy=False)
-                if img_f.max() <= 1.0:
-                    img_f = img_f * 255.0
-                img = np.clip(img_f, 0.0, 255.0).astype(np.uint8)
-            if self.image_save_size_hw is not None:
-                target_h, target_w = self.image_save_size_hw
-                pil_img = Image.fromarray(img).resize((int(target_w), int(target_h)), Image.Resampling.BILINEAR)
-                img = np.asarray(pil_img, dtype=np.uint8)
-            img_path = images_dir / cam / f"frame_{self._step_idx:06d}.png"
-            if self._writer_queue is None:
-                Image.fromarray(img).save(img_path)
-            else:
-                # Step thread only enqueues image jobs; writer thread handles disk IO.
-                self._writer_queue.put((img_path, img.copy()))
-        self._step_idx += 1
+            images_dir = self._active_segment_dir / "images"
+            for cam in self.camera_names:
+                img = np.asarray(images[cam])
+                if img.dtype != np.uint8:
+                    img_f = img.astype(np.float32, copy=False)
+                    if img_f.max() <= 1.0:
+                        img_f = img_f * 255.0
+                    img = np.clip(img_f, 0.0, 255.0).astype(np.uint8)
+                if self.image_save_size_hw is not None:
+                    target_h, target_w = self.image_save_size_hw
+                    pil_img = Image.fromarray(img).resize(
+                        (int(target_w), int(target_h)),
+                        Image.Resampling.BILINEAR,
+                    )
+                    img = np.asarray(pil_img, dtype=np.uint8)
+                img_path = images_dir / cam / f"frame_{self._step_idx:06d}.png"
+                if self._writer_queue is None:
+                    Image.fromarray(img).save(img_path)
+                else:
+                    # Step thread only enqueues image jobs; writer thread handles disk IO.
+                    self._writer_queue.put((img_path, img.copy()))
+            self._step_idx += 1
 
     def record_policy_step(self, *, action_dict: dict[str, float], observation: dict[str, Any]) -> None:
         action_vector = [float(action_dict[k]) for k in self.action_keys]
@@ -688,19 +697,25 @@ class TrainRawEpisodeRecorder:
         self._append_step(action_vector=action_vector, state_vector=state_vector, images=images)
 
     def finish_active_segment(self) -> None:
-        if self._active_segment_dir is None:
-            return
-        self._flush_image_queue()
-        (self._active_segment_dir / "actions.json").write_text(
-            json.dumps(self._active_actions, indent=2) + "\n", encoding="utf-8"
-        )
-        (self._active_segment_dir / "states.json").write_text(
-            json.dumps(self._active_states, indent=2) + "\n", encoding="utf-8"
-        )
-        self._active_segment_dir = None
-        self._active_segment_source = None
-        self._active_actions = []
-        self._active_states = []
+        with self._segment_lock:
+            if self._active_segment_dir is None:
+                return
+            active_segment_dir = self._active_segment_dir
+            active_actions = list(self._active_actions)
+            active_states = list(self._active_states)
+            self._flush_image_queue()
+            (active_segment_dir / "actions.json").write_text(
+                json.dumps(active_actions, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (active_segment_dir / "states.json").write_text(
+                json.dumps(active_states, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self._active_segment_dir = None
+            self._active_segment_source = None
+            self._active_actions = []
+            self._active_states = []
 
     def stop_episode(self, *, success_value: int) -> None:
         if not self.recording_active and not self.waiting_for_success_label:
