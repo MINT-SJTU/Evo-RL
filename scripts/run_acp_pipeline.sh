@@ -96,7 +96,7 @@ activate_repo_conda_env() {
   # shellcheck disable=SC1091
   source "$(conda info --base)/etc/profile.d/conda.sh"
 
-  if conda activate lerobot; then
+  if conda activate evo-rl; then
     return
   fi
 
