@@ -84,7 +84,7 @@ def value_train(
     if accelerator is None:
         from accelerate.utils import DistributedDataParallelKwargs
 
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         force_cpu = cfg.value.device == "cpu"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
