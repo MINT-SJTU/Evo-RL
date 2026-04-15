@@ -313,7 +313,7 @@ def aggregate_datasets(
         dst_meta.info["total_frames"] += src_meta.total_frames
 
     finalize_aggregation(dst_meta, all_metadata)
-    logging.info("Aggregation complete.")
+    logging.info("")
 
 
 def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chunk_size):
