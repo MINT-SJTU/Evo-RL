@@ -45,6 +45,8 @@ Optional:
   --policy-batch-size N            Default: 32
   --policy-save-freq N             Default: 5000
   --policy-output-dir PATH         Default: outputs/pipeline/<run-tag>/policy_train
+  --policy-resume                  Resume policy training from an existing checkpoint config.
+  --policy-config-path PATH        Path to checkpoint pretrained_model/train_config.json.
   --policy-job-name NAME           Default: pi05_<run-tag>
   --policy-type NAME               Default: pi05
   --policy-pretrained-path PATH    Default: lerobot/pi05_base
@@ -68,6 +70,14 @@ Examples:
     --dataset-root /mnt/data/dataset/noetix/arx5_subset \
     --skip-value-train \
     --skip-value-infer
+
+  scripts/run_acp_pipeline.sh \
+    --dataset-root /mnt/data/dataset/noetix/arx5_subset \
+    --skip-backup \
+    --skip-value-train \
+    --skip-value-infer \
+    --policy-resume \
+    --policy-config-path outputs/pipeline/old_run/policy_train/checkpoints/005000/pretrained_model/train_config.json
 EOF
 }
 
@@ -146,9 +156,10 @@ SKIP_BACKUP=0
 SKIP_VALUE_TRAIN=0
 SKIP_VALUE_INFER=0
 SKIP_POLICY_TRAIN=0
+POLICY_RESUME=0
 
-VALUE_GPU="all"
-POLICY_GPUS="all"
+VALUE_GPU="0,1,2,3,4,5,6,7"
+POLICY_GPUS="0,1,2,3,4,5,6,7"
 MIXED_PRECISION="bf16"
 
 VALUE_STEPS=10000
@@ -165,6 +176,7 @@ ACP_POSITIVE_RATIO=0.3
 POLICY_STEPS=20000
 POLICY_BATCH_SIZE=32
 POLICY_SAVE_FREQ=5000
+POLICY_CONFIG_PATH=""
 POLICY_TYPE="pi05"
 POLICY_PRETRAINED_PATH="lerobot/pi05_base"
 POLICY_DTYPE="bfloat16"
@@ -212,6 +224,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-policy-train)
       SKIP_POLICY_TRAIN=1
+      shift
+      ;;
+    --policy-resume)
+      POLICY_RESUME=1
       shift
       ;;
     --value-gpu)
@@ -292,6 +308,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --policy-output-dir)
       POLICY_OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --policy-config-path)
+      POLICY_CONFIG_PATH="$2"
       shift 2
       ;;
     --policy-job-name)
@@ -396,6 +416,26 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 1 && "$SKIP_VALUE_INFER" -eq 0 ]]; then
   fi
 fi
 
+if [[ "$POLICY_RESUME" -eq 1 ]]; then
+  if [[ "$SKIP_POLICY_TRAIN" -eq 1 ]]; then
+    echo "--policy-resume cannot be used together with --skip-policy-train." >&2
+    exit 1
+  fi
+  if [[ -z "$POLICY_CONFIG_PATH" ]]; then
+    echo "--policy-config-path is required when --policy-resume is set." >&2
+    exit 1
+  fi
+  POLICY_CONFIG_PATH="$(realpath "$POLICY_CONFIG_PATH")"
+  if [[ ! -f "$POLICY_CONFIG_PATH" ]]; then
+    echo "Policy config path does not exist: $POLICY_CONFIG_PATH" >&2
+    exit 1
+  fi
+  if [[ "$(basename "$POLICY_CONFIG_PATH")" != "train_config.json" ]]; then
+    echo "--policy-config-path should point to a train_config.json file." >&2
+    exit 1
+  fi
+fi
+
 if [[ "$SKIP_VALUE_TRAIN" -eq 1 && "$SKIP_VALUE_INFER" -eq 1 && "$SKIP_POLICY_TRAIN" -eq 1 ]]; then
   echo "Nothing to do: all three stages are skipped." >&2
   exit 1
@@ -409,7 +449,9 @@ if [[ "$SKIP_VALUE_INFER" -eq 0 ]]; then
   OUTPUT_PATHS_TO_CHECK+=("$INFER_OUTPUT_DIR")
 fi
 if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
-  OUTPUT_PATHS_TO_CHECK+=("$POLICY_OUTPUT_DIR")
+  if [[ "$POLICY_RESUME" -eq 0 ]]; then
+    OUTPUT_PATHS_TO_CHECK+=("$POLICY_OUTPUT_DIR")
+  fi
 fi
 
 for path in "${OUTPUT_PATHS_TO_CHECK[@]}"; do
@@ -431,10 +473,12 @@ echo "  indicator_field:     $INDICATOR_FIELD"
 echo "  skip_value_train:    $SKIP_VALUE_TRAIN"
 echo "  skip_value_infer:    $SKIP_VALUE_INFER"
 echo "  skip_policy_train:   $SKIP_POLICY_TRAIN"
+echo "  policy_resume:       $POLICY_RESUME"
 echo "  value_output_dir:    $VALUE_OUTPUT_DIR"
 echo "  value_checkpoint:    $VALUE_CHECKPOINT_PATH"
 echo "  infer_output_dir:    $INFER_OUTPUT_DIR"
 echo "  policy_output_dir:   $POLICY_OUTPUT_DIR"
+echo "  policy_config_path:  ${POLICY_CONFIG_PATH:-<none>}"
 
 if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
   run_cmd env CUDA_VISIBLE_DEVICES="$VALUE_GPU" accelerate launch \
@@ -494,25 +538,35 @@ if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
     --mixed_precision="$MIXED_PRECISION"
     -m lerobot.scripts.lerobot_train
     --dataset.use_imagenet_stats=false
-    --policy.type="$POLICY_TYPE"
-    --policy.pretrained_path="$POLICY_PRETRAINED_PATH"
-    --steps="$POLICY_STEPS"
-    --batch_size="$POLICY_BATCH_SIZE"
-    --policy.dtype="$POLICY_DTYPE"
-    --policy.gradient_checkpointing=true
     --policy.device=cuda
-    --policy.push_to_hub=false
     --wandb.enable="$WANDB_ENABLE"
     --wandb.disable_artifact=true
-    --save_freq="$POLICY_SAVE_FREQ"
-    --job_name="$POLICY_JOB_NAME"
     --dataset.repo_id="$DATASET_REPO_ID"
     --dataset.root="$WORK_DATASET_ROOT"
-    --output_dir="$POLICY_OUTPUT_DIR"
     --acp.enable=true
     --acp.indicator_field="$INDICATOR_FIELD"
     --acp.indicator_dropout_prob="$INDICATOR_DROPOUT_PROB"
   )
+
+  if [[ "$POLICY_RESUME" -eq 1 ]]; then
+    POLICY_TRAIN_ARGS+=(
+      --resume=true
+      --config_path="$POLICY_CONFIG_PATH"
+    )
+  else
+    POLICY_TRAIN_ARGS+=(
+      --policy.type="$POLICY_TYPE"
+      --policy.pretrained_path="$POLICY_PRETRAINED_PATH"
+      --steps="$POLICY_STEPS"
+      --batch_size="$POLICY_BATCH_SIZE"
+      --policy.dtype="$POLICY_DTYPE"
+      --policy.gradient_checkpointing=true
+      --policy.push_to_hub=false
+      --save_freq="$POLICY_SAVE_FREQ"
+      --job_name="$POLICY_JOB_NAME"
+      --output_dir="$POLICY_OUTPUT_DIR"
+    )
+  fi
 
   if [[ "$POLICY_NUM_PROCESSES" -gt 1 ]]; then
     run_cmd "${POLICY_ENV_CMD[@]}" accelerate launch \
