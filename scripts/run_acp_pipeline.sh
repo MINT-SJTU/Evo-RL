@@ -502,20 +502,45 @@ else
 fi
 
 if [[ "$SKIP_VALUE_INFER" -eq 0 ]]; then
-  run_cmd env CUDA_VISIBLE_DEVICES="$VALUE_GPU" python -m lerobot.scripts.lerobot_value_infer \
-    --dataset.repo_id="$DATASET_REPO_ID" \
-    --dataset.root="$WORK_DATASET_ROOT" \
-    --inference.checkpoint_path="$VALUE_CHECKPOINT_PATH" \
-    --runtime.device=cuda \
-    --runtime.batch_size="$INFER_BATCH_SIZE" \
-    --acp.enable=true \
-    --acp.n_step="$ACP_N_STEP" \
-    --acp.positive_ratio="$ACP_POSITIVE_RATIO" \
-    --acp.value_field="$VALUE_FIELD" \
-    --acp.advantage_field="$ADVANTAGE_FIELD" \
-    --acp.indicator_field="$INDICATOR_FIELD" \
-    --output_dir="$INFER_OUTPUT_DIR" \
+  if [[ "$VALUE_GPU" == "all" ]]; then
+    unset CUDA_VISIBLE_DEVICES
+    VALUE_INFER_NUM_PROCESSES="$(python -c 'import torch; print(torch.cuda.device_count())')"
+    if [[ "$VALUE_INFER_NUM_PROCESSES" -lt 1 ]]; then
+      echo "No CUDA devices detected for value inference." >&2
+      exit 1
+    fi
+    VALUE_INFER_ENV_CMD=(env)
+  else
+    VALUE_INFER_NUM_PROCESSES="$(awk -F',' '{print NF}' <<<"$VALUE_GPU")"
+    VALUE_INFER_ENV_CMD=(env "CUDA_VISIBLE_DEVICES=$VALUE_GPU")
+  fi
+
+  VALUE_INFER_ARGS=(
+    -m lerobot.scripts.lerobot_value_infer
+    --dataset.repo_id="$DATASET_REPO_ID"
+    --dataset.root="$WORK_DATASET_ROOT"
+    --inference.checkpoint_path="$VALUE_CHECKPOINT_PATH"
+    --runtime.device=cuda
+    --runtime.batch_size="$INFER_BATCH_SIZE"
+    --acp.enable=true
+    --acp.n_step="$ACP_N_STEP"
+    --acp.positive_ratio="$ACP_POSITIVE_RATIO"
+    --acp.value_field="$VALUE_FIELD"
+    --acp.advantage_field="$ADVANTAGE_FIELD"
+    --acp.indicator_field="$INDICATOR_FIELD"
+    --output_dir="$INFER_OUTPUT_DIR"
     --job_name="$INFER_JOB_NAME"
+  )
+
+  if [[ "$VALUE_INFER_NUM_PROCESSES" -gt 1 ]]; then
+    run_cmd "${VALUE_INFER_ENV_CMD[@]}" accelerate launch \
+      --multi_gpu \
+      --num_processes="$VALUE_INFER_NUM_PROCESSES" \
+      "${VALUE_INFER_ARGS[@]}"
+  else
+    run_cmd "${VALUE_INFER_ENV_CMD[@]}" python \
+      "${VALUE_INFER_ARGS[@]}"
+  fi
 else
   echo "Skipping value inference / ACP annotation writing."
 fi
