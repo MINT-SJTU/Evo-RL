@@ -319,6 +319,19 @@ def _build_dual_observation(
     return observation
 
 
+def _serialize_dual_arm_targets(
+    q_cmd_by_arm: dict[str, np.ndarray],
+    gripper_by_arm: dict[str, float],
+) -> list[float]:
+    """Serialize dual-arm joint+gripper targets in dataset order: right, then left."""
+    action_vector: list[float] = []
+    for arm_name in ("right_arm", "left_arm"):
+        q_cmd = np.asarray(q_cmd_by_arm[arm_name], dtype=np.float64).reshape(-1)
+        action_vector.extend(q_cmd[:6].tolist())
+        action_vector.append(float(gripper_by_arm[arm_name]))
+    return action_vector
+
+
 def _home_dual_arms_after_camera_failure(
     *,
     left_arm: ARX5ArmClient,
@@ -1086,10 +1099,10 @@ def _run_vr_teleop_session(
                 recorder.mark_vr_takeover()
 
             full_images = {camera_name: self._last_vr_images[camera_name] for camera_name in recorder.camera_names}
-            action_vector: list[float] = []
-            for arm_name in ARM_ORDER:
-                action_vector.extend(q_cmd_by_arm[arm_name][:6].astype(np.float64, copy=False).tolist())
-                action_vector.append(float(gripper_by_arm[arm_name]))
+            action_vector = _serialize_dual_arm_targets(
+                q_cmd_by_arm=q_cmd_by_arm,
+                gripper_by_arm=gripper_by_arm,
+            )
             recorder.record_vr_step(
                 action_vector=action_vector,
                 state_vector=action_vector,
