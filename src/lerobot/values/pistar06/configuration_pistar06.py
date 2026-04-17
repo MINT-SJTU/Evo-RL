@@ -15,10 +15,14 @@ class Pistar06Config(PreTrainedConfig):
     """Value model config using the Pistar06 stack (SigLIP + Gemma)."""
 
     # Backbone components
+    backbone_source: str = "hf"
     vision_repo_id: str = "google/siglip-so400m-patch14-384"
     language_repo_id: str = "google/gemma-3-270m"
+    tokenizer_repo_id: str | None = None
     vision_revision: str | None = None
     language_revision: str | None = None
+    pi05_repo_id: str = "lerobot/pi05_base"
+    pi05_revision: str | None = None
 
     # Input fields
     task_field: str = "task"
@@ -70,10 +74,23 @@ class Pistar06Config(PreTrainedConfig):
     def __post_init__(self) -> None:
         super().__post_init__()
 
-        if not self.vision_repo_id:
-            raise ValueError("'value.vision_repo_id' must be non-empty.")
-        if not self.language_repo_id:
-            raise ValueError("'value.language_repo_id' must be non-empty.")
+        if self.backbone_source not in {"hf", "pi05"}:
+            raise ValueError("'value.backbone_source' must be one of {'hf', 'pi05'}.")
+        if self.backbone_source == "hf":
+            if not self.vision_repo_id:
+                raise ValueError("'value.vision_repo_id' must be non-empty when backbone_source='hf'.")
+            if not self.language_repo_id:
+                raise ValueError("'value.language_repo_id' must be non-empty when backbone_source='hf'.")
+        elif not self.pi05_repo_id:
+            raise ValueError("'value.pi05_repo_id' must be non-empty when backbone_source='pi05'.")
+
+        if self.tokenizer_repo_id is None:
+            if self.backbone_source == "pi05":
+                self.tokenizer_repo_id = "google/paligemma-3b-pt-224"
+            else:
+                self.tokenizer_repo_id = self.language_repo_id
+        if not self.tokenizer_repo_id:
+            raise ValueError("'value.tokenizer_repo_id' must be non-empty.")
         if not self.task_field:
             raise ValueError("'value.task_field' must be non-empty.")
         if not self.state_feature:

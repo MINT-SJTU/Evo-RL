@@ -13,6 +13,7 @@ import lerobot.values.pistar06.modeling_pistar06 as pistar06_modeling
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
 from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
 from lerobot.values.pistar06.modeling_pistar06 import (
+    BackboneLoadResult,
     PISTAR06_SAVE_INFO,
     Pistar06Model,
     Pistar06Policy,
@@ -115,6 +116,16 @@ class _DummyAutoConfig:
     def from_pretrained(cls, *args, **kwargs):
         del args, kwargs
         return SimpleNamespace(architectures=[])
+
+
+def _make_pi05_backbone_bundle() -> BackboneLoadResult:
+    return BackboneLoadResult(
+        vision_encoder=_DummyVisionModel(),
+        language_model=_DummyLanguageModel(),
+        image_resolution=(224, 224),
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+    )
 
 
 @pytest.fixture
@@ -225,6 +236,39 @@ def test_pistar06_model_forward(hf_stubs):
         image_attention_mask=torch.ones(3, 1, dtype=torch.bool),
     )
     assert outputs.shape == (3, 17)
+
+
+def test_pistar06_model_can_use_pi05_backbone_bundle(monkeypatch, hf_stubs):
+    del hf_stubs
+    monkeypatch.setattr(
+        pistar06_modeling,
+        "_load_pi05_backbone_bundle",
+        lambda cfg: _make_pi05_backbone_bundle(),
+    )
+
+    cfg = Pistar06Config(
+        device="cpu",
+        backbone_source="pi05",
+        camera_features=["observation.images.front"],
+        freeze_vision_encoder=True,
+        freeze_language_model=True,
+        fusion_hidden_dim=32,
+        fusion_num_heads=8,
+        num_bins=17,
+    )
+    model = Pistar06Model(cfg)
+
+    assert model.image_resolution == (224, 224)
+    assert not any(param.requires_grad for param in model.vision_encoder.parameters())
+    assert not any(param.requires_grad for param in model.language_model.parameters())
+
+    outputs = model(
+        input_ids=torch.randint(0, 20, (2, 12), dtype=torch.long),
+        attention_mask=torch.ones(2, 12, dtype=torch.bool),
+        images=torch.rand(2, 1, 3, 32, 32),
+        image_attention_mask=torch.ones(2, 1, dtype=torch.bool),
+    )
+    assert outputs.shape == (2, 17)
 
 
 def test_pistar06_policy_requires_valid_camera_mask(hf_stubs):
