@@ -96,7 +96,7 @@ def compute_normalized_value_targets(
     episode_indices: np.ndarray,
     frame_indices: np.ndarray,
     episode_info: dict[int, EpisodeTargetInfo],
-    task_max_lengths: dict[int, int],
+    task_scales: dict[int, float],
     c_fail_coef: float,
     *,
     clip_min: float = -1.0,
@@ -113,19 +113,20 @@ def compute_normalized_value_targets(
         if ep_idx not in episode_info:
             raise KeyError(f"Missing episode metadata for episode_index={ep_idx}.")
         ep = episode_info[ep_idx]
-        task_max = task_max_lengths.get(ep.task_index)
-        if task_max is None:
-            raise KeyError(f"Missing task max length for task_index={ep.task_index}.")
-        if task_max <= 0:
-            raise ValueError(f"Invalid task max length {task_max} for task_index={ep.task_index}.")
+        task_scale = task_scales.get(ep.task_index)
+        if task_scale is None:
+            raise KeyError(f"Missing task scale for task_index={ep.task_index}.")
+        if task_scale <= 0:
+            raise ValueError(f"Invalid task scale {task_scale} for task_index={ep.task_index}.")
 
         remaining_steps = ep.length - int(frame_indices[i]) - 1
-        c_fail = float(task_max) * c_fail_coef
+        remaining_steps = min(remaining_steps, float(task_scale))
+        c_fail = float(task_scale) * c_fail_coef
         g = -float(remaining_steps)
         if not ep.success:
             g -= c_fail
 
-        denom = float(task_max) + c_fail
+        denom = float(task_scale) + c_fail
         g_norm = g / denom
         targets[i] = np.clip(g_norm, clip_min, clip_max)
 
@@ -754,6 +755,29 @@ class Pistar06Policy(PreTrainedPolicy):
         bin_centers = self.bin_centers.to(device=logits.device)
         return expected_value_from_logits(logits, bin_centers)
 
+    @staticmethod
+    def _compute_task_length_scales(
+        task_lengths: dict[int, list[int]],
+        quantile: float,
+    ) -> dict[int, float]:
+        if not 0.0 < quantile <= 1.0:
+            raise ValueError("'length_scale_quantile' must be within (0, 1].")
+
+        task_scales: dict[int, float] = {}
+        for task_index, lengths in task_lengths.items():
+            if len(lengths) == 0:
+                raise ValueError(f"No episode lengths collected for task_index={task_index}.")
+            lengths_np = np.asarray(lengths, dtype=np.float32)
+            if np.any(lengths_np <= 0):
+                raise ValueError(f"Invalid non-positive episode lengths for task_index={task_index}.")
+            task_scale = float(np.quantile(lengths_np, quantile))
+            if task_scale <= 0:
+                raise ValueError(
+                    f"Computed non-positive task scale {task_scale} for task_index={task_index}."
+                )
+            task_scales[task_index] = task_scale
+        return task_scales
+
     def build_training_raw_batch_hook(self, dataset, targets_cfg):
         raw_frames = dataset.hf_dataset.with_format(None)
         frame_count = len(raw_frames)
@@ -770,7 +794,7 @@ class Pistar06Policy(PreTrainedPolicy):
         has_success = targets_cfg.success_field in episodes_ds.column_names
 
         episode_info: dict[int, EpisodeTargetInfo] = {}
-        task_max_length: dict[int, int] = {}
+        task_lengths: dict[int, list[int]] = {}
         for i in range(n_episodes):
             ep_idx = int(episodes["episode_index"][i])
             ep_length = int(episodes["length"][i])
@@ -794,13 +818,18 @@ class Pistar06Policy(PreTrainedPolicy):
                 length=ep_length,
                 success=ep_success,
             )
-            task_max_length[task_index] = max(task_max_length.get(task_index, 0), ep_length)
+            task_lengths.setdefault(task_index, []).append(ep_length)
+
+        task_scales = self._compute_task_length_scales(
+            task_lengths=task_lengths,
+            quantile=targets_cfg.length_scale_quantile,
+        )
 
         value_targets = compute_normalized_value_targets(
             episode_indices=episode_indices,
             frame_indices=frame_indices,
             episode_info=episode_info,
-            task_max_lengths=task_max_length,
+            task_scales=task_scales,
             c_fail_coef=targets_cfg.c_fail_coef,
             clip_min=self.config.bin_min,
             clip_max=self.config.bin_max,

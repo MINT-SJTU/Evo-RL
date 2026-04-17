@@ -27,6 +27,7 @@ VALUE_TRAIN_CONFIG_NAME = "value_train_config.json"
 class ValueTargetsConfig:
     success_field: str = "episode_success"
     default_success: str = "failure"
+    length_scale_quantile: float = 0.8
     c_fail_coef: float = 1.0
     target_field: str = "observation.value_target"
 
@@ -38,6 +39,8 @@ class ValueTargetsConfig:
 
         if not self.success_field:
             raise ValueError("'targets.success_field' must be non-empty.")
+        if not 0.0 < self.length_scale_quantile <= 1.0:
+            raise ValueError("'targets.length_scale_quantile' must be within (0, 1].")
         if self.c_fail_coef < 0:
             raise ValueError("'targets.c_fail_coef' must be non-negative.")
         if not self.target_field.startswith("observation."):
