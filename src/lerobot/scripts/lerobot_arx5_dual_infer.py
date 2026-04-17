@@ -649,7 +649,23 @@ def _execute_dual_chunk(
     return state, request_next_chunk, running
 
 
-def _predict_action_chunk_with_kwargs(
+def _actions_from_chunk(
+    *,
+    action_chunk: torch.Tensor,
+    dataset_features: dict[str, dict[str, Any]],
+    execution_horizon: int,
+) -> list[dict[str, float]]:
+    action_names = dataset_features[ACTION]["names"]
+    action_chunk = action_chunk.squeeze(0).to("cpu")
+    horizon = min(int(execution_horizon), int(action_chunk.shape[0]))
+    actions: list[dict[str, float]] = []
+    for index in range(horizon):
+        row = action_chunk[index]
+        actions.append({name: float(row[offset]) for offset, name in enumerate(action_names)})
+    return actions
+
+
+def _predict_action_chunk_tensor(
     *,
     robot_observation: dict[str, Any],
     dataset_features: dict[str, dict[str, Any]],
@@ -659,51 +675,8 @@ def _predict_action_chunk_with_kwargs(
     device: torch.device,
     task: str,
     robot_type: str,
-    execution_horizon: int,
     use_amp: bool,
-    predict_kwargs: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, float]], torch.Tensor]:
-    """Like `_predict_action_chunk`, but passes kwargs to `policy.predict_action_chunk` and returns raw tensor too."""
-    predict_kwargs = predict_kwargs or {}
-    observation_frame = build_dataset_frame(dataset_features, robot_observation, prefix=OBS_STR)
-    processed_observation = prepare_observation_for_inference(
-        dict(observation_frame),
-        device,
-        task=task,
-        robot_type=robot_type,
-    )
-    with (
-        torch.inference_mode(),
-        torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
-    ):
-        processed_observation = preprocessor(processed_observation)
-        action_chunk_raw = policy.predict_action_chunk(processed_observation, **predict_kwargs)
-        action_chunk = postprocessor(action_chunk_raw)
-
-    action_names = dataset_features[ACTION]["names"]
-    action_chunk = action_chunk.squeeze(0).to("cpu")
-    action_chunk_raw = action_chunk_raw.squeeze(0).detach().to("cpu")
-    horizon = min(int(execution_horizon), int(action_chunk.shape[0]))
-    actions: list[dict[str, float]] = []
-    for index in range(horizon):
-        row = action_chunk[index]
-        actions.append({name: float(row[offset]) for offset, name in enumerate(action_names)})
-    return actions, action_chunk_raw
-
-
-def _predict_action_chunk_raw_with_kwargs(
-    *,
-    robot_observation: dict[str, Any],
-    dataset_features: dict[str, dict[str, Any]],
-    policy,
-    preprocessor,
-    device: torch.device,
-    task: str,
-    robot_type: str,
-    use_amp: bool,
-    predict_kwargs: dict[str, Any] | None = None,
 ) -> torch.Tensor:
-    predict_kwargs = predict_kwargs or {}
     observation_frame = build_dataset_frame(dataset_features, robot_observation, prefix=OBS_STR)
     processed_observation = prepare_observation_for_inference(
         dict(observation_frame),
@@ -716,57 +689,39 @@ def _predict_action_chunk_raw_with_kwargs(
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
         processed_observation = preprocessor(processed_observation)
-        action_chunk_raw = policy.predict_action_chunk(processed_observation, **predict_kwargs)
-    return action_chunk_raw
+        action_chunk_raw = policy.predict_action_chunk(processed_observation)
+        action_chunk = postprocessor(action_chunk_raw)
+    return action_chunk
 
 
-def _predict_action_chunk_raw_with_runtime_state(
+def _predict_action_chunk_tensor_with_runtime_state(
     *,
     robot_observation: dict[str, Any],
     dataset_features: dict[str, dict[str, Any]],
     policy,
     preprocessor,
+    postprocessor,
     device: torch.device,
     task: str,
     robot_type: str,
     use_amp: bool,
     runtime_state: dict[str, Any],
-    predict_kwargs: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     _restore_policy_runtime_state(policy, runtime_state)
-    action_chunk_raw = _predict_action_chunk_raw_with_kwargs(
+    action_chunk = _predict_action_chunk_tensor(
         robot_observation=robot_observation,
         dataset_features=dataset_features,
         policy=policy,
         preprocessor=preprocessor,
+        postprocessor=postprocessor,
         device=device,
         task=task,
         robot_type=robot_type,
         use_amp=use_amp,
-        predict_kwargs=predict_kwargs,
     )
     runtime_state.clear()
     runtime_state.update(_capture_policy_runtime_state(policy))
-    return action_chunk_raw
-
-
-def _postprocess_action_chunk(
-    *,
-    action_chunk_raw: torch.Tensor,
-    dataset_features: dict[str, dict[str, Any]],
-    postprocessor,
-    execution_horizon: int,
-) -> tuple[list[dict[str, float]], torch.Tensor]:
-    action_names = dataset_features[ACTION]["names"]
-    action_chunk = postprocessor(action_chunk_raw)
-    action_chunk = action_chunk.squeeze(0).to("cpu")
-    action_chunk_raw_cpu = action_chunk_raw.squeeze(0).detach().to("cpu")
-    horizon = min(int(execution_horizon), int(action_chunk.shape[0]))
-    actions: list[dict[str, float]] = []
-    for index in range(horizon):
-        row = action_chunk[index]
-        actions.append({name: float(row[offset]) for offset, name in enumerate(action_names)})
-    return actions, action_chunk_raw_cpu
+    return action_chunk
 
 
 def _predict_action_chunk_with_acp(
@@ -784,10 +739,9 @@ def _predict_action_chunk_with_acp(
     acp_inference: ACPInferenceConfig,
     cond_runtime_state: dict[str, Any] | None = None,
     uncond_runtime_state: dict[str, Any] | None = None,
-    predict_kwargs: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, float]], torch.Tensor]:
+) -> list[dict[str, float]]:
     if not acp_inference.enable:
-        return _predict_action_chunk_with_kwargs(
+        return _predict_action_chunk(
             robot_observation=robot_observation,
             dataset_features=dataset_features,
             policy=policy,
@@ -798,12 +752,11 @@ def _predict_action_chunk_with_acp(
             robot_type=robot_type,
             execution_horizon=execution_horizon,
             use_amp=use_amp,
-            predict_kwargs=predict_kwargs,
         )
 
     conditional_task = build_acp_tagged_task(task, is_positive=True)
     if not acp_inference.use_cfg:
-        return _predict_action_chunk_with_kwargs(
+        return _predict_action_chunk(
             robot_observation=robot_observation,
             dataset_features=dataset_features,
             policy=policy,
@@ -814,45 +767,42 @@ def _predict_action_chunk_with_acp(
             robot_type=robot_type,
             execution_horizon=execution_horizon,
             use_amp=use_amp,
-            predict_kwargs=predict_kwargs,
         )
 
     if cond_runtime_state is None or uncond_runtime_state is None:
         raise ValueError("ACP CFG inference requires cond/uncond runtime states.")
 
     cpu_state, cuda_state = _get_torch_rng_state(device)
-    action_chunk_raw_cond = _predict_action_chunk_raw_with_runtime_state(
+    action_chunk_cond = _predict_action_chunk_tensor_with_runtime_state(
         robot_observation=robot_observation,
         dataset_features=dataset_features,
         policy=policy,
         preprocessor=preprocessor,
+        postprocessor=postprocessor,
         device=device,
         task=conditional_task,
         robot_type=robot_type,
         use_amp=use_amp,
         runtime_state=cond_runtime_state,
-        predict_kwargs=predict_kwargs,
     )
     _set_torch_rng_state(device, cpu_state, cuda_state)
-    action_chunk_raw_uncond = _predict_action_chunk_raw_with_runtime_state(
+    action_chunk_uncond = _predict_action_chunk_tensor_with_runtime_state(
         robot_observation=robot_observation,
         dataset_features=dataset_features,
         policy=policy,
         preprocessor=preprocessor,
+        postprocessor=postprocessor,
         device=device,
         task=task,
         robot_type=robot_type,
         use_amp=use_amp,
         runtime_state=uncond_runtime_state,
-        predict_kwargs=predict_kwargs,
     )
-    action_chunk_raw = action_chunk_raw_uncond + acp_inference.cfg_beta * (
-        action_chunk_raw_cond - action_chunk_raw_uncond
-    )
-    return _postprocess_action_chunk(
-        action_chunk_raw=action_chunk_raw,
+    action_chunk = action_chunk_uncond + acp_inference.cfg_beta * (action_chunk_cond - action_chunk_uncond)
+    action_chunk = action_chunk/(1+acp_inference.cfg_beta)
+    return _actions_from_chunk(
+        action_chunk=action_chunk,
         dataset_features=dataset_features,
-        postprocessor=postprocessor,
         execution_horizon=execution_horizon,
     )
 
@@ -896,7 +846,6 @@ class _AsyncChunkPredictor:
         task: str,
         use_amp: bool,
         full_chunk_steps: int,
-        rtc_enabled: bool,
         acp_inference: ACPInferenceConfig,
         cond_runtime_state: dict[str, Any] | None = None,
         uncond_runtime_state: dict[str, Any] | None = None,
@@ -909,13 +858,12 @@ class _AsyncChunkPredictor:
         self._task = task
         self._use_amp = use_amp
         self._full_chunk_steps = full_chunk_steps
-        self._rtc_enabled = bool(rtc_enabled)
         self._acp_inference = acp_inference
         self._cond_runtime_state = cond_runtime_state
         self._uncond_runtime_state = uncond_runtime_state
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._result: tuple[list[dict[str, float]], torch.Tensor | None] | None = None
+        self._result: list[dict[str, float]] | None = None
         self._error: Exception | None = None
 
     def is_running(self) -> bool:
@@ -925,23 +873,13 @@ class _AsyncChunkPredictor:
         self,
         *,
         observation: dict[str, Any],
-        rtc_prev_left_over: torch.Tensor | None = None,
-        rtc_inference_delay: int | None = None,
-        rtc_execution_horizon: int | None = None,
     ) -> bool:
         if self.is_running():
             return False
 
         def _worker() -> None:
             try:
-                predict_kwargs = None
-                if self._rtc_enabled:
-                    predict_kwargs = {
-                        "prev_chunk_left_over": rtc_prev_left_over,
-                        "inference_delay": rtc_inference_delay,
-                        "execution_horizon": rtc_execution_horizon,
-                    }
-                actions, raw = _predict_action_chunk_with_acp(
+                actions = _predict_action_chunk_with_acp(
                     robot_observation=observation,
                     dataset_features=self._dataset_features,
                     policy=self._policy,
@@ -955,11 +893,9 @@ class _AsyncChunkPredictor:
                     acp_inference=self._acp_inference,
                     cond_runtime_state=self._cond_runtime_state,
                     uncond_runtime_state=self._uncond_runtime_state,
-                    predict_kwargs=predict_kwargs,
                 )
-                result = (actions, raw if self._rtc_enabled else None)
                 with self._lock:
-                    self._result = result
+                    self._result = actions
             except Exception as exc:
                 with self._lock:
                     self._error = exc
@@ -968,7 +904,7 @@ class _AsyncChunkPredictor:
         self._thread.start()
         return True
 
-    def consume_ready(self) -> tuple[list[dict[str, float]], torch.Tensor | None] | None:
+    def consume_ready(self) -> list[dict[str, float]] | None:
         if self.is_running():
             return None
         with self._lock:
@@ -1413,12 +1349,6 @@ def main() -> None:
             "This does not truncate execution of the current predicted action chunk."
         ),
     )
-    parser.add_argument(
-        "--RTC",
-        action="store_true",
-        default=False,
-        help="If set, enable LeRobot RTC (Real-Time Chunking) optimization when predicting action chunks.",
-    )
     parser.add_argument("--duration", type=float, default=0.1, help="Seconds per action step.")
 
     parser.add_argument("--left-can-port", type=str, default=DEFAULT_LEFT_CAN_PORT)
@@ -1650,14 +1580,12 @@ def main() -> None:
             task=args.task,
             use_amp=policy_cfg.use_amp,
             full_chunk_steps=int(policy_cfg.n_action_steps),
-            rtc_enabled=args.RTC,
             acp_inference=acp_inference,
             cond_runtime_state=cond_policy_runtime_state,
             uncond_runtime_state=uncond_policy_runtime_state,
         )
-        prefetched: tuple[list[dict[str, float]], torch.Tensor | None] | None = None
+        prefetched: list[dict[str, float]] | None = None
         has_executed_chunk = False
-        current_raw_chunk: torch.Tensor | None = None
 
         while running:
             if keyboard is not None:
@@ -1695,7 +1623,6 @@ def main() -> None:
                         uncond_runtime_state=uncond_policy_runtime_state,
                     )
                     prefetched = None
-                    current_raw_chunk = None
                     state = LoopState.STOPPED
                     request_next_chunk = False if args.safe_mode else True
                     continue
@@ -1710,7 +1637,6 @@ def main() -> None:
                         uncond_runtime_state=uncond_policy_runtime_state,
                     )
                     prefetched = None
-                    current_raw_chunk = None
             if not running:
                 break
             if state != LoopState.RUNNING:
@@ -1723,7 +1649,7 @@ def main() -> None:
             used_prefetched = prefetched is not None
             try:
                 if used_prefetched:
-                    actions, current_raw_chunk = prefetched
+                    actions = prefetched
                     prefetched = None
                     observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
                 else:
@@ -1742,16 +1668,7 @@ def main() -> None:
 
             if not used_prefetched:
                 sync_infer_start = time.perf_counter()
-                predict_kwargs = None
-                if args.RTC:
-                    predict_kwargs = {
-                        "prev_chunk_left_over": None,
-                        "inference_delay": 0,
-                        # Keep RTC execution_horizon semantics consistent with later async calls:
-                        # execute full current chunk, while `execution_horizon` CLI is only the prefetch trigger.
-                        "execution_horizon": int(policy_cfg.n_action_steps),
-                    }
-                actions, current_raw_chunk = _predict_action_chunk_with_acp(
+                actions = _predict_action_chunk_with_acp(
                     robot_observation=observation,
                     dataset_features=dataset_features,
                     policy=policy,
@@ -1765,10 +1682,7 @@ def main() -> None:
                     acp_inference=acp_inference,
                     cond_runtime_state=cond_policy_runtime_state,
                     uncond_runtime_state=uncond_policy_runtime_state,
-                    predict_kwargs=predict_kwargs,
                 )
-                if not args.RTC:
-                    current_raw_chunk = None
                 sync_infer_elapsed = time.perf_counter() - sync_infer_start
                 if has_executed_chunk:
                     logger.warning(
@@ -1831,22 +1745,7 @@ def main() -> None:
                 step_duration_s=args.duration,
                 keyboard=keyboard,
                 safe_mode=args.safe_mode,
-                trigger_next_prediction=(
-                    (lambda obs: async_predictor.start(observation=obs))
-                    if not args.RTC
-                    else (
-                        lambda obs: async_predictor.start(
-                            observation=obs,
-                            rtc_prev_left_over=(
-                                None
-                                if current_raw_chunk is None or trigger_step >= int(current_raw_chunk.shape[0])
-                                else current_raw_chunk[trigger_step:].detach()
-                            ),
-                            rtc_inference_delay=max(int(len(actions) - trigger_step), 0),
-                            rtc_execution_horizon=int(len(actions)),
-                        )
-                    )
-                ),
+                trigger_next_prediction=(lambda obs: async_predictor.start(observation=obs)),
                 trigger_step=trigger_step,
                 recorder=raw_recorder,
                 end_traj_recorder=end_traj_recorder,
