@@ -36,6 +36,7 @@ Optional:
   --value-job-name NAME            Default: value_<run-tag>
   --value-type NAME                Default: pistar06
   --value-dtype NAME               Default: bfloat16
+  --use_pi05                       Use pi05_base backbone for value training.
   --infer-batch-size N             Default: 64
   --infer-output-dir PATH          Default: outputs/pipeline/<run-tag>/value_infer
   --infer-job-name NAME            Default: <run-tag>.infer
@@ -168,6 +169,7 @@ VALUE_SAVE_FREQ=2000
 VALUE_CHECKPOINT_PATH=""
 VALUE_TYPE="pistar06"
 VALUE_DTYPE="bfloat16"
+USE_PI05=0
 
 INFER_BATCH_SIZE=64
 ACP_N_STEP=50
@@ -273,6 +275,10 @@ while [[ $# -gt 0 ]]; do
     --value-dtype)
       VALUE_DTYPE="$2"
       shift 2
+      ;;
+    --use_pi05)
+      USE_PI05=1
+      shift
       ;;
     --infer-batch-size)
       INFER_BATCH_SIZE="$2"
@@ -476,27 +482,39 @@ echo "  skip_policy_train:   $SKIP_POLICY_TRAIN"
 echo "  policy_resume:       $POLICY_RESUME"
 echo "  value_output_dir:    $VALUE_OUTPUT_DIR"
 echo "  value_checkpoint:    $VALUE_CHECKPOINT_PATH"
+echo "  use_pi05:            $USE_PI05"
 echo "  infer_output_dir:    $INFER_OUTPUT_DIR"
 echo "  policy_output_dir:   $POLICY_OUTPUT_DIR"
 echo "  policy_config_path:  ${POLICY_CONFIG_PATH:-<none>}"
 
 if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
+  VALUE_TRAIN_ARGS=(
+    --value.type="$VALUE_TYPE"
+    --value.dtype="$VALUE_DTYPE"
+    --value.push_to_hub=false
+    --batch_size="$VALUE_BATCH_SIZE"
+    --steps="$VALUE_STEPS"
+    --save_freq="$VALUE_SAVE_FREQ"
+    --save_checkpoint=true
+    --wandb.enable="$WANDB_ENABLE"
+    --wandb.disable_artifact=true
+    --job_name="$VALUE_JOB_NAME"
+    --dataset.repo_id="$DATASET_REPO_ID"
+    --dataset.root="$WORK_DATASET_ROOT"
+    --output_dir="$VALUE_OUTPUT_DIR"
+  )
+
+  if [[ "$USE_PI05" -eq 1 ]]; then
+    VALUE_TRAIN_ARGS+=(
+      --value.backbone_source=pi05
+      --value.pi05_repo_id=lerobot/pi05_base
+    )
+  fi
+
   run_cmd env CUDA_VISIBLE_DEVICES="$VALUE_GPU" accelerate launch \
     --mixed_precision="$MIXED_PRECISION" \
     -m lerobot.scripts.lerobot_value_train \
-    --value.type="$VALUE_TYPE" \
-    --value.dtype="$VALUE_DTYPE" \
-    --value.push_to_hub=false \
-    --batch_size="$VALUE_BATCH_SIZE" \
-    --steps="$VALUE_STEPS" \
-    --save_freq="$VALUE_SAVE_FREQ" \
-    --save_checkpoint=true \
-    --wandb.enable="$WANDB_ENABLE" \
-    --wandb.disable_artifact=true \
-    --job_name="$VALUE_JOB_NAME" \
-    --dataset.repo_id="$DATASET_REPO_ID" \
-    --dataset.root="$WORK_DATASET_ROOT" \
-    --output_dir="$VALUE_OUTPUT_DIR"
+    "${VALUE_TRAIN_ARGS[@]}"
 else
   echo "Skipping value training."
 fi
