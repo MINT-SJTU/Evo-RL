@@ -42,6 +42,7 @@ Optional:
   --infer-job-name NAME            Default: <run-tag>.infer
   --acp-n-step N                   Default: 50
   --acp-positive-ratio X           Default: 0.3
+  --c_fail_coef X                  c_fail coefficient for value train/infer. Default: 1
   --policy-steps N                 Default: 20000
   --policy-batch-size N            Default: 32
   --policy-save-freq N             Default: 5000
@@ -174,6 +175,7 @@ USE_PI05=0
 INFER_BATCH_SIZE=64
 ACP_N_STEP=50
 ACP_POSITIVE_RATIO=0.3
+C_FAIL_COEF=1
 
 POLICY_STEPS=20000
 POLICY_BATCH_SIZE=32
@@ -298,6 +300,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --acp-positive-ratio)
       ACP_POSITIVE_RATIO="$2"
+      shift 2
+      ;;
+    --c_fail_coef)
+      C_FAIL_COEF="$2"
       shift 2
       ;;
     --policy-steps)
@@ -486,6 +492,7 @@ echo "  use_pi05:            $USE_PI05"
 echo "  infer_output_dir:    $INFER_OUTPUT_DIR"
 echo "  policy_output_dir:   $POLICY_OUTPUT_DIR"
 echo "  policy_config_path:  ${POLICY_CONFIG_PATH:-<none>}"
+echo "  c_fail_coef:         $C_FAIL_COEF"
 
 if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
   VALUE_TRAIN_ARGS=(
@@ -502,6 +509,7 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
     --dataset.repo_id="$DATASET_REPO_ID"
     --dataset.root="$WORK_DATASET_ROOT"
     --output_dir="$VALUE_OUTPUT_DIR"
+    --targets.c_fail_coef="$C_FAIL_COEF"
   )
 
   if [[ "$USE_PI05" -eq 1 ]]; then
@@ -543,6 +551,7 @@ if [[ "$SKIP_VALUE_INFER" -eq 0 ]]; then
     --acp.enable=true
     --acp.n_step="$ACP_N_STEP"
     --acp.positive_ratio="$ACP_POSITIVE_RATIO"
+    --acp.c_fail_coef="$C_FAIL_COEF"
     --acp.value_field="$VALUE_FIELD"
     --acp.advantage_field="$ADVANTAGE_FIELD"
     --acp.indicator_field="$INDICATOR_FIELD"
