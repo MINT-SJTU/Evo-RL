@@ -406,7 +406,7 @@ else
   WORK_DATASET_ROOT="$WORKING_DATASET_ROOT"
 fi
 
-activate_repo_conda_env
+# activate_repo_conda_env
 
 if [[ "$SKIP_BACKUP" -eq 0 ]]; then
   echo "Creating dataset backup:"
