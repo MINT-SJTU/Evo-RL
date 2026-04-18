@@ -17,6 +17,10 @@
 - 继续复用现有冻结开关：
   - `value.freeze_vision_encoder`
   - `value.freeze_language_model`
+- 新增 value target 归一化逻辑：按 task 内 episode 长度的分位数 `q` 做归一化，并对尾部 `remaining_steps` 做硬截断（详见 [`README-rl-norm.md`](./README-rl-norm.md)）：
+  - 训练侧新增参数 `targets.length_scale_quantile`，默认 `0.8`。
+  - 推理/ACP 侧新增参数 `acp.length_scale_quantile`，默认 `0.8`。
+  - 建议训练和推理使用相同的 `q`，避免 value target 口径不一致。
 
 ## 重要说明
 
@@ -56,6 +60,10 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
   - 是否冻结 SigLIP。
 - `--value.freeze_language_model=true|false`
   - 是否冻结 Gemma。
+- `--targets.length_scale_quantile=0.8`
+  - 训练时使用的 task 内 episode 长度分位数，默认 `0.8`，合法范围 `(0, 1]`。该分位数用作 value target 归一化尺度，并对尾部 `remaining_steps` 做硬截断。
+- `--acp.length_scale_quantile=0.8`
+  - 推理 / ACP 时使用的对应分位数，默认 `0.8`，含义与训练一致，建议与训练保持同值。
 
 ## 推荐运行方式
 
@@ -85,8 +93,9 @@ python -m lerobot.scripts.lerobot_value_train \
   --steps=10000 \
   --save_freq=1000 \
   --save_checkpoint=true \
-  --output_dir=outputs/value_train/arx_slipper_run1_pi05_frozen \
-  --job_name=arx_slipper_v1_pi05_frozen \
+  --targets.length_scale_quantile=0.8 \
+  --output_dir=outputs/value_train/arx_slipper_run1_pi05_frozen_q80 \
+  --job_name=arx_slipper_v1_pi05_frozen_q80 \
   --wandb.enable=true \
   --wandb.disable_artifact=true
 ```
@@ -115,8 +124,9 @@ python -m lerobot.scripts.lerobot_value_train \
   --steps=10000 \
   --save_freq=1000 \
   --save_checkpoint=true \
-  --output_dir=outputs/value_train/arx_slipper_run1_pi05_unfrozen \
-  --job_name=arx_slipper_v1_pi05_unfrozen \
+  --targets.length_scale_quantile=0.8 \
+  --output_dir=outputs/value_train/arx_slipper_run1_pi05_unfrozen_q80 \
+  --job_name=arx_slipper_v1_pi05_unfrozen_q80 \
   --wandb.enable=true \
   --wandb.disable_artifact=true
 ```
@@ -150,13 +160,31 @@ accelerate launch \
   --steps=10000 \
   --save_freq=1000 \
   --save_checkpoint=true \
-  --output_dir=outputs/value_train/arx_slipper_run1_pi05_frozen \
-  --job_name=arx_slipper_v1_pi05_frozen \
+  --targets.length_scale_quantile=0.8 \
+  --output_dir=outputs/value_train/arx_slipper_run1_pi05_frozen_q80 \
+  --job_name=arx_slipper_v1_pi05_frozen_q80 \
   --wandb.enable=true \
   --wandb.disable_artifact=true
 ```
 
-把最后两行冻结参数改成 `false`，就是不冻结版本。
+把最后两行冻结参数改成 `false`，就是不冻结版本。如果想调节对长尾的抑制强度，可以调整 `--targets.length_scale_quantile`（例如 `0.7` 更抑制长尾、`0.9` 更接近旧 max 归一化）。
+
+## 推理 / ACP 时保持分位数一致
+
+`lerobot-value-infer` 里 ACP target 构造与训练共用同一套归一化逻辑，为避免训练/推理口径不一致，推理时务必把 `--acp.length_scale_quantile` 设成和训练相同的值：
+
+```bash
+source ~/.bashrc
+conda activate evo-rl
+
+CUDA_VISIBLE_DEVICES=2 \
+PYTHONPATH=/mnt/data3/whs/Evo-RL/src:$PYTHONPATH \
+python -m lerobot.scripts.lerobot_value_infer \
+  --config_path=<your_value_infer_config.json> \
+  --acp.length_scale_quantile=0.8
+```
+
+分位数归一化的完整说明、公式、调参建议见 [`README-rl-norm.md`](./README-rl-norm.md)。
 
 ## 实现细节
 
@@ -183,7 +211,8 @@ source ~/.bashrc
 conda activate evo-rl
 PYTHONPATH=/mnt/data3/whs/Evo-RL/src:$PYTHONPATH python -m pytest \
   tests/value/test_pistar06_configuration.py \
-  tests/value/test_pistar06_value_stack.py
+  tests/value/test_pistar06_value_stack.py \
+  tests/value/test_pistar06_algorithms.py
 ```
 
 测试覆盖了：
@@ -192,3 +221,4 @@ PYTHONPATH=/mnt/data3/whs/Evo-RL/src:$PYTHONPATH python -m pytest \
 - `pi05` 骨干接入后的前向路径
 - 冻结开关仍然生效
 - 原有 `pistar06` 保存/加载逻辑未被破坏
+- 分位数 + 尾部硬截断后的 value target 归一化结果与预期一致
