@@ -615,6 +615,9 @@ class Pistar06Policy(PreTrainedPolicy):
                 if not any(key.startswith(prefix) for prefix in excluded_prefixes)
             }
 
+        # safetensors rejects multiple keys pointing at the same storage (e.g. tied LM embeddings in Paligemma).
+        state_dict = {k: v.detach().clone().contiguous() for k, v in state_dict.items()}
+
         save_file(state_dict, str(save_directory / SAFETENSORS_SINGLE_FILE))
         save_info = {
             "format_version": 1,
