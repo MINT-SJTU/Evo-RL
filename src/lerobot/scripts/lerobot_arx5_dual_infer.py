@@ -799,7 +799,7 @@ def _predict_action_chunk_with_acp(
         runtime_state=uncond_runtime_state,
     )
     action_chunk = action_chunk_uncond + acp_inference.cfg_beta * (action_chunk_cond - action_chunk_uncond)
-    action_chunk = action_chunk/(1+acp_inference.cfg_beta)
+    #action_chunk = action_chunk/(1+acp_inference.cfg_beta)
     return _actions_from_chunk(
         action_chunk=action_chunk,
         dataset_features=dataset_features,
