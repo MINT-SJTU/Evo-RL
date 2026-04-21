@@ -471,7 +471,7 @@ def run_value_inference_pipeline(
     if frame_count == 0:
         raise ValueError("Dataset has no frames.")
 
-    if not cfg.acp.enable:
+    if not cfg.acp.enable and cfg.inference.reuse_existing_value_field:
         viz_outputs: list[str] = []
         if accelerator.is_main_process:
             logging.info(

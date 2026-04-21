@@ -175,7 +175,7 @@ USE_PI05=0
 INFER_BATCH_SIZE=64
 ACP_N_STEP=50
 ACP_POSITIVE_RATIO=0.3
-C_FAIL_COEF=1
+C_FAIL_COEF=0.995
 
 POLICY_STEPS=20000
 POLICY_BATCH_SIZE=32
@@ -510,6 +510,10 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
     --dataset.root="$WORK_DATASET_ROOT"
     --output_dir="$VALUE_OUTPUT_DIR"
     --targets.c_fail_coef="$C_FAIL_COEF"
+    --value.freeze_language_model=true
+    --value.freeze_vision_encoder=true
+    --value.backbone_source=pi05
+    --targets.length_scale_quantile=0.9
   )
 
   if [[ "$USE_PI05" -eq 1 ]]; then

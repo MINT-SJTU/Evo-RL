@@ -121,10 +121,11 @@ def compute_normalized_value_targets(
 
         remaining_steps = ep.length - int(frame_indices[i]) - 1
         remaining_steps = min(remaining_steps, float(task_scale))
-        c_fail = float(task_scale) * c_fail_coef
+        c_fail = float(task_scale)
         g = -float(remaining_steps)
         if not ep.success:
-            g -= c_fail
+            #g -= c_fail
+            g -= (c_fail_coef ** remaining_steps) * c_fail 
 
         denom = float(task_scale) + c_fail
         g_norm = g / denom

@@ -36,10 +36,13 @@ class ValueInferenceDatasetConfig:
 
 @dataclass
 class ValueInferenceCheckpointConfig:
-    checkpoint_path: str
+    checkpoint_path: str = ""
     checkpoint_ref: str = "last"
+    reuse_existing_value_field: bool = False
 
     def validate(self) -> None:
+        if self.reuse_existing_value_field:
+            return
         if not self.checkpoint_path:
             raise ValueError("'inference.checkpoint_path' must be non-empty.")
         if not self.checkpoint_ref:
@@ -72,7 +75,7 @@ class ValueInferenceACPConfig:
     advantage_field: str = "complementary_info.advantage"
     indicator_field: str = "complementary_info.acp_indicator"
 
-    c_fail_coef: float = 1.0
+    c_fail_coef: float = 0.995
 
     def validate(self) -> None:
         if self.n_step <= 0:
