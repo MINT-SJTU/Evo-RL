@@ -282,7 +282,6 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
   VALUE_TRAIN_ARGS=(
     -m lerobot.scripts.lerobot_value_train
     --value.type=pistar06
-    --value.pretrained_path=lerobot/pi05_base
     --value.backbone_source=pi05
     --value.pi05_repo_id=lerobot/pi05_base
     --value.dtype=bfloat16
