@@ -565,6 +565,10 @@ Iterative training loop (abstract):
   <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/>
 </p>
 
+<p align="center">
+  <img alt="So101 Supplier" src="./website/assets/images/so101provider" width="220"/>
+</p>
+
 ## Affiliations
 
 <p align="center">
