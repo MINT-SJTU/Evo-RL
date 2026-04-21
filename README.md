@@ -567,7 +567,7 @@ Iterative training loop (abstract):
 
 - So101 Supplier WeChat Contact, So101 设备提供商:
 <p align="center">
-  <img alt="So101 Supplier" src="./website/assets/images/so101provider" width="220"/>
+  <img alt="So101 Supplier" src="./website/assets/images/so101provider.jpg" width="220"/>
 </p>
 
 ## Affiliations
