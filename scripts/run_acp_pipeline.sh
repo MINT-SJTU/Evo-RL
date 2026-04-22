@@ -114,27 +114,6 @@ sanitize_tag() {
   printf '%s\n' "$cleaned"
 }
 
-activate_repo_conda_env() {
-  if ! command -v conda >/dev/null 2>&1; then
-    echo "conda not found in PATH." >&2
-    exit 1
-  fi
-
-  # shellcheck disable=SC1091
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-
-  if conda activate evo-rl; then
-    return
-  fi
-
-  conda activate /llm_jzm/cache/conda_env/lerobot
-  export HF_HOME=/llm_jzm/cache/huggingface/
-  export HF_ENDPOINT=https://hf-mirror.com
-  if [[ -n "${WANDB_API_KEY:-}" ]]; then
-    wandb login --relogin "$WANDB_API_KEY"
-  fi
-}
-
 copy_dataset() {
   local src="$1"
   local dst="$2"
@@ -194,7 +173,7 @@ VALUE_CHECKPOINT_REF="last"
 VALUE_TYPE="pistar06"
 VALUE_DTYPE="bfloat16"
 
-INFER_BATCH_SIZE=64
+INFER_BATCH_SIZE=256
 ACP_N_STEP=50
 ACP_POSITIVE_RATIO=0.3
 C_FAIL_COEF=1.0
@@ -473,7 +452,6 @@ fi
 
 ACP_INSTANCE_TABLE_PATH="${ACP_INSTANCE_TABLE_PATH:-${WORK_DATASET_ROOT}/meta/acp_instance_table_${FIELD_TAG}.parquet}"
 
-# activate_repo_conda_env
 
 if [[ "$SKIP_BACKUP" -eq 0 ]]; then
   echo "Creating dataset backup:"
