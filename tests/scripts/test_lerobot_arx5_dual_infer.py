@@ -6,6 +6,7 @@ from lerobot.scripts.lerobot_arx5_dual_infer import (
     LoopState,
     STATE_KEYS,
     _clip_safe_actions,
+    _serialize_dual_arm_targets,
     _run_vr_teleop_session,
     _is_any_vr_arm_active,
     _make_camera_configs,
@@ -99,3 +100,30 @@ def test_v_from_stopped_only_requests_vr_mode_without_marking_takeover():
     assert vr_requested is True
     assert recorder.mark_calls == 0
 
+
+def test_serialize_dual_arm_targets_matches_dataset_order():
+    q_cmd_by_arm = {
+        "left_arm": [101, 102, 103, 104, 105, 106],
+        "right_arm": [1, 2, 3, 4, 5, 6],
+    }
+    gripper_by_arm = {
+        "left_arm": 107,
+        "right_arm": 7,
+    }
+
+    assert _serialize_dual_arm_targets(q_cmd_by_arm, gripper_by_arm) == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+    ]
