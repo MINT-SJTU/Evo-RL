@@ -12,6 +12,34 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames, encode_video_frames
 
 
+def _ensure_pil_rgb_frame(frame_obj) -> Image.Image:
+    if isinstance(frame_obj, Image.Image):
+        return frame_obj.convert("RGB")
+    if isinstance(frame_obj, np.ndarray):
+        arr = frame_obj
+        if arr.dtype != np.uint8:
+            if np.issubdtype(arr.dtype, np.floating):
+                max_val = float(np.max(arr)) if arr.size > 0 else 1.0
+                if max_val <= 1.0 + 1e-6:
+                    arr = np.clip(arr, 0.0, 1.0) * 255.0
+                else:
+                    arr = np.clip(arr, 0.0, 255.0)
+            else:
+                arr = np.clip(arr, 0, 255)
+            arr = arr.astype(np.uint8)
+        return Image.fromarray(arr).convert("RGB")
+    raise TypeError(f"Unsupported frame type for visualization: {type(frame_obj)}")
+
+
+def _extract_image_frames(raw_dataset, image_key: str, positions: np.ndarray) -> list[Image.Image]:
+    column_data = raw_dataset[image_key]
+    frames: list[Image.Image] = []
+    for pos in positions:
+        frame_obj = column_data[int(pos)]
+        frames.append(_ensure_pil_rgb_frame(frame_obj))
+    return frames
+
+
 def _smooth_1d(arr: np.ndarray, window: int = 1) -> np.ndarray:
     """Savitzky-Golay smoothing for 1-D array. Use window=1 to disable."""
     if window <= 1 or arr.shape[0] < 5:

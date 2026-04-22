@@ -14,10 +14,10 @@
 
 python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --task "Fold the socks together and place them on the edge of the desk"   \
---policy-path checkpoints/socks200_0410/checkpoints/pretrained_model \
+--policy-path checkpoints/socks400_v2/pretrained_model \
 --left-can-port can0 \
 --right-can-port can1 \
---cameras base:150622073629 left_wrist:352122273179  right_wrist:409122272986 \
+--cameras base:254322073516 left_wrist:352122273239  right_wrist:352122274400 \
 --cam-width 424 --cam-height 240 \
 --duration 0.05 \
 --raw-train-record-dir /home/user/workspace/zsj/datasets/arx5/raw_socks_0411 \
