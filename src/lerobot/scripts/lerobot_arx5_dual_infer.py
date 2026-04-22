@@ -799,7 +799,6 @@ def _predict_action_chunk_with_acp(
         runtime_state=uncond_runtime_state,
     )
     action_chunk = action_chunk_uncond + acp_inference.cfg_beta * (action_chunk_cond - action_chunk_uncond)
-    action_chunk = action_chunk/(1+acp_inference.cfg_beta)
     return _actions_from_chunk(
         action_chunk=action_chunk,
         dataset_features=dataset_features,
@@ -1314,21 +1313,21 @@ def main() -> None:
     parser.add_argument("--policy-path", type=str, default=DEFAULT_POLICY_PATH)
     parser.add_argument("--policy-device", type=str, default=None)
     parser.add_argument(
-        "--acp-enable",
-        action="store_true",
-        default=False,
+        "--acp-disenable",
+        action="store_false",
+        default=True,
         help="If set, append the ACP positive tag during inference.",
     )
     parser.add_argument(
-        "--acp-use-cfg",
-        action="store_true",
-        default=False,
+        "--acp-unuse-cfg",
+        action="store_false",
+        default=True,
         help="If set, run both ACP-tagged and untagged inference branches and combine them with CFG.",
     )
     parser.add_argument(
         "--acp-cfg-beta",
         type=float,
-        default=1.0,
+        default=1.2,
         help="CFG strength used when --acp-use-cfg is enabled.",
     )
     parser.add_argument(

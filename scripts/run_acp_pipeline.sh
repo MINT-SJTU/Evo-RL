@@ -10,7 +10,8 @@ Usage:
 This script runs three stages in sequence on a copied dataset:
 1. value training on CUDA device 0
 2. value inference + ACP annotation writing on CUDA device 0
-3. policy training with ACP on all available GPUs
+3. build an ACP training instance table from advantage annotations
+4. policy training with ACP on the instance table
 
 Required:
   --dataset-root PATH              Local LeRobot dataset root.
@@ -24,25 +25,35 @@ Optional:
   --skip-backup                    Use the original dataset directly. Unsafe.
   --skip-value-train               Skip value training.
   --skip-value-infer               Skip value inference / ACP annotation writing.
+  --skip-instance-table-build      Skip ACP instance table generation.
   --skip-policy-train              Skip policy training.
-  --value-gpu ID                   GPU for value train/infer. Default: 0
+  --value-gpus SPEC                GPU ids visible to value train. Only the first id is used.
+                                   Example: 0 or 0,1. Default: 0
+  --infer-gpus SPEC                GPUs for value infer. Use 'all' or comma list. Default: 0
   --policy-gpus SPEC               GPUs for policy training. Use 'all' or comma list like 0,1,2,3. Default: all
   --mixed-precision MODE           accelerate mixed precision. Default: bf16
-  --value-steps N                  Default: 10000
-  --value-batch-size N             Default: 16
-  --value-save-freq N              Default: 2000
+  --value-steps N                  Default: 24000
+  --value-batch-size N             Default: 32
+  --value-save-freq N              Default: 12000
   --value-output-dir PATH          Default: outputs/pipeline/<run-tag>/value_train
   --value-checkpoint-path PATH     Value checkpoint for inference. Default: --value-output-dir
+  --value-checkpoint-ref REF       Default: last
   --value-job-name NAME            Default: value_<run-tag>
   --value-type NAME                Default: pistar06
   --value-dtype NAME               Default: bfloat16
-  --use_pi05                       Use pi05_base backbone for value training.
   --infer-batch-size N             Default: 64
   --infer-output-dir PATH          Default: outputs/pipeline/<run-tag>/value_infer
   --infer-job-name NAME            Default: <run-tag>.infer
   --acp-n-step N                   Default: 50
   --acp-positive-ratio X           Default: 0.3
-  --c_fail_coef X                  c_fail coefficient for value train/infer. Default: 1
+  --c-fail-coef X                  c_fail coefficient for value train/infer. Default: 0.995
+  --length-scale-quantile X        Default: 0.9
+  --freeze-language-model BOOL     Default: true
+  --freeze-vision-encoder BOOL     Default: true
+  --acp-instance-table-path PATH   Default: <work-dataset-root>/meta/acp_instance_table_<field-tag>.parquet
+  --acp-negative-bottom-ratio X    Default: 0.3
+  --acp-positive-top-duplicate-ratio X
+                                   Default: 0.3
   --policy-steps N                 Default: 20000
   --policy-batch-size N            Default: 32
   --policy-save-freq N             Default: 5000
@@ -53,7 +64,7 @@ Optional:
   --policy-type NAME               Default: pi05
   --policy-pretrained-path PATH    Default: lerobot/pi05_base
   --policy-dtype NAME              Default: bfloat16
-  --indicator-dropout-prob X       Default: 0.3
+  --indicator-dropout-prob X       Default: 0.0 (ignored when instance table is used)
   --no-wandb                       Disable wandb for both train stages
   --help                           Show this message
 
@@ -86,6 +97,10 @@ EOF
 timestamp_now() {
   date '+%Y%m%d_%H%M%S'
 }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 sanitize_tag() {
   local raw="$1"
@@ -143,6 +158,11 @@ print_cmd() {
   printf '\n'
 }
 
+first_gpu_from_spec() {
+  local gpu_spec="$1"
+  printf '%s\n' "${gpu_spec%%,*}"
+}
+
 run_cmd() {
   print_cmd "$@"
   "$@"
@@ -157,25 +177,33 @@ WORKING_DATASET_ROOT=""
 SKIP_BACKUP=0
 SKIP_VALUE_TRAIN=0
 SKIP_VALUE_INFER=0
+SKIP_INSTANCE_TABLE_BUILD=0
 SKIP_POLICY_TRAIN=0
 POLICY_RESUME=0
 
-VALUE_GPU="0,1,2,3,4,5,6,7"
-POLICY_GPUS="0,1,2,3,4,5,6,7"
+VALUE_GPUS="0"
+INFER_GPUS="0"
+POLICY_GPUS="all"
 MIXED_PRECISION="bf16"
 
-VALUE_STEPS=10000
-VALUE_BATCH_SIZE=16
-VALUE_SAVE_FREQ=2000
+VALUE_STEPS=24000
+VALUE_BATCH_SIZE=32
+VALUE_SAVE_FREQ=12000
 VALUE_CHECKPOINT_PATH=""
+VALUE_CHECKPOINT_REF="last"
 VALUE_TYPE="pistar06"
 VALUE_DTYPE="bfloat16"
-USE_PI05=0
 
 INFER_BATCH_SIZE=64
 ACP_N_STEP=50
 ACP_POSITIVE_RATIO=0.3
 C_FAIL_COEF=0.995
+LENGTH_SCALE_QUANTILE=0.9
+FREEZE_LANGUAGE_MODEL=true
+FREEZE_VISION_ENCODER=true
+ACP_INSTANCE_TABLE_PATH=""
+ACP_NEGATIVE_BOTTOM_RATIO=0.3
+ACP_POSITIVE_TOP_DUPLICATE_RATIO=0.3
 
 POLICY_STEPS=20000
 POLICY_BATCH_SIZE=32
@@ -184,7 +212,7 @@ POLICY_CONFIG_PATH=""
 POLICY_TYPE="pi05"
 POLICY_PRETRAINED_PATH="lerobot/pi05_base"
 POLICY_DTYPE="bfloat16"
-INDICATOR_DROPOUT_PROB=0.3
+INDICATOR_DROPOUT_PROB=0.0
 
 WANDB_ENABLE=true
 
@@ -226,6 +254,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_VALUE_INFER=1
       shift
       ;;
+    --skip-instance-table-build)
+      SKIP_INSTANCE_TABLE_BUILD=1
+      shift
+      ;;
     --skip-policy-train)
       SKIP_POLICY_TRAIN=1
       shift
@@ -234,8 +266,16 @@ while [[ $# -gt 0 ]]; do
       POLICY_RESUME=1
       shift
       ;;
+    --value-gpus)
+      VALUE_GPUS="$2"
+      shift 2
+      ;;
     --value-gpu)
-      VALUE_GPU="$2"
+      VALUE_GPUS="$2"
+      shift 2
+      ;;
+    --infer-gpus)
+      INFER_GPUS="$2"
       shift 2
       ;;
     --policy-gpus)
@@ -266,6 +306,10 @@ while [[ $# -gt 0 ]]; do
       VALUE_CHECKPOINT_PATH="$2"
       shift 2
       ;;
+    --value-checkpoint-ref)
+      VALUE_CHECKPOINT_REF="$2"
+      shift 2
+      ;;
     --value-job-name)
       VALUE_JOB_NAME="$2"
       shift 2
@@ -277,10 +321,6 @@ while [[ $# -gt 0 ]]; do
     --value-dtype)
       VALUE_DTYPE="$2"
       shift 2
-      ;;
-    --use_pi05)
-      USE_PI05=1
-      shift
       ;;
     --infer-batch-size)
       INFER_BATCH_SIZE="$2"
@@ -304,6 +344,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --c_fail_coef)
       C_FAIL_COEF="$2"
+      shift 2
+      ;;
+    --length-scale-quantile)
+      LENGTH_SCALE_QUANTILE="$2"
+      shift 2
+      ;;
+    --freeze-language-model)
+      FREEZE_LANGUAGE_MODEL="$2"
+      shift 2
+      ;;
+    --freeze-vision-encoder)
+      FREEZE_VISION_ENCODER="$2"
+      shift 2
+      ;;
+    --acp-instance-table-path)
+      ACP_INSTANCE_TABLE_PATH="$2"
+      shift 2
+      ;;
+    --acp-negative-bottom-ratio)
+      ACP_NEGATIVE_BOTTOM_RATIO="$2"
+      shift 2
+      ;;
+    --acp-positive-top-duplicate-ratio)
+      ACP_POSITIVE_TOP_DUPLICATE_RATIO="$2"
       shift 2
       ;;
     --policy-steps)
@@ -385,6 +449,7 @@ VALUE_OUTPUT_DIR="${VALUE_OUTPUT_DIR:-${OUTPUT_BASE}/value_train}"
 INFER_OUTPUT_DIR="${INFER_OUTPUT_DIR:-${OUTPUT_BASE}/value_infer}"
 POLICY_OUTPUT_DIR="${POLICY_OUTPUT_DIR:-${OUTPUT_BASE}/policy_train}"
 VALUE_CHECKPOINT_PATH="${VALUE_CHECKPOINT_PATH:-$VALUE_OUTPUT_DIR}"
+VALUE_TRAIN_GPU="$(first_gpu_from_spec "$VALUE_GPUS")"
 
 VALUE_JOB_NAME="${VALUE_JOB_NAME:-value_${RUN_TAG}}"
 INFER_JOB_NAME="${INFER_JOB_NAME:-${RUN_TAG}.infer}"
@@ -406,6 +471,8 @@ else
   WORK_DATASET_ROOT="$WORKING_DATASET_ROOT"
 fi
 
+ACP_INSTANCE_TABLE_PATH="${ACP_INSTANCE_TABLE_PATH:-${WORK_DATASET_ROOT}/meta/acp_instance_table_${FIELD_TAG}.parquet}"
+
 # activate_repo_conda_env
 
 if [[ "$SKIP_BACKUP" -eq 0 ]]; then
@@ -424,6 +491,13 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 1 && "$SKIP_VALUE_INFER" -eq 0 ]]; then
   VALUE_CHECKPOINT_PATH="$(realpath "$VALUE_CHECKPOINT_PATH")"
   if [[ ! -e "$VALUE_CHECKPOINT_PATH" ]]; then
     echo "Value checkpoint path does not exist: $VALUE_CHECKPOINT_PATH" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$SKIP_INSTANCE_TABLE_BUILD" -eq 1 && "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
+  if [[ ! -f "$ACP_INSTANCE_TABLE_PATH" ]]; then
+    echo "ACP instance table path does not exist: $ACP_INSTANCE_TABLE_PATH" >&2
     exit 1
   fi
 fi
@@ -448,8 +522,8 @@ if [[ "$POLICY_RESUME" -eq 1 ]]; then
   fi
 fi
 
-if [[ "$SKIP_VALUE_TRAIN" -eq 1 && "$SKIP_VALUE_INFER" -eq 1 && "$SKIP_POLICY_TRAIN" -eq 1 ]]; then
-  echo "Nothing to do: all three stages are skipped." >&2
+if [[ "$SKIP_VALUE_TRAIN" -eq 1 && "$SKIP_VALUE_INFER" -eq 1 && "$SKIP_INSTANCE_TABLE_BUILD" -eq 1 && "$SKIP_POLICY_TRAIN" -eq 1 ]]; then
+  echo "Nothing to do: all stages are skipped." >&2
   exit 1
 fi
 
@@ -459,6 +533,9 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
 fi
 if [[ "$SKIP_VALUE_INFER" -eq 0 ]]; then
   OUTPUT_PATHS_TO_CHECK+=("$INFER_OUTPUT_DIR")
+fi
+if [[ "$SKIP_INSTANCE_TABLE_BUILD" -eq 0 ]]; then
+  OUTPUT_PATHS_TO_CHECK+=("$ACP_INSTANCE_TABLE_PATH")
 fi
 if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
   if [[ "$POLICY_RESUME" -eq 0 ]]; then
@@ -484,19 +561,29 @@ echo "  advantage_field:     $ADVANTAGE_FIELD"
 echo "  indicator_field:     $INDICATOR_FIELD"
 echo "  skip_value_train:    $SKIP_VALUE_TRAIN"
 echo "  skip_value_infer:    $SKIP_VALUE_INFER"
+echo "  skip_instance_table: $SKIP_INSTANCE_TABLE_BUILD"
 echo "  skip_policy_train:   $SKIP_POLICY_TRAIN"
 echo "  policy_resume:       $POLICY_RESUME"
+echo "  value_train_gpu:     $VALUE_TRAIN_GPU"
+echo "  infer_gpus:          $INFER_GPUS"
 echo "  value_output_dir:    $VALUE_OUTPUT_DIR"
 echo "  value_checkpoint:    $VALUE_CHECKPOINT_PATH"
-echo "  use_pi05:            $USE_PI05"
+echo "  value_checkpoint_ref:$VALUE_CHECKPOINT_REF"
 echo "  infer_output_dir:    $INFER_OUTPUT_DIR"
+echo "  acp_instance_table:  $ACP_INSTANCE_TABLE_PATH"
+echo "  negative_bottom:     $ACP_NEGATIVE_BOTTOM_RATIO"
+echo "  positive_top_dup:    $ACP_POSITIVE_TOP_DUPLICATE_RATIO"
 echo "  policy_output_dir:   $POLICY_OUTPUT_DIR"
 echo "  policy_config_path:  ${POLICY_CONFIG_PATH:-<none>}"
 echo "  c_fail_coef:         $C_FAIL_COEF"
+echo "  length_scale_quantile:$LENGTH_SCALE_QUANTILE"
 
 if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
   VALUE_TRAIN_ARGS=(
+    -m lerobot.scripts.lerobot_value_train
     --value.type="$VALUE_TYPE"
+    --value.backbone_source=pi05
+    --value.pi05_repo_id=lerobot/pi05_base
     --value.dtype="$VALUE_DTYPE"
     --value.push_to_hub=false
     --batch_size="$VALUE_BATCH_SIZE"
@@ -510,52 +597,46 @@ if [[ "$SKIP_VALUE_TRAIN" -eq 0 ]]; then
     --dataset.root="$WORK_DATASET_ROOT"
     --output_dir="$VALUE_OUTPUT_DIR"
     --targets.c_fail_coef="$C_FAIL_COEF"
-    --value.freeze_language_model=true
-    --value.freeze_vision_encoder=true
-    --value.backbone_source=pi05
-    --targets.length_scale_quantile=0.9
+    --targets.length_scale_quantile="$LENGTH_SCALE_QUANTILE"
+    --value.freeze_language_model="$FREEZE_LANGUAGE_MODEL"
+    --value.freeze_vision_encoder="$FREEZE_VISION_ENCODER"
   )
 
-  if [[ "$USE_PI05" -eq 1 ]]; then
-    VALUE_TRAIN_ARGS+=(
-      --value.backbone_source=pi05
-      --value.pi05_repo_id=lerobot/pi05_base
-    )
-  fi
-
-  run_cmd env CUDA_VISIBLE_DEVICES="$VALUE_GPU" accelerate launch \
+  run_cmd env PYTHONPATH="$REPO_PYTHONPATH" CUDA_VISIBLE_DEVICES="$VALUE_TRAIN_GPU" accelerate launch \
     --mixed_precision="$MIXED_PRECISION" \
-    -m lerobot.scripts.lerobot_value_train \
     "${VALUE_TRAIN_ARGS[@]}"
 else
   echo "Skipping value training."
 fi
 
 if [[ "$SKIP_VALUE_INFER" -eq 0 ]]; then
-  if [[ "$VALUE_GPU" == "all" ]]; then
+  if [[ "$INFER_GPUS" == "all" ]]; then
     unset CUDA_VISIBLE_DEVICES
     VALUE_INFER_NUM_PROCESSES="$(python -c 'import torch; print(torch.cuda.device_count())')"
     if [[ "$VALUE_INFER_NUM_PROCESSES" -lt 1 ]]; then
       echo "No CUDA devices detected for value inference." >&2
       exit 1
     fi
-    VALUE_INFER_ENV_CMD=(env)
+    VALUE_INFER_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH")
   else
-    VALUE_INFER_NUM_PROCESSES="$(awk -F',' '{print NF}' <<<"$VALUE_GPU")"
-    VALUE_INFER_ENV_CMD=(env "CUDA_VISIBLE_DEVICES=$VALUE_GPU")
+    VALUE_INFER_NUM_PROCESSES="$(awk -F',' '{print NF}' <<<"$INFER_GPUS")"
+    VALUE_INFER_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH" "CUDA_VISIBLE_DEVICES=$INFER_GPUS")
   fi
 
   VALUE_INFER_ARGS=(
     -m lerobot.scripts.lerobot_value_infer
     --dataset.repo_id="$DATASET_REPO_ID"
     --dataset.root="$WORK_DATASET_ROOT"
+    --dataset.download_videos=false
     --inference.checkpoint_path="$VALUE_CHECKPOINT_PATH"
+    --inference.checkpoint_ref="$VALUE_CHECKPOINT_REF"
     --runtime.device=cuda
     --runtime.batch_size="$INFER_BATCH_SIZE"
     --acp.enable=true
     --acp.n_step="$ACP_N_STEP"
     --acp.positive_ratio="$ACP_POSITIVE_RATIO"
     --acp.c_fail_coef="$C_FAIL_COEF"
+    --acp.length_scale_quantile="$LENGTH_SCALE_QUANTILE"
     --acp.value_field="$VALUE_FIELD"
     --acp.advantage_field="$ADVANTAGE_FIELD"
     --acp.indicator_field="$INDICATOR_FIELD"
@@ -576,6 +657,24 @@ else
   echo "Skipping value inference / ACP annotation writing."
 fi
 
+if [[ "$SKIP_INSTANCE_TABLE_BUILD" -eq 0 ]]; then
+  ACP_INSTANCE_ARGS=(
+    -m lerobot.scripts.lerobot_build_acp_instance_table
+    --dataset-root="$WORK_DATASET_ROOT"
+    --repo-id="$DATASET_REPO_ID"
+    --advantage-field="$ADVANTAGE_FIELD"
+    --negative-bottom-ratio="$ACP_NEGATIVE_BOTTOM_RATIO"
+    --positive-top-duplicate-ratio="$ACP_POSITIVE_TOP_DUPLICATE_RATIO"
+    --output-path="$ACP_INSTANCE_TABLE_PATH"
+    --overwrite
+  )
+
+  run_cmd env PYTHONPATH="$REPO_PYTHONPATH" python \
+    "${ACP_INSTANCE_ARGS[@]}"
+else
+  echo "Skipping ACP instance table build."
+fi
+
 if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
   if [[ "$POLICY_GPUS" == "all" ]]; then
     unset CUDA_VISIBLE_DEVICES
@@ -584,10 +683,10 @@ if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
       echo "No CUDA devices detected for policy training." >&2
       exit 1
     fi
-    POLICY_ENV_CMD=(env)
+    POLICY_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH")
   else
     POLICY_NUM_PROCESSES="$(awk -F',' '{print NF}' <<<"$POLICY_GPUS")"
-    POLICY_ENV_CMD=(env "CUDA_VISIBLE_DEVICES=$POLICY_GPUS")
+    POLICY_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH" "CUDA_VISIBLE_DEVICES=$POLICY_GPUS")
   fi
 
   POLICY_TRAIN_ARGS=(
@@ -601,6 +700,7 @@ if [[ "$SKIP_POLICY_TRAIN" -eq 0 ]]; then
     --dataset.root="$WORK_DATASET_ROOT"
     --acp.enable=true
     --acp.indicator_field="$INDICATOR_FIELD"
+    --acp.instance_table_path="$ACP_INSTANCE_TABLE_PATH"
     --acp.indicator_dropout_prob="$INDICATOR_DROPOUT_PROB"
   )
 
@@ -642,4 +742,5 @@ echo "Pipeline completed."
 echo "  backup/or working dataset: $WORK_DATASET_ROOT"
 echo "  value train output:        $VALUE_OUTPUT_DIR"
 echo "  value infer output:        $INFER_OUTPUT_DIR"
+echo "  acp instance table:        $ACP_INSTANCE_TABLE_PATH"
 echo "  policy train output:       $POLICY_OUTPUT_DIR"

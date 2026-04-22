@@ -26,12 +26,13 @@ Optional:
                                        Default: same as --train-dataset-root
   --infer-dataset-repo-id ID           Default: local/<infer-dataset-dirname>
   --run-tag TAG                        Default: value_tune_YYYYmmdd_HHMMSS
-  --value-gpus SPEC                    GPU ids for value train, e.g. 0 or 0,1. Default: 0
+  --value-gpus SPEC                    GPU ids visible to value train. Only the first id is used.
+                                       Example: 0 or 0,1. Default: 0
   --infer-gpus SPEC                    GPU ids for value infer, e.g. 0 or 0,1. Default: 0
   --mixed-precision MODE               accelerate mixed precision. Default: bf16
-  --value-batch-size N                 Default: 16
-  --value-steps N                      Default: 3000
-  --value-save-freq N                  Default: 3000
+  --value-batch-size N                 Default: 32
+  --value-steps N                      Default: 24000
+  --value-save-freq N                  Default: 12000
   --value-output-dir PATH              Default: outputs/value_tuning/<run-tag>/value_train
   --value-checkpoint-path PATH         Checkpoint root for inference. Default: --value-output-dir
   --value-checkpoint-ref REF           Default: last
@@ -68,6 +69,10 @@ timestamp_now() {
   date '+%Y%m%d_%H%M%S'
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 default_repo_id_from_root() {
   local dataset_root="$1"
   printf 'local/%s\n' "$(basename "$dataset_root")"
@@ -77,6 +82,11 @@ print_cmd() {
   printf '+'
   printf ' %q' "$@"
   printf '\n'
+}
+
+first_gpu_from_spec() {
+  local gpu_spec="$1"
+  printf '%s\n' "${gpu_spec%%,*}"
 }
 
 run_cmd() {
@@ -94,9 +104,9 @@ VALUE_GPUS="0"
 INFER_GPUS="0"
 MIXED_PRECISION="bf16"
 
-VALUE_BATCH_SIZE=16
-VALUE_STEPS=3000
-VALUE_SAVE_FREQ=3000
+VALUE_BATCH_SIZE=32
+VALUE_STEPS=24000
+VALUE_SAVE_FREQ=12000
 VALUE_OUTPUT_DIR=""
 VALUE_CHECKPOINT_PATH=""
 VALUE_CHECKPOINT_REF="last"
@@ -261,6 +271,7 @@ OUTPUT_BASE="outputs/value_tuning/${RUN_TAG}"
 VALUE_OUTPUT_DIR="${VALUE_OUTPUT_DIR:-${OUTPUT_BASE}/value_train}"
 VALUE_CHECKPOINT_PATH="${VALUE_CHECKPOINT_PATH:-$VALUE_OUTPUT_DIR}"
 INFER_OUTPUT_DIR="${INFER_OUTPUT_DIR:-${OUTPUT_BASE}/value_infer}"
+VALUE_TRAIN_GPU="$(first_gpu_from_spec "$VALUE_GPUS")"
 
 echo "Value tuning config:"
 echo "  run_tag:                 $RUN_TAG"
@@ -271,6 +282,7 @@ echo "  infer_dataset_repo_id:   $INFER_DATASET_REPO_ID"
 echo "  value_output_dir:        $VALUE_OUTPUT_DIR"
 echo "  value_checkpoint_path:   $VALUE_CHECKPOINT_PATH"
 echo "  infer_output_dir:        $INFER_OUTPUT_DIR"
+echo "  value_train_gpu:         $VALUE_TRAIN_GPU"
 echo "  c_fail_coef:             $C_FAIL_COEF"
 echo "  freeze_language_model:   $FREEZE_LANGUAGE_MODEL"
 echo "  freeze_vision_encoder:   $FREEZE_VISION_ENCODER"
@@ -300,7 +312,7 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
     --value.freeze_vision_encoder="$FREEZE_VISION_ENCODER"
   )
 
-  run_cmd env CUDA_VISIBLE_DEVICES="$VALUE_GPUS" accelerate launch \
+  run_cmd env PYTHONPATH="$REPO_PYTHONPATH" CUDA_VISIBLE_DEVICES="$VALUE_TRAIN_GPU" accelerate launch \
     --mixed_precision="$MIXED_PRECISION" \
     "${VALUE_TRAIN_ARGS[@]}"
 else
@@ -315,10 +327,10 @@ if [[ "$SKIP_INFER" -eq 0 ]]; then
       echo "No CUDA devices detected for value inference." >&2
       exit 1
     fi
-    INFER_ENV_CMD=(env)
+    INFER_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH")
   else
     INFER_NUM_PROCESSES="$(awk -F',' '{print NF}' <<<"$INFER_GPUS")"
-    INFER_ENV_CMD=(env "CUDA_VISIBLE_DEVICES=$INFER_GPUS")
+    INFER_ENV_CMD=(env "PYTHONPATH=$REPO_PYTHONPATH" "CUDA_VISIBLE_DEVICES=$INFER_GPUS")
   fi
 
   VALUE_INFER_ARGS=(

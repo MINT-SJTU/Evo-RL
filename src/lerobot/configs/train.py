@@ -38,6 +38,7 @@ class ACPConfig:
     enable: bool = False
     indicator_field: str = "complementary_info.acp_indicator"
     indicator_dropout_prob: float = 0.0
+    instance_table_path: str | None = None
 
 
 @dataclass
@@ -152,6 +153,8 @@ class TrainPipelineConfig(HubMixin):
             raise ValueError("'acp.indicator_dropout_prob' must be within [0, 1].")
         if self.acp.enable and not self.acp.indicator_field:
             raise ValueError("'acp.indicator_field' must be set when 'acp.enable=true'.")
+        if self.acp.instance_table_path is not None and not self.acp.instance_table_path:
+            raise ValueError("'acp.instance_table_path' must be non-empty when provided.")
 
         if self.use_rabc and not self.rabc_progress_path:
             # Auto-detect from dataset path
