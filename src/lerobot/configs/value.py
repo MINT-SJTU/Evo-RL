@@ -36,10 +36,13 @@ class ValueInferenceDatasetConfig:
 
 @dataclass
 class ValueInferenceCheckpointConfig:
-    checkpoint_path: str
+    checkpoint_path: str = ""
     checkpoint_ref: str = "last"
+    reuse_existing_value_field: bool = False
 
     def validate(self) -> None:
+        if self.reuse_existing_value_field:
+            return
         if not self.checkpoint_path:
             raise ValueError("'inference.checkpoint_path' must be non-empty.")
         if not self.checkpoint_ref:
@@ -65,19 +68,22 @@ class ValueInferenceACPConfig:
     n_step: int = 50
     positive_ratio: float = 0.3
     force_intervention_positive: bool = True
+    length_scale_quantile: float = 0.8
 
     intervention_field: str = "complementary_info.is_intervention"
     value_field: str = "complementary_info.value"
     advantage_field: str = "complementary_info.advantage"
     indicator_field: str = "complementary_info.acp_indicator"
 
-    c_fail_coef: float = 1.0
+    c_fail_coef: float = 0.995
 
     def validate(self) -> None:
         if self.n_step <= 0:
             raise ValueError("'acp.n_step' must be > 0.")
         if not 0.0 <= self.positive_ratio <= 1.0:
             raise ValueError("'acp.positive_ratio' must be within [0, 1].")
+        if not 0.0 < self.length_scale_quantile <= 1.0:
+            raise ValueError("'acp.length_scale_quantile' must be within (0, 1].")
         if self.c_fail_coef < 0:
             raise ValueError("'acp.c_fail_coef' must be non-negative.")
         if not self.value_field:

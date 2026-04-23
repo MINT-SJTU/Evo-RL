@@ -19,13 +19,13 @@ def test_compute_normalized_value_targets():
         0: EpisodeTargetInfo(episode_index=0, task_index=0, length=3, success=True),
         1: EpisodeTargetInfo(episode_index=1, task_index=0, length=2, success=False),
     }
-    task_max_lengths = {0: 3}
+    task_scales = {0: 3.0}
 
     targets = compute_normalized_value_targets(
         episode_indices=episode_indices,
         frame_indices=frame_indices,
         episode_info=episode_info,
-        task_max_lengths=task_max_lengths,
+        task_scales=task_scales,
         c_fail_coef=1.0,
     )
     expected_targets = np.array([-2 / 6, -1 / 6, 0.0, -4 / 6, -3 / 6], dtype=np.float32)

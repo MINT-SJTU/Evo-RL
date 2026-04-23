@@ -34,3 +34,8 @@ def test_pistar06_preset_uses_cosine_decay_with_warmup():
     assert scheduler_cfg.decay_lr == cfg.scheduler_decay_lr
     assert scheduler_cfg.num_warmup_steps == cfg.scheduler_warmup_steps
     assert scheduler_cfg.num_decay_steps == cfg.scheduler_decay_steps
+
+
+def test_pistar06_pi05_source_defaults_to_paligemma_tokenizer():
+    cfg = Pistar06Config(backbone_source="pi05")
+    assert cfg.tokenizer_repo_id == "google/paligemma-3b-pt-224"

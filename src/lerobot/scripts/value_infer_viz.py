@@ -372,6 +372,33 @@ def _get_episode_value_bounds(ep_values: np.ndarray) -> tuple[float, float]:
     return float(np.min(ep_values)), float(np.max(ep_values))
 
 
+def _ensure_rgb_pil(frame: Image.Image | np.ndarray) -> Image.Image:
+    if isinstance(frame, Image.Image):
+        return frame.convert("RGB")
+
+    np_frame = np.asarray(frame)
+    if np_frame.ndim != 3:
+        raise ValueError(f"Unexpected image frame shape: {np_frame.shape}")
+    if np_frame.dtype != np.uint8:
+        if np.issubdtype(np_frame.dtype, np.floating):
+            max_val = float(np.max(np_frame)) if np_frame.size > 0 else 1.0
+            if max_val <= 1.0 + 1e-6:
+                np_frame = np.clip(np_frame, 0.0, 1.0) * 255.0
+            else:
+                np_frame = np.clip(np_frame, 0.0, 255.0)
+        else:
+            np_frame = np.clip(np_frame, 0, 255)
+        np_frame = np_frame.astype(np.uint8)
+    return Image.fromarray(np_frame).convert("RGB")
+
+
+def _load_image_frames(raw_dataset, frame_positions: np.ndarray, image_key: str) -> list[Image.Image]:
+    frames: list[Image.Image] = []
+    for pos in frame_positions.tolist():
+        frames.append(_ensure_rgb_pil(raw_dataset[int(pos)][image_key]))
+    return frames
+
+
 def _encode_pil_to_video(
     frames: list[Image.Image],
     video_path: Path,
@@ -397,17 +424,14 @@ def _encode_pil_to_video(
             output.mux(packet)
 
 
-def _export_single_episode(
-    src_video_path: Path,
+def _export_single_episode_from_frames(
+    decoded_frames: list[Image.Image],
     dst_video_path: Path,
     ep_values: np.ndarray,
     ep_advantages: np.ndarray,
     ep_indicators: np.ndarray,
-    episode_timestamps_s: np.ndarray,
     fps: int,
     vcodec: str,
-    tolerance_s: float,
-    video_backend: str | None,
     frame_storage_mode: str = "memory",
     temp_dir_root: Path | None = None,
     smooth_window: int = 1,
@@ -415,15 +439,9 @@ def _export_single_episode(
     ep_values = _smooth_1d(ep_values, smooth_window)
     ep_advantages = _smooth_1d(ep_advantages, smooth_window)
     y_min, y_max = _get_episode_value_bounds(ep_values)
-    decoded_frames = _decode_frames_at_timestamps(
-        video_file=src_video_path,
-        timestamps_s=episode_timestamps_s,
-        tolerance_s=tolerance_s,
-        backend=video_backend,
-    )
     n_frames = min(len(decoded_frames), len(ep_values))
     if n_frames == 0:
-        raise ValueError(f"No decoded frames for video: {src_video_path}")
+        raise ValueError(f"No frames available for export: {dst_video_path}")
 
     if frame_storage_mode == "disk":
         with tempfile.TemporaryDirectory(
@@ -432,9 +450,8 @@ def _export_single_episode(
         ) as temp_dir:
             temp_path = Path(temp_dir)
             for i in range(n_frames):
-                frame = decoded_frames[i]
                 composed = _draw_overlay(
-                    frame=frame,
+                    frame=decoded_frames[i],
                     values=ep_values,
                     current_step=i,
                     advantage_t=float(ep_advantages[i]),
@@ -474,82 +491,13 @@ def _export_single_episode(
     return dst_video_path
 
 
-def _export_single_episode_from_frames(
-    decoded_frames: list[Image.Image],
+def _export_single_episode(
+    src_video_path: Path,
     dst_video_path: Path,
     ep_values: np.ndarray,
     ep_advantages: np.ndarray,
     ep_indicators: np.ndarray,
-    fps: int,
-    vcodec: str,
-    frame_storage_mode: str = "memory",
-    temp_dir_root: Path | None = None,
-    smooth_window: int = 1,
-) -> Path:
-    ep_values = _smooth_1d(ep_values, smooth_window)
-    ep_advantages = _smooth_1d(ep_advantages, smooth_window)
-    y_min, y_max = _get_episode_value_bounds(ep_values)
-    n_frames = min(len(decoded_frames), len(ep_values))
-    if n_frames == 0:
-        raise ValueError("No decoded frames available for image-based visualization.")
-
-    if frame_storage_mode == "disk":
-        with tempfile.TemporaryDirectory(
-            dir=str(temp_dir_root) if temp_dir_root is not None else None,
-            prefix=f"{dst_video_path.stem}-frames-",
-        ) as temp_dir:
-            temp_path = Path(temp_dir)
-            for i in range(n_frames):
-                composed = _draw_overlay(
-                    frame=decoded_frames[i],
-                    values=ep_values,
-                    current_step=i,
-                    advantage_t=float(ep_advantages[i]) if i < len(ep_advantages) else 0.0,
-                    acp_t=int(ep_indicators[i]) if i < len(ep_indicators) else 0,
-                    highlight_current_point=False,
-                    y_min=y_min,
-                    y_max=y_max,
-                    indicators=ep_indicators,
-                )
-                composed.save(temp_path / f"frame-{i:06d}.png")
-
-            encode_video_frames(
-                imgs_dir=temp_path,
-                video_path=dst_video_path,
-                fps=fps,
-                vcodec=vcodec,
-                overwrite=True,
-            )
-        return dst_video_path
-
-    composed_frames: list[Image.Image] = []
-    for i in range(n_frames):
-        composed_frames.append(
-            _draw_overlay(
-                frame=decoded_frames[i],
-                values=ep_values,
-                current_step=i,
-                advantage_t=float(ep_advantages[i]) if i < len(ep_advantages) else 0.0,
-                acp_t=int(ep_indicators[i]) if i < len(ep_indicators) else 0,
-                highlight_current_point=False,
-                y_min=y_min,
-                y_max=y_max,
-                indicators=ep_indicators,
-            )
-        )
-
-    _encode_pil_to_video(composed_frames, dst_video_path, fps, vcodec)
-    return dst_video_path
-
-
-def _export_single_episode_multiview(
-    src_video_paths: list[Path],
-    camera_labels: list[str],
-    dst_video_path: Path,
-    ep_values: np.ndarray,
-    ep_advantages: np.ndarray,
-    ep_indicators: np.ndarray,
-    episode_timestamps_per_cam: list[np.ndarray],
+    episode_timestamps_s: np.ndarray,
     fps: int,
     vcodec: str,
     tolerance_s: float,
@@ -558,19 +506,44 @@ def _export_single_episode_multiview(
     temp_dir_root: Path | None = None,
     smooth_window: int = 1,
 ) -> Path:
+    decoded_frames = _decode_frames_at_timestamps(
+        video_file=src_video_path,
+        timestamps_s=episode_timestamps_s,
+        tolerance_s=tolerance_s,
+        backend=video_backend,
+    )
+    if len(decoded_frames) == 0:
+        raise ValueError(f"No decoded frames for video: {src_video_path}")
+    return _export_single_episode_from_frames(
+        decoded_frames=decoded_frames,
+        dst_video_path=dst_video_path,
+        ep_values=ep_values,
+        ep_advantages=ep_advantages,
+        ep_indicators=ep_indicators,
+        fps=fps,
+        vcodec=vcodec,
+        frame_storage_mode=frame_storage_mode,
+        temp_dir_root=temp_dir_root,
+        smooth_window=smooth_window,
+    )
+
+
+def _export_single_episode_multiview_from_frames(
+    all_cam_frames: list[list[Image.Image]],
+    camera_labels: list[str],
+    dst_video_path: Path,
+    ep_values: np.ndarray,
+    ep_advantages: np.ndarray,
+    ep_indicators: np.ndarray,
+    fps: int,
+    vcodec: str,
+    frame_storage_mode: str = "memory",
+    temp_dir_root: Path | None = None,
+    smooth_window: int = 1,
+) -> Path:
     ep_values = _smooth_1d(ep_values, smooth_window)
     ep_advantages = _smooth_1d(ep_advantages, smooth_window)
     y_min, y_max = _get_episode_value_bounds(ep_values)
-
-    all_cam_frames: list[list[Image.Image]] = []
-    for src_path, ts in zip(src_video_paths, episode_timestamps_per_cam, strict=True):
-        frames = _decode_frames_at_timestamps(
-            video_file=src_path,
-            timestamps_s=ts,
-            tolerance_s=tolerance_s,
-            backend=video_backend,
-        )
-        all_cam_frames.append(frames)
 
     n_frames = min(len(f) for f in all_cam_frames)
     n_frames = min(n_frames, len(ep_values))
@@ -640,89 +613,44 @@ def _export_single_episode_multiview(
     return dst_video_path
 
 
-def _export_single_episode_multiview_from_frames(
-    all_cam_frames: list[list[Image.Image]],
+def _export_single_episode_multiview(
+    src_video_paths: list[Path],
     camera_labels: list[str],
     dst_video_path: Path,
     ep_values: np.ndarray,
     ep_advantages: np.ndarray,
     ep_indicators: np.ndarray,
+    episode_timestamps_per_cam: list[np.ndarray],
     fps: int,
     vcodec: str,
+    tolerance_s: float,
+    video_backend: str | None,
     frame_storage_mode: str = "memory",
     temp_dir_root: Path | None = None,
     smooth_window: int = 1,
 ) -> Path:
-    ep_values = _smooth_1d(ep_values, smooth_window)
-    ep_advantages = _smooth_1d(ep_advantages, smooth_window)
-    y_min, y_max = _get_episode_value_bounds(ep_values)
-
-    n_frames = min(len(frames) for frames in all_cam_frames)
-    n_frames = min(n_frames, len(ep_values))
-    if n_frames == 0:
-        raise ValueError(f"No frames available for multiview visualization: {dst_video_path}")
-
-    single_w = all_cam_frames[0][0].width
-    single_h = all_cam_frames[0][0].height
-    n_cams = len(all_cam_frames)
-    total_w = single_w * n_cams
-
-    label_font_size = max(14, single_h // 30)
-    label_font = _load_font(label_font_size)
-
-    def _compose_frame(i: int) -> Image.Image:
-        wide_frame = Image.new("RGB", (total_w, single_h))
-        for cam_idx, cam_frames in enumerate(all_cam_frames):
-            wide_frame.paste(cam_frames[i].resize((single_w, single_h)), (cam_idx * single_w, 0))
-
-        label_draw = ImageDraw.Draw(wide_frame)
-        for cam_idx, label in enumerate(camera_labels):
-            short_label = label.split(".")[-1]
-            lx = cam_idx * single_w + 8
-            ly = 4
-            bbox = label_draw.textbbox((lx, ly), short_label, font=label_font)
-            label_draw.rectangle(
-                (bbox[0] - 2, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2),
-                fill=(0, 0, 0, 180),
-            )
-            label_draw.text((lx, ly), short_label, fill=(255, 255, 200), font=label_font)
-
-        return _draw_overlay(
-            frame=wide_frame,
-            values=ep_values,
-            current_step=i,
-            advantage_t=float(ep_advantages[i]) if i < len(ep_advantages) else 0.0,
-            acp_t=int(ep_indicators[i]) if i < len(ep_indicators) else 0,
-            highlight_current_point=False,
-            y_min=y_min,
-            y_max=y_max,
-            indicators=ep_indicators,
+    all_cam_frames: list[list[Image.Image]] = []
+    for src_path, ts in zip(src_video_paths, episode_timestamps_per_cam, strict=True):
+        frames = _decode_frames_at_timestamps(
+            video_file=src_path,
+            timestamps_s=ts,
+            tolerance_s=tolerance_s,
+            backend=video_backend,
         )
-
-    if frame_storage_mode == "disk":
-        with tempfile.TemporaryDirectory(
-            dir=str(temp_dir_root) if temp_dir_root is not None else None,
-            prefix=f"{dst_video_path.stem}-frames-",
-        ) as temp_dir:
-            temp_path = Path(temp_dir)
-            for i in range(n_frames):
-                _compose_frame(i).save(temp_path / f"frame-{i:06d}.png")
-
-            encode_video_frames(
-                imgs_dir=temp_path,
-                video_path=dst_video_path,
-                fps=fps,
-                vcodec=vcodec,
-                overwrite=True,
-            )
-        return dst_video_path
-
-    composed_frames: list[Image.Image] = []
-    for i in range(n_frames):
-        composed_frames.append(_compose_frame(i))
-
-    _encode_pil_to_video(composed_frames, dst_video_path, fps, vcodec)
-    return dst_video_path
+        all_cam_frames.append(frames)
+    return _export_single_episode_multiview_from_frames(
+        all_cam_frames=all_cam_frames,
+        camera_labels=camera_labels,
+        dst_video_path=dst_video_path,
+        ep_values=ep_values,
+        ep_advantages=ep_advantages,
+        ep_indicators=ep_indicators,
+        fps=fps,
+        vcodec=vcodec,
+        frame_storage_mode=frame_storage_mode,
+        temp_dir_root=temp_dir_root,
+        smooth_window=smooth_window,
+    )
 
 
 def _export_overlay_videos(
@@ -786,9 +714,17 @@ def _export_overlay_videos(
     fps = int(dataset.fps)
     tolerance_s = float(getattr(dataset, "tolerance_s", 1e-4))
     video_backend = getattr(dataset, "video_backend", None)
+    video_keys = set(dataset.meta.video_keys)
+    selected_are_videos = [key in video_keys for key in selected_video_keys]
+    if multiview_mode and any(selected_are_videos) and not all(selected_are_videos):
+        raise ValueError(
+            "Mixed image/video camera keys are not supported for multiview export. "
+            "Choose all image-backed keys or all video-backed keys."
+        )
     written_paths: list[Path] = []
 
     if multiview_mode:
+        use_video_sources = all(selected_are_videos)
         tasks = []
         for ep in episodes:
             ep_positions = np.flatnonzero(episode_indices_all == ep)
@@ -804,19 +740,21 @@ def _export_overlay_videos(
                 continue
 
             ep_timestamps = timestamps_all[ep_positions]
-            cam_payloads: list[tuple[str, Path | list[Image.Image], np.ndarray | None]] = []
-            for cam_key in selected_video_keys:
-                cam_dtype = dataset.meta.features[cam_key]["dtype"]
-                if cam_dtype == "image":
-                    frames = _extract_image_frames(raw_dataset, cam_key, ep_positions)
-                    cam_payloads.append((cam_dtype, frames, None))
-                else:
+            if use_video_sources:
+                src_paths: list[Path] = []
+                ts_per_cam: list[np.ndarray] = []
+                for cam_key in selected_video_keys:
                     src_path = Path(dataset.root) / dataset.meta.get_video_file_path(ep, cam_key)
+                    src_paths.append(src_path)
                     from_ts, to_ts = _get_episode_video_time_bounds(dataset, ep, cam_key)
                     cam_ts = from_ts + ep_timestamps
                     if to_ts is not None:
                         cam_ts = np.minimum(cam_ts, to_ts)
-                    cam_payloads.append((cam_dtype, src_path, cam_ts))
+                    ts_per_cam.append(cam_ts)
+                payload = (src_paths, ts_per_cam)
+            else:
+                frame_sets = [_load_image_frames(raw_dataset, ep_positions, cam_key) for cam_key in selected_video_keys]
+                payload = frame_sets
 
             dst_path = _build_output_video_path_multiview(
                 output_dir=output_dir,
@@ -829,7 +767,7 @@ def _export_overlay_videos(
 
             tasks.append(
                 (
-                    cam_payloads,
+                    payload,
                     dst_path,
                     ep_values,
                     advantages_all[ep_positions],
@@ -838,43 +776,48 @@ def _export_overlay_videos(
             )
 
         desc_keys = ",".join(key.split(".")[-1] for key in selected_video_keys)
-        for cam_payloads, dst, vals, advs, inds in tqdm(
+        for payload, dst, vals, advs, inds in tqdm(
             tasks,
             total=len(tasks),
             desc=f"Export overlay multiview [{desc_keys}]",
             leave=False,
         ):
-            all_cam_frames: list[list[Image.Image]] = []
-            for _, payload, ts in cam_payloads:
-                if isinstance(payload, list):
-                    all_cam_frames.append(payload)
-                else:
-                    if ts is None:
-                        raise RuntimeError("Video timestamps are unexpectedly missing for multiview export.")
-                    all_cam_frames.append(
-                        _decode_frames_at_timestamps(
-                            video_file=payload,
-                            timestamps_s=ts,
-                            tolerance_s=tolerance_s,
-                            backend=video_backend,
-                        )
+            if use_video_sources:
+                srcs, ts_per_cam = payload
+                written_paths.append(
+                    _export_single_episode_multiview(
+                        src_video_paths=srcs,
+                        camera_labels=selected_video_keys,
+                        dst_video_path=dst,
+                        ep_values=vals,
+                        ep_advantages=advs,
+                        ep_indicators=inds,
+                        episode_timestamps_per_cam=ts_per_cam,
+                        fps=fps,
+                        vcodec=vcodec,
+                        tolerance_s=tolerance_s,
+                        video_backend=video_backend,
+                        frame_storage_mode=frame_storage_mode,
+                        temp_dir_root=output_dir,
+                        smooth_window=smooth_window,
                     )
-
-            written_paths.append(
-                _export_single_episode_multiview_from_frames(
-                    all_cam_frames=all_cam_frames,
-                    camera_labels=selected_video_keys,
-                    dst_video_path=dst,
-                    ep_values=vals,
-                    ep_advantages=advs,
-                    ep_indicators=inds,
-                    fps=fps,
-                    vcodec=vcodec,
-                    frame_storage_mode=frame_storage_mode,
-                    temp_dir_root=output_dir,
-                    smooth_window=smooth_window,
                 )
-            )
+            else:
+                written_paths.append(
+                    _export_single_episode_multiview_from_frames(
+                        all_cam_frames=payload,
+                        camera_labels=selected_video_keys,
+                        dst_video_path=dst,
+                        ep_values=vals,
+                        ep_advantages=advs,
+                        ep_indicators=inds,
+                        fps=fps,
+                        vcodec=vcodec,
+                        frame_storage_mode=frame_storage_mode,
+                        temp_dir_root=output_dir,
+                        smooth_window=smooth_window,
+                    )
+                )
     else:
         selected_video_key = selected_video_keys[0]
         tasks = []
@@ -899,49 +842,42 @@ def _export_overlay_videos(
             if dst_path.exists() and not overwrite:
                 continue
 
-            selected_dtype = dataset.meta.features[selected_video_key]["dtype"]
-            if selected_dtype == "image":
-                src_or_frames: Path | list[Image.Image] = _extract_image_frames(
-                    raw_dataset, selected_video_key, ep_positions
+            if selected_video_key in video_keys:
+                src_path = Path(dataset.root) / dataset.meta.get_video_file_path(ep, selected_video_key)
+                tasks.append(
+                    (
+                        src_path,
+                        None,
+                        dst_path,
+                        ep_values,
+                        advantages_all[ep_positions],
+                        indicators_all[ep_positions],
+                        ep_video_timestamps,
+                    )
                 )
             else:
-                src_or_frames = Path(dataset.root) / dataset.meta.get_video_file_path(ep, selected_video_key)
-            tasks.append(
-                (
-                    src_or_frames,
-                    dst_path,
-                    ep_values,
-                    advantages_all[ep_positions],
-                    indicators_all[ep_positions],
-                    ep_video_timestamps,
+                tasks.append(
+                    (
+                        None,
+                        _load_image_frames(raw_dataset, ep_positions, selected_video_key),
+                        dst_path,
+                        ep_values,
+                        advantages_all[ep_positions],
+                        indicators_all[ep_positions],
+                        None,
+                    )
                 )
-            )
 
-        for src_or_frames, dst, vals, advs, inds, ts in tqdm(
+        for src, frames, dst, vals, advs, inds, ts in tqdm(
             tasks,
             total=len(tasks),
             desc=f"Export overlay [{selected_video_key}]",
             leave=False,
         ):
-            if isinstance(src_or_frames, list):
-                written_paths.append(
-                    _export_single_episode_from_frames(
-                        decoded_frames=src_or_frames,
-                        dst_video_path=dst,
-                        ep_values=vals,
-                        ep_advantages=advs,
-                        ep_indicators=inds,
-                        fps=fps,
-                        vcodec=vcodec,
-                        frame_storage_mode=frame_storage_mode,
-                        temp_dir_root=output_dir,
-                        smooth_window=smooth_window,
-                    )
-                )
-            else:
+            if src is not None and ts is not None:
                 written_paths.append(
                     _export_single_episode(
-                        src_or_frames,
+                        src,
                         dst,
                         vals,
                         advs,
@@ -953,6 +889,21 @@ def _export_overlay_videos(
                         video_backend,
                         frame_storage_mode,
                         output_dir,
+                        smooth_window=smooth_window,
+                    )
+                )
+            else:
+                written_paths.append(
+                    _export_single_episode_from_frames(
+                        decoded_frames=frames,
+                        dst_video_path=dst,
+                        ep_values=vals,
+                        ep_advantages=advs,
+                        ep_indicators=inds,
+                        fps=fps,
+                        vcodec=vcodec,
+                        frame_storage_mode=frame_storage_mode,
+                        temp_dir_root=output_dir,
                         smooth_window=smooth_window,
                     )
                 )

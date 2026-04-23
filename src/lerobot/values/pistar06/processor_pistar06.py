@@ -234,7 +234,7 @@ def make_pistar06_pre_post_processors(
             state_discretization_bins=config.state_discretization_bins,
         ),
         TokenizerProcessorStep(
-            tokenizer_name=config.language_repo_id,
+            tokenizer_name=config.tokenizer_repo_id,
             task_key=config.task_field,
             max_length=config.tokenizer_max_length,
             padding_side="right",

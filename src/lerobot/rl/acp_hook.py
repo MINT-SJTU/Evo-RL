@@ -80,6 +80,6 @@ class ACPPromptHook:
 
 
 def build_acp_raw_batch_hook(cfg: ACPConfig, seed: int | None) -> Callable[[Any, int], Any] | None:
-    if not cfg.enable:
+    if not cfg.enable or cfg.instance_table_path:
         return None
     return ACPPromptHook(cfg, seed)

@@ -373,7 +373,7 @@ def train(
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    if hasattr(cfg.policy, "drop_n_last_frames") and not cfg.acp.instance_table_path:
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],

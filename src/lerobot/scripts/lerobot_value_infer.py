@@ -50,6 +50,7 @@ from lerobot.utils.utils import init_logging, inside_slurm
 from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
 from lerobot.values.pistar06.modeling_pistar06 import (
     EpisodeTargetInfo,
+    Pistar06Policy,
     compute_normalized_value_targets,
 )
 
@@ -179,14 +180,15 @@ def _build_episode_info(
     dataset: LeRobotDataset,
     success_field: str,
     default_success: str,
-) -> tuple[dict[int, EpisodeTargetInfo], dict[int, int]]:
+    length_scale_quantile: float,
+) -> tuple[dict[int, EpisodeTargetInfo], dict[int, float]]:
     episodes_ds = dataset.meta.episodes.with_format(None)
     episodes = episodes_ds[:]
     n_episodes = len(episodes_ds)
     has_success = success_field in episodes_ds.column_names
 
     episode_info: dict[int, EpisodeTargetInfo] = {}
-    task_max_length: dict[int, int] = {}
+    task_lengths: dict[int, list[int]] = {}
     for i in range(n_episodes):
         ep_idx = int(episodes["episode_index"][i])
         ep_length = int(episodes["length"][i])
@@ -210,8 +212,13 @@ def _build_episode_info(
             length=ep_length,
             success=ep_success,
         )
-        task_max_length[task_index] = max(task_max_length.get(task_index, 0), ep_length)
-    return episode_info, task_max_length
+        task_lengths.setdefault(task_index, []).append(ep_length)
+
+    task_scales = Pistar06Policy._compute_task_length_scales(
+        task_lengths=task_lengths,
+        quantile=length_scale_quantile,
+    )
+    return episode_info, task_scales
 
 
 def _compute_dense_rewards_from_targets(
@@ -464,7 +471,7 @@ def run_value_inference_pipeline(
     if frame_count == 0:
         raise ValueError("Dataset has no frames.")
 
-    if not cfg.acp.enable:
+    if not cfg.acp.enable and cfg.inference.reuse_existing_value_field:
         viz_outputs: list[str] = []
         if accelerator.is_main_process:
             logging.info(
@@ -614,17 +621,18 @@ def run_value_inference_pipeline(
         thresholds: dict[int, float] | None = None
 
         if cfg.acp.enable:
-            episode_info, task_max_lengths = _build_episode_info(
+            episode_info, task_scales = _build_episode_info(
                 dataset=dataset,
                 success_field=cfg.dataset.success_field,
                 default_success=cfg.dataset.default_success,
+                length_scale_quantile=cfg.acp.length_scale_quantile,
             )
 
             value_targets = compute_normalized_value_targets(
                 episode_indices=episode_indices,
                 frame_indices=frame_indices,
                 episode_info=episode_info,
-                task_max_lengths=task_max_lengths,
+                task_scales=task_scales,
                 c_fail_coef=cfg.acp.c_fail_coef,
                 clip_min=value_cfg.bin_min,
                 clip_max=value_cfg.bin_max,

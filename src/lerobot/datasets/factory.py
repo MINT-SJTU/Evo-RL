@@ -27,6 +27,7 @@ from lerobot.datasets.lerobot_dataset import (
 )
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms
+from lerobot.rl.acp_instance_table import ACPInstanceTableDataset
 from lerobot.utils.constants import ACTION, OBS_PREFIX, REWARD
 
 IMAGENET_STATS = {
@@ -129,5 +130,17 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         for key in dataset.meta.camera_keys:
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
+    acp_cfg = getattr(cfg, "acp", None)
+    instance_table_path = getattr(acp_cfg, "instance_table_path", None)
+    if instance_table_path:
+        if cfg.dataset.streaming:
+            raise ValueError("ACP instance tables are not supported with streaming datasets.")
+        drop_n_last_frames = int(getattr(cfg.policy, "drop_n_last_frames", 0))
+        dataset = ACPInstanceTableDataset(
+            base_dataset=dataset,
+            instance_table_path=instance_table_path,
+            drop_n_last_frames=drop_n_last_frames,
+        )
 
     return dataset

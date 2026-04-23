@@ -444,7 +444,6 @@ class TrainRawEpisodeRecorder:
         image_save_size_hw: tuple[int, int] | None = None,
         collector_policy_id_policy: str = "policy",
         collector_policy_id_human: str = "human",
-        force_success_on_vr: bool = True,
     ) -> None:
         self.raw_record_root = raw_record_root
         self.action_keys = action_keys
@@ -455,7 +454,6 @@ class TrainRawEpisodeRecorder:
         self.image_save_size_hw = image_save_size_hw
         self.collector_policy_id_policy = collector_policy_id_policy
         self.collector_policy_id_human = collector_policy_id_human
-        self.force_success_on_vr = force_success_on_vr
 
         self.enabled = raw_record_root is not None
         self._episode_dir: Path | None = None
@@ -464,7 +462,6 @@ class TrainRawEpisodeRecorder:
 
         self.recording_active = False
         self.waiting_for_success_label = False
-        self.success_forced = False
         self.episode_success: int | None = None
 
         self._seg_idx = 0
@@ -565,7 +562,6 @@ class TrainRawEpisodeRecorder:
 
         self.recording_active = True
         self.waiting_for_success_label = False
-        self.success_forced = False
         self.episode_success = None
 
         # Images/shapes are stored per segment; meta tracks only schema-level info.
@@ -577,7 +573,6 @@ class TrainRawEpisodeRecorder:
             "camera_names": self.camera_names,
             "collector_policy_id_policy": self.collector_policy_id_policy,
             "collector_policy_id_human": self.collector_policy_id_human,
-            "success_forced": False,
             "episode_success": None,
             "has_vr_takeover": False,
         }
@@ -591,12 +586,9 @@ class TrainRawEpisodeRecorder:
     def mark_vr_takeover(self) -> None:
         if not self.recording_active:
             return
-        self.success_forced = self.success_forced or self.force_success_on_vr
         meta_path = self._require_episode_dir() / "meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta["success_forced"] = self.success_forced
         meta["has_vr_takeover"] = True
-        # Success can still be finalized on 'D' (or forced immediately if desired).
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     def _start_segment(self, *, source: str) -> None:
@@ -729,12 +721,10 @@ class TrainRawEpisodeRecorder:
         meta_path = self._require_episode_dir() / "meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["episode_success"] = int(success_value)
-        meta["success_forced"] = bool(self.success_forced)
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
         self.recording_active = False
         self.waiting_for_success_label = False
-        self.success_forced = False
         self.episode_success = int(success_value)
         self._episode_index += 1
         if not self.waiting_for_success_label:
@@ -751,7 +741,6 @@ class TrainRawEpisodeRecorder:
 
         self.recording_active = False
         self.waiting_for_success_label = False
-        self.success_forced = False
         self.episode_success = None
 
         self._episode_dir = None
@@ -771,13 +760,6 @@ class TrainRawEpisodeRecorder:
 
         self.waiting_for_success_label = True
         self.recording_active = False
-        if self.success_forced:
-            logger.info(
-                "Raw recording ended on 'D': VR takeover detected. "
-                "Press '1' (success) to keep it, or '2' (abandon) to delete it. "
-                "Pressing '0' (failure) is not allowed after VR takeover."
-            )
-            return
         logger.info("Raw recording ended on 'D': waiting for success label. Press '0' (failure), '1' (success), or '2' (abandon).")
 
     def handle_success_label_hotkey(self, key: str) -> bool:
@@ -790,13 +772,6 @@ class TrainRawEpisodeRecorder:
         if key == "2":
             self.abandon_episode()
             logger.info("Raw episode abandoned and deleted.")
-            return True
-
-        if key == "0" and self.success_forced:
-            logger.warning(
-                "This episode had VR takeover, so it cannot be labeled as failure. "
-                "Press '1' to keep it as success, or '2' to abandon and delete it."
-            )
             return True
 
         success_value = int(key)

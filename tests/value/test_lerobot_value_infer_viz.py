@@ -46,6 +46,7 @@ class _FakeAccelerator:
 
 class _FakeMeta:
     camera_keys = ["observation.images.front"]
+    video_keys = ["observation.images.front"]
 
     def get_video_file_path(self, ep_idx: int, vid_key: str) -> str:
         return f"videos/{vid_key}/episode-{ep_idx:06d}.mp4"
@@ -194,6 +195,21 @@ def test_get_episode_value_bounds_returns_episode_min_max():
     assert np.isclose(y_max, -0.3)
 
 
+def test_reuse_existing_value_field_does_not_require_checkpoint_path():
+    cfg = ValueInferencePipelineConfig(
+        dataset=ValueInferenceDatasetConfig(repo_id="dummy/repo"),
+        inference=ValueInferenceCheckpointConfig(
+            checkpoint_path="",
+            reuse_existing_value_field=True,
+        ),
+        acp=ValueInferenceACPConfig(enable=False),
+        viz=ValueInferenceVizConfig(enable=False),
+    )
+
+    cfg.validate()
+    assert cfg.inference.checkpoint_path == ""
+
+
 def test_acp_disabled_skips_value_inference_and_uses_default_viz_dir(monkeypatch, tmp_path: Path):
     accelerator = _FakeAccelerator()
     dataset = _FakeDataset()
@@ -219,7 +235,10 @@ def test_acp_disabled_skips_value_inference_and_uses_default_viz_dir(monkeypatch
 
     cfg = ValueInferencePipelineConfig(
         dataset=ValueInferenceDatasetConfig(repo_id="dummy/repo"),
-        inference=ValueInferenceCheckpointConfig(checkpoint_path="unused"),
+        inference=ValueInferenceCheckpointConfig(
+            checkpoint_path="unused",
+            reuse_existing_value_field=True,
+        ),
         acp=ValueInferenceACPConfig(enable=False),
         viz=ValueInferenceVizConfig(enable=True, episodes="all"),
         output_dir=tmp_path / "pipeline_out",

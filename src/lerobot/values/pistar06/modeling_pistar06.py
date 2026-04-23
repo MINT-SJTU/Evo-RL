@@ -8,12 +8,13 @@ import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as functional
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
 from huggingface_hub.errors import HfHubHTTPError
 from safetensors.torch import save_file
@@ -44,6 +45,15 @@ class EpisodeTargetInfo:
     task_index: int
     length: int
     success: bool
+
+
+@dataclass
+class BackboneLoadResult:
+    vision_encoder: nn.Module
+    language_model: nn.Module
+    image_resolution: tuple[int, int]
+    image_mean: tuple[float, float, float]
+    image_std: tuple[float, float, float]
 
 
 def build_bin_centers(
@@ -86,7 +96,7 @@ def compute_normalized_value_targets(
     episode_indices: np.ndarray,
     frame_indices: np.ndarray,
     episode_info: dict[int, EpisodeTargetInfo],
-    task_max_lengths: dict[int, int],
+    task_scales: dict[int, float],
     c_fail_coef: float,
     *,
     clip_min: float = -1.0,
@@ -103,19 +113,21 @@ def compute_normalized_value_targets(
         if ep_idx not in episode_info:
             raise KeyError(f"Missing episode metadata for episode_index={ep_idx}.")
         ep = episode_info[ep_idx]
-        task_max = task_max_lengths.get(ep.task_index)
-        if task_max is None:
-            raise KeyError(f"Missing task max length for task_index={ep.task_index}.")
-        if task_max <= 0:
-            raise ValueError(f"Invalid task max length {task_max} for task_index={ep.task_index}.")
+        task_scale = task_scales.get(ep.task_index)
+        if task_scale is None:
+            raise KeyError(f"Missing task scale for task_index={ep.task_index}.")
+        if task_scale <= 0:
+            raise ValueError(f"Invalid task scale {task_scale} for task_index={ep.task_index}.")
 
         remaining_steps = ep.length - int(frame_indices[i]) - 1
-        c_fail = float(task_max) * c_fail_coef
+        remaining_steps = min(remaining_steps, float(task_scale))
+        c_fail = float(task_scale)
         g = -float(remaining_steps)
         if not ep.success:
-            g -= c_fail
+            #g -= c_fail
+            g -= (c_fail_coef ** remaining_steps) * c_fail 
 
-        denom = float(task_max) + c_fail
+        denom = float(task_scale) + c_fail
         g_norm = g / denom
         targets[i] = np.clip(g_norm, clip_min, clip_max)
 
@@ -253,42 +265,145 @@ def _load_language_model(
     return language_model
 
 
+class Pi05VisionBackbone(nn.Module):
+    def __init__(self, paligemma: nn.Module):
+        super().__init__()
+        self.paligemma = paligemma
+        vision_config = getattr(paligemma.config, "vision_config", None)
+        projection_dim = getattr(vision_config, "projection_dim", None)
+        hidden_size = getattr(vision_config, "hidden_size", projection_dim)
+        if projection_dim is None and hidden_size is None:
+            raise ValueError("PI05 PaliGemma vision config must expose projection_dim or hidden_size.")
+        self.config = SimpleNamespace(
+            projection_dim=int(projection_dim if projection_dim is not None else hidden_size),
+            hidden_size=int(hidden_size if hidden_size is not None else projection_dim),
+        )
+
+    def get_image_features(self, pixel_values: Tensor) -> Tensor:
+        image_features = self.paligemma.model.get_image_features(pixel_values)
+        if image_features.ndim == 3:
+            return image_features.mean(dim=1)
+        if image_features.ndim != 2:
+            raise ValueError(
+                "PI05 vision backbone returned unsupported features with shape "
+                f"{tuple(image_features.shape)}."
+            )
+        return image_features
+
+
+class Pi05LanguageBackbone(nn.Module):
+    def __init__(self, language_model: nn.Module):
+        super().__init__()
+        self.language_model = language_model
+        self.config = language_model.config
+
+    def forward(self, input_ids: Tensor, attention_mask: Tensor, return_dict: bool = True):
+        return self.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=return_dict,
+        )
+
+
+def _load_hf_backbone_bundle(cfg: Pistar06Config, dtype: torch.dtype) -> BackboneLoadResult:
+    if AutoModel is None or AutoImageProcessor is None:
+        raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
+
+    vision_encoder = AutoModel.from_pretrained(
+        cfg.vision_repo_id,
+        revision=cfg.vision_revision,
+        torch_dtype=dtype,
+    )
+    language_model = _load_language_model(
+        repo_id=cfg.language_repo_id,
+        revision=cfg.language_revision,
+        dtype=dtype,
+    )
+
+    image_processor = AutoImageProcessor.from_pretrained(
+        cfg.vision_repo_id,
+        revision=cfg.vision_revision,
+        use_fast=True,
+    )
+    image_height, image_width = _resolve_image_size(image_processor)
+    image_mean, image_std = _resolve_norm_stats(image_processor)
+    return BackboneLoadResult(
+        vision_encoder=vision_encoder,
+        language_model=language_model,
+        image_resolution=(image_height, image_width),
+        image_mean=image_mean,
+        image_std=image_std,
+    )
+
+
+def _load_pi05_backbone_bundle(cfg: Pistar06Config) -> BackboneLoadResult:
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+
+    resolved_source = cfg.pi05_repo_id
+    if not os.path.isdir(resolved_source):
+        resolved_source = snapshot_download(
+            repo_id=cfg.pi05_repo_id,
+            revision=cfg.pi05_revision,
+            allow_patterns=["*.json", "*.safetensors"],
+        )
+
+    pi05_config = PreTrainedConfig.from_pretrained(pretrained_name_or_path=resolved_source)
+    if not isinstance(pi05_config, PI05Config):
+        raise TypeError(
+            f"Expected PI05Config from '{cfg.pi05_repo_id}', got {type(pi05_config)} instead."
+        )
+
+    pi05_config.device = "cpu"
+    pi05_config.freeze_vision_encoder = False
+    pi05_config.train_expert_only = False
+    pi05_config.gradient_checkpointing = False
+
+    pi05_policy = PI05Policy.from_pretrained(
+        pretrained_name_or_path=resolved_source,
+        config=pi05_config,
+        strict=False,
+    )
+    paligemma = pi05_policy.model.paligemma_with_expert.paligemma
+    if not hasattr(paligemma, "language_model") or not hasattr(paligemma, "model"):
+        raise RuntimeError(
+            f"PI05 checkpoint '{cfg.pi05_repo_id}' does not expose expected PaliGemma modules."
+        )
+
+    return BackboneLoadResult(
+        vision_encoder=Pi05VisionBackbone(paligemma),
+        language_model=Pi05LanguageBackbone(paligemma.language_model),
+        image_resolution=tuple(int(v) for v in pi05_config.image_resolution),
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+    )
+
+
 class Pistar06Model(nn.Module):
     def __init__(self, cfg: Pistar06Config):
         super().__init__()
-        if AutoModel is None or AutoImageProcessor is None:
+        if cfg.backbone_source == "hf" and (AutoModel is None or AutoImageProcessor is None):
             raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
 
         self.cfg = cfg
         self.model_dtype = _resolve_load_dtype(cfg.dtype)
+        if cfg.backbone_source == "pi05":
+            backbone_bundle = _load_pi05_backbone_bundle(cfg)
+        else:
+            backbone_bundle = _load_hf_backbone_bundle(cfg, self.model_dtype)
 
-        self.vision_encoder = AutoModel.from_pretrained(
-            cfg.vision_repo_id,
-            revision=cfg.vision_revision,
-            torch_dtype=self.model_dtype,
-        )
-        self.language_model = _load_language_model(
-            repo_id=cfg.language_repo_id,
-            revision=cfg.language_revision,
-            dtype=self.model_dtype,
-        )
-
-        image_processor = AutoImageProcessor.from_pretrained(
-            cfg.vision_repo_id,
-            revision=cfg.vision_revision,
-            use_fast=True,
-        )
-        image_height, image_width = _resolve_image_size(image_processor)
-        image_mean, image_std = _resolve_norm_stats(image_processor)
-        self.image_resolution = (image_height, image_width)
+        self.vision_encoder = backbone_bundle.vision_encoder
+        self.language_model = backbone_bundle.language_model
+        self.image_resolution = backbone_bundle.image_resolution
         self.register_buffer(
             "image_mean",
-            torch.tensor(image_mean, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            torch.tensor(backbone_bundle.image_mean, dtype=torch.float32).view(1, 1, 3, 1, 1),
             persistent=False,
         )
         self.register_buffer(
             "image_std",
-            torch.tensor(image_std, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            torch.tensor(backbone_bundle.image_std, dtype=torch.float32).view(1, 1, 3, 1, 1),
             persistent=False,
         )
 
@@ -501,6 +616,9 @@ class Pistar06Policy(PreTrainedPolicy):
                 if not any(key.startswith(prefix) for prefix in excluded_prefixes)
             }
 
+        # safetensors rejects multiple keys pointing at the same storage (e.g. tied LM embeddings in Paligemma).
+        state_dict = {k: v.detach().clone().contiguous() for k, v in state_dict.items()}
+
         save_file(state_dict, str(save_directory / SAFETENSORS_SINGLE_FILE))
         save_info = {
             "format_version": 1,
@@ -641,6 +759,29 @@ class Pistar06Policy(PreTrainedPolicy):
         bin_centers = self.bin_centers.to(device=logits.device)
         return expected_value_from_logits(logits, bin_centers)
 
+    @staticmethod
+    def _compute_task_length_scales(
+        task_lengths: dict[int, list[int]],
+        quantile: float,
+    ) -> dict[int, float]:
+        if not 0.0 < quantile <= 1.0:
+            raise ValueError("'length_scale_quantile' must be within (0, 1].")
+
+        task_scales: dict[int, float] = {}
+        for task_index, lengths in task_lengths.items():
+            if len(lengths) == 0:
+                raise ValueError(f"No episode lengths collected for task_index={task_index}.")
+            lengths_np = np.asarray(lengths, dtype=np.float32)
+            if np.any(lengths_np <= 0):
+                raise ValueError(f"Invalid non-positive episode lengths for task_index={task_index}.")
+            task_scale = float(np.quantile(lengths_np, quantile))
+            if task_scale <= 0:
+                raise ValueError(
+                    f"Computed non-positive task scale {task_scale} for task_index={task_index}."
+                )
+            task_scales[task_index] = task_scale
+        return task_scales
+
     def build_training_raw_batch_hook(self, dataset, targets_cfg):
         raw_frames = dataset.hf_dataset.with_format(None)
         frame_count = len(raw_frames)
@@ -657,7 +798,7 @@ class Pistar06Policy(PreTrainedPolicy):
         has_success = targets_cfg.success_field in episodes_ds.column_names
 
         episode_info: dict[int, EpisodeTargetInfo] = {}
-        task_max_length: dict[int, int] = {}
+        task_lengths: dict[int, list[int]] = {}
         for i in range(n_episodes):
             ep_idx = int(episodes["episode_index"][i])
             ep_length = int(episodes["length"][i])
@@ -681,13 +822,18 @@ class Pistar06Policy(PreTrainedPolicy):
                 length=ep_length,
                 success=ep_success,
             )
-            task_max_length[task_index] = max(task_max_length.get(task_index, 0), ep_length)
+            task_lengths.setdefault(task_index, []).append(ep_length)
+
+        task_scales = self._compute_task_length_scales(
+            task_lengths=task_lengths,
+            quantile=targets_cfg.length_scale_quantile,
+        )
 
         value_targets = compute_normalized_value_targets(
             episode_indices=episode_indices,
             frame_indices=frame_indices,
             episode_info=episode_info,
-            task_max_lengths=task_max_length,
+            task_scales=task_scales,
             c_fail_coef=targets_cfg.c_fail_coef,
             clip_min=self.config.bin_min,
             clip_max=self.config.bin_max,
