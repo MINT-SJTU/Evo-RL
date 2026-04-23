@@ -22,6 +22,9 @@ python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --cameras base:254322073516 left_wrist:352122273239  right_wrist:352122274400 \
 --cam-width 424 --cam-height 240 \
 --duration 0.05 \
---acp-enable --acp-use-cfg --acp-cfg-beta 1.1 \
+# old
+#--acp-enable --acp-use-cfg --acp-cfg-beta 1.2 \
+# new 
+#--acp-disable --acp-unuse-cfg
 --raw-train-record-dir /home/user/workspace/zsj/datasets/arx5/raw_socks_robot \
 2>&1 | grep -v "ARX方舟无限"
