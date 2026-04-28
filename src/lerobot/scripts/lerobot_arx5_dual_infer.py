@@ -1313,16 +1313,30 @@ def main() -> None:
     parser.add_argument("--policy-path", type=str, default=DEFAULT_POLICY_PATH)
     parser.add_argument("--policy-device", type=str, default=None)
     parser.add_argument(
-        "--acp-disenable",
-        action="store_false",
+        "--acp-enable",
+        dest="acp_enable",
+        action="store_true",
         default=True,
-        help="If set, append the ACP positive tag during inference.",
+        help="Enable ACP-tagged inference.",
     )
     parser.add_argument(
-        "--acp-unuse-cfg",
+        "--acp-disable",
+        dest="acp_enable",
         action="store_false",
+        help="Disable ACP-tagged inference.",
+    )
+    parser.add_argument(
+        "--acp-use-cfg",
+        dest="acp_use_cfg",
+        action="store_true",
         default=True,
-        help="If set, run both ACP-tagged and untagged inference branches and combine them with CFG.",
+        help="Run both ACP-tagged and untagged branches and combine them with CFG.",
+    )
+    parser.add_argument(
+        "--acp-no-cfg",
+        dest="acp_use_cfg",
+        action="store_false",
+        help="Use ACP-tagged branch only without CFG blending.",
     )
     parser.add_argument(
         "--acp-cfg-beta",
