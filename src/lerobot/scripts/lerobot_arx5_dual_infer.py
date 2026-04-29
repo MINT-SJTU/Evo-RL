@@ -831,94 +831,7 @@ def _refresh_acp_runtime_states(
     return cond_runtime_state, uncond_runtime_state
 
 
-class _AsyncChunkPredictor:
-    """Background chunk predictor used to overlap inference and execution."""
-
-    def __init__(
-        self,
-        *,
-        dataset_features: dict[str, dict[str, Any]],
-        policy,
-        preprocessor,
-        postprocessor,
-        device,
-        task: str,
-        use_amp: bool,
-        full_chunk_steps: int,
-        acp_inference: ACPInferenceConfig,
-        cond_runtime_state: dict[str, Any] | None = None,
-        uncond_runtime_state: dict[str, Any] | None = None,
-    ) -> None:
-        self._dataset_features = dataset_features
-        self._policy = policy
-        self._preprocessor = preprocessor
-        self._postprocessor = postprocessor
-        self._device = device
-        self._task = task
-        self._use_amp = use_amp
-        self._full_chunk_steps = full_chunk_steps
-        self._acp_inference = acp_inference
-        self._cond_runtime_state = cond_runtime_state
-        self._uncond_runtime_state = uncond_runtime_state
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._result: list[dict[str, float]] | None = None
-        self._error: Exception | None = None
-
-    def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
-    def start(
-        self,
-        *,
-        observation: dict[str, Any],
-    ) -> bool:
-        if self.is_running():
-            return False
-
-        def _worker() -> None:
-            try:
-                actions = _predict_action_chunk_with_acp(
-                    robot_observation=observation,
-                    dataset_features=self._dataset_features,
-                    policy=self._policy,
-                    preprocessor=self._preprocessor,
-                    postprocessor=self._postprocessor,
-                    device=self._device,
-                    task=self._task,
-                    robot_type="arx5_dual",
-                    execution_horizon=self._full_chunk_steps,
-                    use_amp=self._use_amp,
-                    acp_inference=self._acp_inference,
-                    cond_runtime_state=self._cond_runtime_state,
-                    uncond_runtime_state=self._uncond_runtime_state,
-                )
-                with self._lock:
-                    self._result = actions
-            except Exception as exc:
-                with self._lock:
-                    self._error = exc
-
-        self._thread = threading.Thread(target=_worker, daemon=True)
-        self._thread.start()
-        return True
-
-    def consume_ready(self) -> list[dict[str, float]] | None:
-        if self.is_running():
-            return None
-        with self._lock:
-            if self._error is not None:
-                exc = self._error
-                self._error = None
-                raise RuntimeError("Background action-chunk inference failed.") from exc
-            if self._result is None:
-                return None
-            out = self._result
-            self._result = None
-            return out
-
-
-def _execute_dual_chunk_async(
+def _execute_dual_chunk(
     *,
     left_arm: ARX5ArmClient,
     right_arm: ARX5ArmClient,
@@ -927,8 +840,6 @@ def _execute_dual_chunk_async(
     step_duration_s: float,
     keyboard: KeyboardListener | None,
     safe_mode: bool,
-    trigger_next_prediction: callable,
-    trigger_step: int,
     recorder: TrainRawEpisodeRecorder | None = None,
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None,
     joint_traj_recorder: JointTrajectoryRecorder | None = None,
@@ -936,8 +847,6 @@ def _execute_dual_chunk_async(
     state = LoopState.RUNNING
     request_next_chunk = not safe_mode
     running = True
-    started_next_prediction = False
-    trigger_step = max(1, int(trigger_step))
     for index, action in enumerate(actions):
         step_start = time.perf_counter()
         if keyboard is not None:
@@ -981,14 +890,6 @@ def _execute_dual_chunk_async(
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
             recorder.record_policy_step(action_dict=action, observation=observation_for_step)
-
-        # Trigger async inference while continuing to execute the remaining actions.
-        if not started_next_prediction and (index + 1) >= trigger_step:
-            latest_observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-            try:
-                started_next_prediction = bool(trigger_next_prediction(latest_observation))
-            except Exception:
-                logger.exception("Failed to trigger background chunk inference.")
 
         step_elapsed = time.perf_counter() - step_start
         if step_elapsed > step_duration_s:
@@ -1341,7 +1242,7 @@ def main() -> None:
     parser.add_argument(
         "--acp-cfg-beta",
         type=float,
-        default=1.2,
+        default=1.0,
         help="CFG strength used when --acp-use-cfg is enabled.",
     )
     parser.add_argument(
@@ -1358,8 +1259,8 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "Step index to trigger background next-chunk inference. "
-            "This does not truncate execution of the current predicted action chunk."
+            "Number of predicted actions to execute per chunk. "
+            "If omitted, use the full policy action chunk length."
         ),
     )
     parser.add_argument("--duration", type=float, default=0.1, help="Seconds per action step.")
@@ -1584,22 +1485,6 @@ def main() -> None:
             uncond_runtime_state=uncond_policy_runtime_state,
         )
 
-        async_predictor = _AsyncChunkPredictor(
-            dataset_features=dataset_features,
-            policy=policy,
-            preprocessor=preprocessor,
-            postprocessor=postprocessor,
-            device=device,
-            task=args.task,
-            use_amp=policy_cfg.use_amp,
-            full_chunk_steps=int(policy_cfg.n_action_steps),
-            acp_inference=acp_inference,
-            cond_runtime_state=cond_policy_runtime_state,
-            uncond_runtime_state=uncond_policy_runtime_state,
-        )
-        prefetched: list[dict[str, float]] | None = None
-        has_executed_chunk = False
-
         while running:
             if keyboard is not None:
                 previous_state = state
@@ -1635,7 +1520,6 @@ def main() -> None:
                         cond_runtime_state=cond_policy_runtime_state,
                         uncond_runtime_state=uncond_policy_runtime_state,
                     )
-                    prefetched = None
                     state = LoopState.STOPPED
                     request_next_chunk = False if args.safe_mode else True
                     continue
@@ -1649,7 +1533,6 @@ def main() -> None:
                         cond_runtime_state=cond_policy_runtime_state,
                         uncond_runtime_state=uncond_policy_runtime_state,
                     )
-                    prefetched = None
             if not running:
                 break
             if state != LoopState.RUNNING:
@@ -1659,18 +1542,8 @@ def main() -> None:
                 time.sleep(0.05)
                 continue
 
-            used_prefetched = prefetched is not None
             try:
-                if used_prefetched:
-                    actions = prefetched
-                    prefetched = None
-                    observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-                else:
-                    if has_executed_chunk:
-                        logger.warning(
-                            "**********prefetched is None：后台预取未就绪，回退到同步推理。**********"
-                        )
-                    observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+                observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
             except (DeviceNotConnectedError, TimeoutError, RuntimeError) as error:
                 camera_failure = error
                 _home_dual_arms_after_camera_failure(left_arm=left_arm, right_arm=right_arm, error=error)
@@ -1679,29 +1552,24 @@ def main() -> None:
                 running = False
                 break
 
-            if not used_prefetched:
-                sync_infer_start = time.perf_counter()
-                actions = _predict_action_chunk_with_acp(
-                    robot_observation=observation,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    execution_horizon=int(policy_cfg.n_action_steps),
-                    use_amp=policy_cfg.use_amp,
-                    acp_inference=acp_inference,
-                    cond_runtime_state=cond_policy_runtime_state,
-                    uncond_runtime_state=uncond_policy_runtime_state,
-                )
-                sync_infer_elapsed = time.perf_counter() - sync_infer_start
-                if has_executed_chunk:
-                    logger.warning(
-                        "**********同步推理耗时：%.4fs（prefetched 为 None）**********",
-                        sync_infer_elapsed,
-                    )
+            sync_infer_start = time.perf_counter()
+            actions = _predict_action_chunk_with_acp(
+                robot_observation=observation,
+                dataset_features=dataset_features,
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                device=device,
+                task=args.task,
+                robot_type="arx5_dual",
+                execution_horizon=execution_horizon,
+                use_amp=policy_cfg.use_amp,
+                acp_inference=acp_inference,
+                cond_runtime_state=cond_policy_runtime_state,
+                uncond_runtime_state=uncond_policy_runtime_state,
+            )
+            sync_infer_elapsed = time.perf_counter() - sync_infer_start
+            logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
             if args.safe_mode:
                 actions = _clip_safe_actions(
@@ -1744,13 +1612,7 @@ def main() -> None:
             if raw_recorder is not None and raw_recorder.recording_active:
                 raw_recorder.start_policy_segment()
 
-            # `execution_horizon` is used as the async prefetch trigger step only.
-            # We still execute the full `actions` chunk returned by the model.
-            if len(actions) <= 1:
-                trigger_step = 1
-            else:
-                trigger_step = min(max(1, int(execution_horizon)), len(actions) - 1)
-            state, request_next_chunk, running = _execute_dual_chunk_async(
+            state, request_next_chunk, running = _execute_dual_chunk(
                 left_arm=left_arm,
                 right_arm=right_arm,
                 cameras=cameras,
@@ -1758,20 +1620,10 @@ def main() -> None:
                 step_duration_s=args.duration,
                 keyboard=keyboard,
                 safe_mode=args.safe_mode,
-                trigger_next_prediction=(lambda obs: async_predictor.start(observation=obs)),
-                trigger_step=trigger_step,
                 recorder=raw_recorder,
                 end_traj_recorder=end_traj_recorder,
                 joint_traj_recorder=joint_traj_recorder,
             )
-            try:
-                ready = async_predictor.consume_ready()
-            except Exception:
-                logger.exception("Background chunk inference failed; falling back to synchronous prediction.")
-                ready = None
-            if state == LoopState.RUNNING and running:
-                prefetched = ready
-            has_executed_chunk = True
             if args.safe_mode and state == LoopState.RUNNING:
                 logger.info("安全模式：请按 [I] 获取下一段 chunk。")
     finally:
