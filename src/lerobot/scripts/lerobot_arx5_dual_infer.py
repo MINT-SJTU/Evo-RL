@@ -1242,7 +1242,7 @@ def main() -> None:
     parser.add_argument(
         "--acp-cfg-beta",
         type=float,
-        default=1.2,
+        default=1.0,
         help="CFG strength used when --acp-use-cfg is enabled.",
     )
     parser.add_argument(
