@@ -373,7 +373,7 @@ def train(
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames") and not cfg.acp.instance_table_path:
+    if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
@@ -414,10 +414,11 @@ def train(
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
 
-    # Use effective batch size for proper epoch calculation in distributed training
+    # MetricsTracker multiplies by accelerator.num_processes when stepping, so pass the
+    # per-process batch size here to avoid double-counting distributed samples.
     effective_batch_size = cfg.batch_size * accelerator.num_processes
     train_tracker = MetricsTracker(
-        effective_batch_size,
+        cfg.batch_size,
         dataset.num_frames,
         dataset.num_episodes,
         train_metrics,
