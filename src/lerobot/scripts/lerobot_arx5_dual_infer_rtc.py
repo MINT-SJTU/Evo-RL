@@ -703,6 +703,7 @@ class _RTCRealtimeCoordinator:
         s_min: int,
         latency_buffer_len: int,
         latency_default_steps: int,
+        rtc_execution_horizon: int | None,
     ) -> None:
         self._dataset_features = dataset_features
         self._policy = policy
@@ -717,6 +718,9 @@ class _RTCRealtimeCoordinator:
         self._s_min = max(1, int(s_min))
         self._latency_default_steps = max(0, int(latency_default_steps))
         self._latency_steps = deque(maxlen=max(1, int(latency_buffer_len)))
+        self._rtc_execution_horizon = (
+            None if rtc_execution_horizon is None else max(1, int(rtc_execution_horizon))
+        )
 
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
@@ -860,6 +864,11 @@ class _RTCRealtimeCoordinator:
                     else self._raw_chunk[executed_steps:].detach()
                 )
                 remaining_horizon = max(1, len(self._actions) - executed_steps)
+                inference_horizon = (
+                    self._rtc_execution_horizon
+                    if self._rtc_execution_horizon is not None
+                    else remaining_horizon
+                )
                 inference_delay_steps = (
                     max(self._latency_steps)
                     if len(self._latency_steps) > 0
@@ -872,7 +881,7 @@ class _RTCRealtimeCoordinator:
                     observation=observation,
                     prev_chunk_left_over=previous_raw,
                     inference_delay_steps=inference_delay_steps,
-                    execution_horizon=remaining_horizon,
+                    execution_horizon=inference_horizon,
                 )
             except Exception:
                 logger.exception("Background RTC replanning failed; keep current action chunk.")
@@ -1276,6 +1285,15 @@ def main() -> None:
         help="Minimum executed steps before triggering background RTC replanning.",
     )
     parser.add_argument(
+        "--rtc-execution-horizon",
+        type=int,
+        default=None,
+        help=(
+            "RTC guidance execution horizon passed to policy.predict_action_chunk(execution_horizon=...). "
+            "If unset, use current leftover horizon len(A_cur)-s."
+        ),
+    )
+    parser.add_argument(
         "--rtc-latency-buffer-len",
         type=int,
         default=8,
@@ -1370,6 +1388,8 @@ def main() -> None:
         parser.error("--execution-horizon 必须为正数。")
     if args.rtc_s_min is not None and args.rtc_s_min <= 0:
         parser.error("--rtc-s-min 必须为正数。")
+    if args.rtc_execution_horizon is not None and args.rtc_execution_horizon <= 0:
+        parser.error("--rtc-execution-horizon 必须为正数。")
     if args.rtc_latency_buffer_len <= 0:
         parser.error("--rtc-latency-buffer-len 必须为正数。")
     if args.rtc_latency_default_steps < 0:
@@ -1513,6 +1533,7 @@ def main() -> None:
             s_min=rtc_s_min,
             latency_buffer_len=args.rtc_latency_buffer_len,
             latency_default_steps=args.rtc_latency_default_steps,
+            rtc_execution_horizon=args.rtc_execution_horizon,
         )
         rtc_coordinator.start()
         coordinator_ready = False
