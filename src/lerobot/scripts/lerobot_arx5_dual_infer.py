@@ -1022,6 +1022,7 @@ def _run_vr_teleop_session(
             self.arm_controllers = {}
             self._hold_joint_targets: dict[str, np.ndarray] = {}
             self._initial_gripper_by_arm: dict[str, float] = {}
+            self._prev_active_by_arm = {arm_name: False for arm_name in self.can_ports}
             self._vr_gripper_hold_until_trigger = {arm_name: True for arm_name in self.can_ports}
             self._last_vr_images: dict[str, np.ndarray] = {}
             for arm_name in ARM_ORDER:
@@ -1058,7 +1059,6 @@ def _run_vr_teleop_session(
         def _update_gripper_target(self):
             if self._request_vr_exit_if_needed():
                 return
-            super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
                 if not should_hold:
                     continue
@@ -1067,6 +1067,17 @@ def _run_vr_teleop_session(
                 if self.xr_client.get_key_value_by_name(trigger_name) > 0.12:
                     self._vr_gripper_hold_until_trigger[arm_name] = False
 
+            if any(self._vr_gripper_hold_until_trigger.values()):
+                for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
+                    if not should_hold:
+                        continue
+                    gripper_config = self.manipulator_config[arm_name]["gripper_config"]
+                    joint_name = gripper_config["joint_names"][0]
+                    self.gripper_pos_target[arm_name][joint_name] = self._initial_gripper_by_arm[arm_name]
+                if all(self._vr_gripper_hold_until_trigger.values()):
+                    return
+
+            super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
                 if not should_hold:
                     continue
@@ -1080,7 +1091,19 @@ def _run_vr_teleop_session(
             q_cmd_by_arm: dict[str, np.ndarray] = {}
             gripper_by_arm: dict[str, float] = {}
             for arm_name, controller in self.arm_controllers.items():
-                if self.active.get(arm_name, False):
+                is_active = bool(self.active.get(arm_name, False))
+                was_active = bool(self._prev_active_by_arm.get(arm_name, False))
+                just_activated = is_active and not was_active
+
+                if just_activated:
+                    current_q = np.asarray(controller.get_joint_positions()[:6], dtype=np.float64)
+                    q_slice = self.placo_arm_joint_slice[arm_name]
+                    self.placo_robot.state.q[q_slice] = current_q
+                    self.placo_robot.update_kinematics()
+                    self.sync_end_effector_poses_to_placo_tasks()
+                    self._hold_joint_targets[arm_name] = current_q.copy()
+                    q_cmd = current_q
+                elif is_active:
                     q_cmd = self.placo_robot.state.q[self.placo_arm_joint_slice[arm_name]].copy()
                     self._hold_joint_targets[arm_name] = q_cmd.copy()
                 else:
@@ -1089,6 +1112,7 @@ def _run_vr_teleop_session(
                         q_cmd = np.asarray(controller.get_joint_positions()[:6], dtype=np.float64)
                         self._hold_joint_targets[arm_name] = q_cmd.copy()
                 controller.set_joint_positions(q_cmd)
+                self._prev_active_by_arm[arm_name] = is_active
                 q_cmd_by_arm[arm_name] = np.asarray(q_cmd, dtype=np.float64)
 
                 gripper_config = self.manipulator_config[arm_name]["gripper_config"]
