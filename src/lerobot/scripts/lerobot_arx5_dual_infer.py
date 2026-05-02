@@ -219,6 +219,111 @@ class JointTrajectoryRecorder:
         return output_path
 
 
+class JointVelocityRecorder:
+    """Record dual-arm joint velocities (SDK + finite-difference) with chunk metadata.
+
+    Each sample carries the action-chunk index and the in-chunk step offset, plus a
+    ``source`` tag describing whether the executed command came directly from policy
+    inference (``policy``), was modified by the safe-mode joint-step clip
+    (``policy_safe_clipped``), or originated outside the policy chunk
+    (``non_inference``).
+    """
+
+    def __init__(self, output_dir: Path):
+        self.output_dir = output_dir.expanduser().resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._start_time = time.perf_counter()
+        self._samples: list[dict[str, Any]] = []
+        self._enabled = False
+        self._prev_pos: dict[str, list[float]] | None = None
+        self._prev_t: float | None = None
+
+    def start(self) -> None:
+        self._enabled = True
+        self._start_time = time.perf_counter()
+        self._prev_pos = None
+        self._prev_t = None
+
+    def stop(self) -> None:
+        self._enabled = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def num_samples(self) -> int:
+        return len(self._samples)
+
+    def record(
+        self,
+        *,
+        step_index: int,
+        chunk_index: int | None,
+        step_in_chunk: int | None,
+        source: str,
+        left_arm: ARX5ArmClient,
+        right_arm: ARX5ArmClient,
+        left_cmd: list[float] | None = None,
+        right_cmd: list[float] | None = None,
+    ) -> None:
+        if not self._enabled:
+            return
+        now = time.perf_counter()
+        left_pos = [float(v) for v in left_arm.get_state()[:7]]
+        right_pos = [float(v) for v in right_arm.get_state()[:7]]
+        left_vel_sdk = [float(v) for v in left_arm.get_joint_velocities()[:6]]
+        right_vel_sdk = [float(v) for v in right_arm.get_joint_velocities()[:6]]
+        if self._prev_pos is None or self._prev_t is None:
+            left_vel_diff = [float("nan")] * 7
+            right_vel_diff = [float("nan")] * 7
+        else:
+            dt = max(1e-6, now - self._prev_t)
+            left_vel_diff = [
+                (cur - prev) / dt for cur, prev in zip(left_pos, self._prev_pos["left"], strict=False)
+            ]
+            right_vel_diff = [
+                (cur - prev) / dt for cur, prev in zip(right_pos, self._prev_pos["right"], strict=False)
+            ]
+        self._prev_pos = {"left": list(left_pos), "right": list(right_pos)}
+        self._prev_t = now
+
+        def _cmd_or_nan(cmd: list[float] | None) -> list[float]:
+            if cmd is None:
+                return [float("nan")] * 7
+            padded = [float(v) for v in cmd[:7]]
+            if len(padded) < 7:
+                padded.extend([float("nan")] * (7 - len(padded)))
+            return padded
+
+        sample = {
+            "step_index": int(step_index),
+            "t_rel_s": float(now - self._start_time),
+            "chunk_index": int(chunk_index) if chunk_index is not None else -1,
+            "step_in_chunk": int(step_in_chunk) if step_in_chunk is not None else -1,
+            "source": str(source),
+            "left_pos": left_pos,
+            "right_pos": right_pos,
+            "left_cmd": _cmd_or_nan(left_cmd),
+            "right_cmd": _cmd_or_nan(right_cmd),
+            "left_vel_sdk": left_vel_sdk,
+            "right_vel_sdk": right_vel_sdk,
+            "left_vel_diff": left_vel_diff,
+            "right_vel_diff": right_vel_diff,
+        }
+        self._samples.append(sample)
+
+    def save(self) -> Path:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = self.output_dir / f"joint_vel_{timestamp}.json"
+        payload = {
+            "num_samples": len(self._samples),
+            "samples": self._samples,
+        }
+        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return output_path
+
+
 def _is_any_vr_arm_active(active_by_arm: dict[str, bool]) -> bool:
     return any(bool(active_by_arm.get(arm_name, False)) for arm_name in ARM_ORDER)
 
@@ -436,6 +541,7 @@ def _run_keyboard_command(
     recorder: TrainRawEpisodeRecorder | None = None,
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None,
     joint_traj_recorder: JointTrajectoryRecorder | None = None,
+    joint_vel_recorder: JointVelocityRecorder | None = None,
 ) -> tuple[LoopState, bool, bool, bool]:
     """Returns (state, request_next_chunk, running, vr_teleop_requested)."""
     if recorder is not None and recorder.handle_success_label_hotkey(key or ""):
@@ -494,6 +600,9 @@ def _run_keyboard_command(
         if joint_traj_recorder is not None and joint_traj_recorder.enabled:
             joint_traj_recorder.stop()
             logger.info("已停止关节轨迹记录（Space）。")
+        if joint_vel_recorder is not None and joint_vel_recorder.enabled:
+            joint_vel_recorder.stop()
+            logger.info("已停止关节速度记录（Space）。")
         logger.info("急停：已保持当前姿态。")
         return LoopState.STOPPED, False, True, False
     if key == "q":
@@ -539,6 +648,9 @@ def _run_keyboard_command(
             if joint_traj_recorder is not None and not joint_traj_recorder.enabled:
                 joint_traj_recorder.start()
                 logger.info("已开始关节轨迹记录（R）。")
+            if joint_vel_recorder is not None and not joint_vel_recorder.enabled:
+                joint_vel_recorder.start()
+                logger.info("已开始关节速度记录（R）。")
             left_arm.hold_position()
             right_arm.hold_position()
             time.sleep(0.1)
@@ -843,10 +955,17 @@ def _execute_dual_chunk(
     recorder: TrainRawEpisodeRecorder | None = None,
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None,
     joint_traj_recorder: JointTrajectoryRecorder | None = None,
-) -> tuple[LoopState, bool, bool]:
+    joint_vel_recorder: JointVelocityRecorder | None = None,
+    chunk_index: int = -1,
+    clipped_mask: list[bool] | None = None,
+    global_step_start: int = 0,
+) -> tuple[LoopState, bool, bool, int]:
     state = LoopState.RUNNING
     request_next_chunk = not safe_mode
     running = True
+    global_step = int(global_step_start)
+    if clipped_mask is None:
+        clipped_mask = [False] * len(actions)
     for index, action in enumerate(actions):
         step_start = time.perf_counter()
         if keyboard is not None:
@@ -861,6 +980,7 @@ def _execute_dual_chunk(
                 recorder=recorder,
                 end_traj_recorder=end_traj_recorder,
                 joint_traj_recorder=joint_traj_recorder,
+                joint_vel_recorder=joint_vel_recorder,
             )
             if state != LoopState.RUNNING or not running:
                 break
@@ -887,6 +1007,24 @@ def _execute_dual_chunk(
                 left_arm=left_arm,
                 right_arm=right_arm,
             )
+        if joint_vel_recorder is not None:
+            source = (
+                "policy_safe_clipped"
+                if index < len(clipped_mask) and clipped_mask[index]
+                else "policy"
+            )
+            joint_vel_recorder.record(
+                step_index=global_step,
+                chunk_index=chunk_index,
+                step_in_chunk=index,
+                source=source,
+                left_arm=left_arm,
+                right_arm=right_arm,
+                left_cmd=left_joint,
+                right_cmd=right_joint,
+            )
+            global_step += 1
+
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
             recorder.record_policy_step(action_dict=action, observation=observation_for_step)
@@ -904,7 +1042,7 @@ def _execute_dual_chunk(
 
     if recorder is not None:
         recorder.finish_active_segment()
-    return state, request_next_chunk, running
+    return state, request_next_chunk, running, global_step
 
 
 def _run_vr_teleop_session(
@@ -1326,6 +1464,15 @@ def main() -> None:
         help="If set, record and save commanded+actual dual-arm joint trajectories as JSON. Press [R] to start and [Space] to stop.",
     )
     parser.add_argument(
+        "--joint-vel-dir",
+        type=Path,
+        default=None,
+        help=(
+            "If set, record dual-arm joint velocities (SDK 6-DoF + finite-difference 7-DoF) "
+            "with action-chunk metadata as JSON. Press [R] to start and [Space] to stop."
+        ),
+    )
+    parser.add_argument(
         "--raw-train-record-dir",
         type=Path,
         default=None,
@@ -1426,6 +1573,9 @@ def main() -> None:
     joint_traj_recorder: JointTrajectoryRecorder | None = None
     if args.joint_traj_dir is not None:
         joint_traj_recorder = JointTrajectoryRecorder(args.joint_traj_dir)
+    joint_vel_recorder: JointVelocityRecorder | None = None
+    if args.joint_vel_dir is not None:
+        joint_vel_recorder = JointVelocityRecorder(args.joint_vel_dir)
 
     execution_horizon = args.execution_horizon or int(policy_cfg.n_action_steps)
     acp_inference = ACPInferenceConfig(
@@ -1441,6 +1591,8 @@ def main() -> None:
     round_index = _discover_next_round_index(args.record_dir) if args.record_dir is not None else 0
     running = True
     camera_failure: Exception | None = None
+    chunk_index = 0
+    joint_vel_global_step = 0
 
     try:
         logger.info("Connecting cameras.")
@@ -1499,6 +1651,7 @@ def main() -> None:
                     recorder=raw_recorder,
                     end_traj_recorder=end_traj_recorder,
                     joint_traj_recorder=joint_traj_recorder,
+                    joint_vel_recorder=joint_vel_recorder,
                 )
                 if vr_req:
                     left_arm, right_arm = _run_vr_teleop_session(
@@ -1572,11 +1725,18 @@ def main() -> None:
             logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
             if args.safe_mode:
+                actions_pre_clip = actions
                 actions = _clip_safe_actions(
-                    actions,
+                    actions_pre_clip,
                     current_state=current_state,
                     max_joint_step=args.max_joint_step,
                 )
+                clipped_mask = [
+                    any(abs(float(pre[key]) - float(post[key])) > 1e-12 for key in STATE_KEYS)
+                    for pre, post in zip(actions_pre_clip, actions, strict=False)
+                ]
+            else:
+                clipped_mask = [False] * len(actions)
             if not actions:
                 logger.warning("**********策略未返回动作，正在重试。**********")
                 time.sleep(0.1)
@@ -1612,7 +1772,8 @@ def main() -> None:
             if raw_recorder is not None and raw_recorder.recording_active:
                 raw_recorder.start_policy_segment()
 
-            state, request_next_chunk, running = _execute_dual_chunk(
+            chunk_index += 1
+            state, request_next_chunk, running, joint_vel_global_step = _execute_dual_chunk(
                 left_arm=left_arm,
                 right_arm=right_arm,
                 cameras=cameras,
@@ -1623,6 +1784,10 @@ def main() -> None:
                 recorder=raw_recorder,
                 end_traj_recorder=end_traj_recorder,
                 joint_traj_recorder=joint_traj_recorder,
+                joint_vel_recorder=joint_vel_recorder,
+                chunk_index=chunk_index,
+                clipped_mask=clipped_mask,
+                global_step_start=joint_vel_global_step,
             )
             if args.safe_mode and state == LoopState.RUNNING:
                 logger.info("安全模式：请按 [I] 获取下一段 chunk。")
@@ -1656,6 +1821,12 @@ def main() -> None:
                 logger.info("Saved joint trajectory to %s", output_path)
             except Exception:
                 logger.exception("Failed to save joint trajectory.")
+        if joint_vel_recorder is not None and joint_vel_recorder.num_samples > 0:
+            try:
+                output_path = joint_vel_recorder.save()
+                logger.info("Saved joint velocity trajectory to %s", output_path)
+            except Exception:
+                logger.exception("Failed to save joint velocity trajectory.")
         if camera_failure is not None:
             logger.error("因相机故障终止推理：%s", camera_failure)
 
