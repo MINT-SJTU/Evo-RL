@@ -15,13 +15,15 @@
 
 python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --task "Fold the socks together and place them on the edge of the desk"   \
---policy-path  checkpoints/socks_short1400_v3/18k \
+--policy-path  checkpoints/socks_short1400_v3/10k \
 --left-can-port can0 \
 --right-can-port can1 \
 --cameras base:254322073516 left_wrist:409122272986 right_wrist:335122271555 \
 --cam-width 424 --cam-height 240 \
 --duration 0.05 \
+--acp-disable \
+--acp-no-cfg \
 --execution-horizon 25 \
---raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks1400_v3_auto18k \
+--raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks1400_v3_auto10k_v2 \
 2>&1 | grep -v "ARX方舟无限"
 ## --joint-traj-dir traj/joint_traj/ 
