@@ -54,6 +54,7 @@ from lerobot.scripts.lerobot_arx5_infer import (
     _list_realsense_cameras,
     _load_policy_bundle,
     _log_predicted_actions,
+    _predict_action_chunk,
 )
 from lerobot.scripts.recording_hil import (
     ACPInferenceConfig,
@@ -1355,33 +1356,36 @@ def main() -> None:
         "--acp-enable",
         dest="acp_enable",
         action="store_true",
-        default=True,
-        help="Enable ACP-tagged inference.",
+        default=False,
+        help="Enable ACP-tagged inference (otherwise use plain _predict_action_chunk).",
     )
     parser.add_argument(
         "--acp-disable",
         dest="acp_enable",
         action="store_false",
-        help="Disable ACP-tagged inference.",
+        help="Explicitly disable ACP (default unless --acp-enable is passed).",
     )
     parser.add_argument(
         "--acp-use-cfg",
         dest="acp_use_cfg",
         action="store_true",
         default=True,
-        help="Run both ACP-tagged and untagged branches and combine them with CFG.",
+        help=(
+            "When --acp-enable is set: run ACP-tagged and untagged branches and combine with CFG (default). "
+            "Ignored when ACP is not enabled."
+        ),
     )
     parser.add_argument(
         "--acp-no-cfg",
         dest="acp_use_cfg",
         action="store_false",
-        help="Use ACP-tagged branch only without CFG blending.",
+        help="When --acp-enable is set: use ACP-tagged branch only (no CFG blending). Ignored when ACP is not enabled.",
     )
     parser.add_argument(
         "--acp-cfg-beta",
         type=float,
         default=1.0,
-        help="CFG strength used when --acp-use-cfg is enabled.",
+        help="CFG strength when --acp-enable and CFG blending (--acp-use-cfg) are active.",
     )
     parser.add_argument(
         "--stats-path",
@@ -1493,8 +1497,6 @@ def main() -> None:
         parser.error("--execution-horizon 必须为正数。")
     if args.safe_mode and args.no_keyboard:
         parser.error("安全模式需要键盘控制。")
-    if args.acp_use_cfg and not args.acp_enable:
-        parser.error("--acp-use-cfg 需要同时启用 --acp-enable。")
     if args.acp_cfg_beta < 0:
         parser.error("--acp-cfg-beta 必须为非负数。")
 
@@ -1578,9 +1580,10 @@ def main() -> None:
         joint_vel_recorder = JointVelocityRecorder(args.joint_vel_dir)
 
     execution_horizon = args.execution_horizon or int(policy_cfg.n_action_steps)
+    effective_use_cfg = bool(args.acp_enable and args.acp_use_cfg)
     acp_inference = ACPInferenceConfig(
         enable=bool(args.acp_enable),
-        use_cfg=bool(args.acp_use_cfg),
+        use_cfg=effective_use_cfg,
         cfg_beta=float(args.acp_cfg_beta),
     )
     cond_policy_runtime_state: dict[str, Any] | None = None
@@ -1630,12 +1633,15 @@ def main() -> None:
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-        cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-            policy=policy,
-            acp_inference=acp_inference,
-            cond_runtime_state=cond_policy_runtime_state,
-            uncond_runtime_state=uncond_policy_runtime_state,
-        )
+        if args.acp_enable and acp_inference.use_cfg:
+            cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
+                policy=policy,
+                acp_inference=acp_inference,
+                cond_runtime_state=cond_policy_runtime_state,
+                uncond_runtime_state=uncond_policy_runtime_state,
+            )
+        else:
+            cond_policy_runtime_state, uncond_policy_runtime_state = None, None
 
         while running:
             if keyboard is not None:
@@ -1667,12 +1673,15 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
-                    cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-                        policy=policy,
-                        acp_inference=acp_inference,
-                        cond_runtime_state=cond_policy_runtime_state,
-                        uncond_runtime_state=uncond_policy_runtime_state,
-                    )
+                    if args.acp_enable and acp_inference.use_cfg:
+                        cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
+                            policy=policy,
+                            acp_inference=acp_inference,
+                            cond_runtime_state=cond_policy_runtime_state,
+                            uncond_runtime_state=uncond_policy_runtime_state,
+                        )
+                    else:
+                        cond_policy_runtime_state, uncond_policy_runtime_state = None, None
                     state = LoopState.STOPPED
                     request_next_chunk = False if args.safe_mode else True
                     continue
@@ -1680,12 +1689,15 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
-                    cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-                        policy=policy,
-                        acp_inference=acp_inference,
-                        cond_runtime_state=cond_policy_runtime_state,
-                        uncond_runtime_state=uncond_policy_runtime_state,
-                    )
+                    if args.acp_enable and acp_inference.use_cfg:
+                        cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
+                            policy=policy,
+                            acp_inference=acp_inference,
+                            cond_runtime_state=cond_policy_runtime_state,
+                            uncond_runtime_state=uncond_policy_runtime_state,
+                        )
+                    else:
+                        cond_policy_runtime_state, uncond_policy_runtime_state = None, None
             if not running:
                 break
             if state != LoopState.RUNNING:
@@ -1706,21 +1718,35 @@ def main() -> None:
                 break
 
             sync_infer_start = time.perf_counter()
-            actions = _predict_action_chunk_with_acp(
-                robot_observation=observation,
-                dataset_features=dataset_features,
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                device=device,
-                task=args.task,
-                robot_type="arx5_dual",
-                execution_horizon=execution_horizon,
-                use_amp=policy_cfg.use_amp,
-                acp_inference=acp_inference,
-                cond_runtime_state=cond_policy_runtime_state,
-                uncond_runtime_state=uncond_policy_runtime_state,
-            )
+            if args.acp_enable:
+                actions = _predict_action_chunk_with_acp(
+                    robot_observation=observation,
+                    dataset_features=dataset_features,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    device=device,
+                    task=args.task,
+                    robot_type="arx5_dual",
+                    execution_horizon=execution_horizon,
+                    use_amp=policy_cfg.use_amp,
+                    acp_inference=acp_inference,
+                    cond_runtime_state=cond_policy_runtime_state,
+                    uncond_runtime_state=uncond_policy_runtime_state,
+                )
+            else:
+                actions = _predict_action_chunk(
+                    robot_observation=observation,
+                    dataset_features=dataset_features,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    device=device,
+                    task=args.task,
+                    robot_type="arx5_dual",
+                    execution_horizon=execution_horizon,
+                    use_amp=policy_cfg.use_amp,
+                )
             sync_infer_elapsed = time.perf_counter() - sync_infer_start
             logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
