@@ -5,8 +5,7 @@ Reads a ``joint_vel_*.json`` file produced by ``lerobot_arx5_dual_infer.py``
 when ``--joint-vel-dir`` is enabled and plots:
 
 - Joint velocities over time (SDK 6-DoF and/or finite-difference 7-DoF).
-- Vertical dashed lines + start/end labels at every action-chunk boundary.
-- Alternating shaded background bands per chunk.
+- Vertical dashed/dotted lines at chunk boundaries and alternating shaded background bands per chunk (no on-plot chunk id / start / end text).
 - Red ``x`` markers wherever the executed command was tagged as
   ``policy_safe_clipped`` (i.e. modified by the safe-mode joint-step clip),
   i.e. not a pure policy-inference action.
@@ -134,36 +133,12 @@ def _shade_chunks_and_mark_clipped(
         x1 = t[i1] if i1 < len(t) - 1 else t[i1]
         # Light shaded band per chunk.
         ax.axvspan(x0, x1, color=palette[seg_pos % len(palette)], alpha=0.10, linewidth=0)
-        # Start line + label.
+        # Chunk boundary lines (no text labels).
         ax.axvline(x0, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
-        ax.annotate(
-            f"chunk {cid} start",
-            xy=(x0, 1.0),
-            xycoords=("data", "axes fraction"),
-            xytext=(2, -10),
-            textcoords="offset points",
-            fontsize=7,
-            color="black",
-            rotation=90,
-            va="top",
-            ha="left",
-        )
-        # End line + label only if this is the last segment with this id.
+        # End line only if this is the last segment with this id.
         is_last_segment = (seg_pos == len(segments) - 1) or (segments[seg_pos + 1][2] != cid)
         if is_last_segment:
             ax.axvline(x1, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
-            ax.annotate(
-                f"chunk {cid} end",
-                xy=(x1, 1.0),
-                xycoords=("data", "axes fraction"),
-                xytext=(2, -10),
-                textcoords="offset points",
-                fontsize=7,
-                color="gray",
-                rotation=90,
-                va="top",
-                ha="left",
-            )
 
     # Mark non-policy-pure samples with a red 'x'.
     non_pure = source != "policy"
