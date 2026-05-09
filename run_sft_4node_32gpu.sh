@@ -52,7 +52,7 @@ fi
 echo "[INFO] conda_env: ${CONDA_DEFAULT_ENV}"
 echo "[INFO] python: $(command -v python)"
 
-export no_proxy="${no_proxy:-localhost,127.0.0.1,10.0.112.8,10.0.112.9}"
+export no_proxy="${no_proxy:-localhost,127.0.0.1,10.0.112.8,10.0.112.9,10.0.0.203,10.0.0.204}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,GRAPH}"
 
@@ -77,6 +77,8 @@ POLICY_COMPILE="${POLICY_COMPILE:-false}"
 POLICY_COMPILE_MODE="${POLICY_COMPILE_MODE:-reduce-overhead}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 POLICY_PUSH_TO_HUB="${POLICY_PUSH_TO_HUB:-false}"
+HF_CACHE_DIR="${HF_CACHE_DIR:-}"
+HF_LOCAL_FILES_ONLY="${HF_LOCAL_FILES_ONLY:-false}"
 
 RUN_BASE="${RUN_BASE:-/mnt/data/ljh}"
 CACHE_BASE="${CACHE_BASE:-/mnt/data1/ljh/.cache}"
@@ -85,8 +87,17 @@ RUN_OUTPUT_PARENT="$(dirname "$RUN_OUTPUT_DIR")"
 export TMPDIR="$RUN_BASE/tmp"
 export WANDB_DIR="$RUN_BASE/wandb"
 export XDG_CACHE_HOME="$CACHE_BASE"
-export HF_HOME="$CACHE_BASE/huggingface"
-export TRANSFORMERS_CACHE="$CACHE_BASE/huggingface"
+if [[ -z "$HF_CACHE_DIR" ]]; then
+  HF_CACHE_DIR="$CACHE_BASE/huggingface"
+fi
+export HF_CACHE_DIR
+export HF_HOME="$HF_CACHE_DIR"
+export TRANSFORMERS_CACHE="$HF_CACHE_DIR"
+export HF_LOCAL_FILES_ONLY
+if [[ "$HF_LOCAL_FILES_ONLY" == "true" || "$HF_LOCAL_FILES_ONLY" == "1" || "$HF_LOCAL_FILES_ONLY" == "yes" || "$HF_LOCAL_FILES_ONLY" == "on" ]]; then
+  export HF_HUB_OFFLINE=1
+  export TRANSFORMERS_OFFLINE=1
+fi
 export TORCH_HOME="$CACHE_BASE/torch"
 export PYTHONDONTWRITEBYTECODE=1
 mkdir -p "$TMPDIR" "$WANDB_DIR" "$RUN_OUTPUT_PARENT" "$XDG_CACHE_HOME" "$HF_HOME" "$TRANSFORMERS_CACHE" "$TORCH_HOME"
@@ -153,6 +164,8 @@ echo "[INFO] scheduler_decay_lr: $SCHEDULER_DECAY_LR"
 echo "[INFO] policy_compile: $POLICY_COMPILE"
 echo "[INFO] policy_compile_mode: $POLICY_COMPILE_MODE"
 echo "[INFO] gradient_checkpointing: $GRADIENT_CHECKPOINTING"
+echo "[INFO] hf_cache_dir: $HF_CACHE_DIR"
+echo "[INFO] hf_local_files_only: $HF_LOCAL_FILES_ONLY"
 echo "[INFO] nccl_debug: ${NCCL_DEBUG:-<unset>}"
 echo "[INFO] nccl_debug_subsys: ${NCCL_DEBUG_SUBSYS:-<unset>}"
 echo "[INFO] nccl_socket_ifname: ${NCCL_SOCKET_IFNAME:-<unset>}"
@@ -168,6 +181,8 @@ if ! command -v accelerate >/dev/null 2>&1; then
   echo "[ERROR] 当前环境缺少 accelerate，请检查 $CONDA_ENV_NAME 依赖"
   exit 1
 fi
+
+
 
 accelerate launch \
   --multi_gpu \
@@ -196,7 +211,7 @@ accelerate launch \
   --policy.push_to_hub="$POLICY_PUSH_TO_HUB" \
   --policy.empty_cameras=0 \
   --resume="$RESUME" \
-  --job_name="pi05_4node32gpu_towel_mid300_352ep_$RUN_ID" \
+  --job_name="pi05_${NUM_MACHINES}node${NUM_PROCESSES}gpu_towel_mid300_352ep_$RUN_ID" \
   --output_dir="$RUN_OUTPUT_DIR" \
   --wandb.enable="$WANDB_ENABLE" \
   --wandb.disable_artifact="$WANDB_DISABLE_ARTIFACT"

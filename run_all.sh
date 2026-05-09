@@ -10,6 +10,8 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RESUME="${RESUME:-false}"
 MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-10.0.112.9}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29600}"
+NUM_MACHINES="${NUM_MACHINES:-2}"
+NUM_PROCESSES="${NUM_PROCESSES:-16}"
 WANDB_MODE="${WANDB_MODE:-disabled}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
 WANDB_DISABLE_ARTIFACT="${WANDB_DISABLE_ARTIFACT:-true}"
@@ -17,6 +19,7 @@ HF_PREWARM="${HF_PREWARM:-auto}"
 HF_PREFER_OFFLINE="${HF_PREFER_OFFLINE:-auto}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-/mnt/data1/ljh/.cache/huggingface}"
 HF_LOCAL_FILES_ONLY="${HF_LOCAL_FILES_ONLY:-false}"
+LEROBOT_DATASET_LOAD_MODE="${LEROBOT_DATASET_LOAD_MODE:-auto}"
 TRAIN_STEPS="${TRAIN_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LOG_FREQ="${LOG_FREQ:-200}"
@@ -30,10 +33,15 @@ POLICY_COMPILE="${POLICY_COMPILE:-false}"
 POLICY_COMPILE_MODE="${POLICY_COMPILE_MODE:-reduce-overhead}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 POLICY_PUSH_TO_HUB="${POLICY_PUSH_TO_HUB:-false}"
+SMOKE_BACKEND="${SMOKE_BACKEND:-}"
+SMOKE_ITERS="${SMOKE_ITERS:-}"
+SMOKE_MB="${SMOKE_MB:-}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new}"
 CLEANUP="${CLEANUP:-0}"
 LOCAL_RANK="${LOCAL_RANK:-}"
 REMOTE_HOST="${REMOTE_HOST:-}"
+LOCAL_HOST_LABEL="${LOCAL_HOST_LABEL:-}"
+REMOTE_HOST_LABEL="${REMOTE_HOST_LABEL:-}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-evo-rl_ljh}"
 CONDA_SH="${CONDA_SH:-}"
 
@@ -136,6 +144,8 @@ echo "[INFO] run_id: $RUN_ID"
 echo "[INFO] local_rank: $LOCAL_RANK"
 echo "[INFO] remote_host: $REMOTE_HOST"
 echo "[INFO] remote_rank: $REMOTE_RANK"
+echo "[INFO] num_machines: $NUM_MACHINES"
+echo "[INFO] num_processes: $NUM_PROCESSES"
 echo "[INFO] main_process: $MAIN_PROCESS_IP:$MAIN_PROCESS_PORT"
 echo "[INFO] resume: $RESUME"
 echo "[INFO] wandb_mode: $WANDB_MODE"
@@ -160,15 +170,22 @@ echo "[INFO] policy_compile: $POLICY_COMPILE"
 echo "[INFO] policy_compile_mode: $POLICY_COMPILE_MODE"
 echo "[INFO] gradient_checkpointing: $GRADIENT_CHECKPOINTING"
 echo "[INFO] policy_push_to_hub: $POLICY_PUSH_TO_HUB"
+if [[ -n "$SMOKE_BACKEND" ]]; then
+  echo "[INFO] smoke_backend: $SMOKE_BACKEND"
+  echo "[INFO] smoke_iters: ${SMOKE_ITERS:-<default>}"
+  echo "[INFO] smoke_mb: ${SMOKE_MB:-<default>}"
+fi
 echo "[INFO] hf_prewarm: $HF_PREWARM"
 echo "[INFO] hf_prefer_offline: $HF_PREFER_OFFLINE"
 echo "[INFO] hf_cache_dir: $HF_CACHE_DIR"
 echo "[INFO] hf_local_files_only: $HF_LOCAL_FILES_ONLY"
+echo "[INFO] lerobot_dataset_load_mode: $LEROBOT_DATASET_LOAD_MODE"
 echo "[INFO] nccl_debug: ${NCCL_DEBUG:-<unset>}"
 echo "[INFO] nccl_debug_subsys: ${NCCL_DEBUG_SUBSYS:-<unset>}"
 echo "[INFO] nccl_socket_ifname: ${NCCL_SOCKET_IFNAME:-<unset>}"
 echo "[INFO] nccl_ib_hca: ${NCCL_IB_HCA:-<unset>}"
 echo "[INFO] gloo_socket_ifname: ${GLOO_SOCKET_IFNAME:-<unset>}"
+echo "[INFO] ddp_init_sync: ${DDP_INIT_SYNC:-<unset>}"
 
 ssh_remote "echo [INFO] remote_host_ok: \$(hostname -s)" >/dev/null
 
@@ -181,20 +198,17 @@ fi
 echo "[STEP] sync launch script to remote"
 rsync -e "ssh $SSH_OPTS" -az "$LAUNCH_SCRIPT" "$REMOTE_HOST:$PROJECT_DIR/"
 
-LOCAL_HOST_LABEL="h20-1"
-if [[ "$LOCAL_RANK" == "1" ]]; then
-  LOCAL_HOST_LABEL="h20-0"
+if [[ -z "$LOCAL_HOST_LABEL" ]]; then
+  LOCAL_HOST_LABEL="$(hostname -s 2>/dev/null || hostname)"
 fi
-REMOTE_HOST_LABEL="h20-0"
-if [[ "$REMOTE_RANK" == "0" ]]; then
-  REMOTE_HOST_LABEL="h20-1"
+if [[ -z "$REMOTE_HOST_LABEL" ]]; then
+  REMOTE_HOST_LABEL="$REMOTE_HOST"
 fi
 
 LOCAL_LOG="$LOG_DIR/run_sft_${LOCAL_HOST_LABEL}_${RUN_ID}.log"
 REMOTE_LOG="$LOG_DIR/run_sft_${REMOTE_HOST_LABEL}_${RUN_ID}.log"
 LAUNCH_NAME="$(basename "$LAUNCH_SCRIPT")"
 
-echo "[STEP] start local rank=$LOCAL_RANK"
 OPTIONAL_DISTRIBUTED_ENV=()
 if [[ -n "${NCCL_DEBUG:-}" ]]; then
   OPTIONAL_DISTRIBUTED_ENV+=(NCCL_DEBUG="$NCCL_DEBUG")
@@ -211,17 +225,29 @@ fi
 if [[ -n "${GLOO_SOCKET_IFNAME:-}" ]]; then
   OPTIONAL_DISTRIBUTED_ENV+=(GLOO_SOCKET_IFNAME="$GLOO_SOCKET_IFNAME")
 fi
+if [[ -n "${DDP_INIT_SYNC:-}" ]]; then
+  OPTIONAL_DISTRIBUTED_ENV+=(DDP_INIT_SYNC="$DDP_INIT_SYNC")
+fi
+if [[ -n "${SMOKE_BACKEND:-}" ]]; then
+  OPTIONAL_DISTRIBUTED_ENV+=(SMOKE_BACKEND="$SMOKE_BACKEND")
+fi
+if [[ -n "${SMOKE_ITERS:-}" ]]; then
+  OPTIONAL_DISTRIBUTED_ENV+=(SMOKE_ITERS="$SMOKE_ITERS")
+fi
+if [[ -n "${SMOKE_MB:-}" ]]; then
+  OPTIONAL_DISTRIBUTED_ENV+=(SMOKE_MB="$SMOKE_MB")
+fi
+if [[ -n "${LEROBOT_DATASET_LOAD_MODE:-}" ]]; then
+  OPTIONAL_DISTRIBUTED_ENV+=(LEROBOT_DATASET_LOAD_MODE="$LEROBOT_DATASET_LOAD_MODE")
+fi
 OPTIONAL_DISTRIBUTED_ENV_STR=""
 if [[ ${#OPTIONAL_DISTRIBUTED_ENV[@]} -gt 0 ]]; then
   printf -v OPTIONAL_DISTRIBUTED_ENV_STR " %q" "${OPTIONAL_DISTRIBUTED_ENV[@]}"
 fi
 
-nohup bash -lc "cd '$PROJECT_DIR' && exec env RUN_ID='$RUN_ID' RESUME='$RESUME' NODE_RANK='$LOCAL_RANK' MAIN_PROCESS_IP='$MAIN_PROCESS_IP' MAIN_PROCESS_PORT='$MAIN_PROCESS_PORT' WANDB_MODE='$WANDB_MODE' WANDB_ENABLE='$WANDB_ENABLE' WANDB_DISABLE_ARTIFACT='$WANDB_DISABLE_ARTIFACT' HF_PREWARM='$HF_PREWARM' HF_PREFER_OFFLINE='$HF_PREFER_OFFLINE' HF_CACHE_DIR='$HF_CACHE_DIR' HF_LOCAL_FILES_ONLY='$HF_LOCAL_FILES_ONLY' TRAIN_STEPS='$TRAIN_STEPS' BATCH_SIZE='$BATCH_SIZE' LOG_FREQ='$LOG_FREQ' SAVE_FREQ='$SAVE_FREQ' OPTIMIZER_LR='$OPTIMIZER_LR' SCHEDULER_DECAY_LR='$SCHEDULER_DECAY_LR' DATASET_ROOT='$DATASET_ROOT' DATASET_REPO_ID='$DATASET_REPO_ID' POLICY_REPO_ID='$POLICY_REPO_ID' POLICY_COMPILE='$POLICY_COMPILE' POLICY_COMPILE_MODE='$POLICY_COMPILE_MODE' GRADIENT_CHECKPOINTING='$GRADIENT_CHECKPOINTING' POLICY_PUSH_TO_HUB='$POLICY_PUSH_TO_HUB'$OPTIONAL_DISTRIBUTED_ENV_STR bash '$LAUNCH_NAME'" > "$LOCAL_LOG" 2>&1 < /dev/null &
-LOCAL_PID=$!
-
 echo "[STEP] start remote rank=$REMOTE_RANK"
 set +e
-REMOTE_START_OUT="$(ssh_remote "cd '$PROJECT_DIR' && mkdir -p '$LOG_DIR' && ( nohup bash -lc \"cd '$PROJECT_DIR' && exec env RUN_ID='$RUN_ID' RESUME='$RESUME' NODE_RANK='$REMOTE_RANK' MAIN_PROCESS_IP='$MAIN_PROCESS_IP' MAIN_PROCESS_PORT='$MAIN_PROCESS_PORT' WANDB_MODE='$WANDB_MODE' WANDB_ENABLE='$WANDB_ENABLE' WANDB_DISABLE_ARTIFACT='$WANDB_DISABLE_ARTIFACT' HF_PREWARM='$HF_PREWARM' HF_PREFER_OFFLINE='$HF_PREFER_OFFLINE' HF_CACHE_DIR='$HF_CACHE_DIR' HF_LOCAL_FILES_ONLY='$HF_LOCAL_FILES_ONLY' TRAIN_STEPS='$TRAIN_STEPS' BATCH_SIZE='$BATCH_SIZE' LOG_FREQ='$LOG_FREQ' SAVE_FREQ='$SAVE_FREQ' OPTIMIZER_LR='$OPTIMIZER_LR' SCHEDULER_DECAY_LR='$SCHEDULER_DECAY_LR' DATASET_ROOT='$DATASET_ROOT' DATASET_REPO_ID='$DATASET_REPO_ID' POLICY_REPO_ID='$POLICY_REPO_ID' POLICY_COMPILE='$POLICY_COMPILE' POLICY_COMPILE_MODE='$POLICY_COMPILE_MODE' GRADIENT_CHECKPOINTING='$GRADIENT_CHECKPOINTING' POLICY_PUSH_TO_HUB='$POLICY_PUSH_TO_HUB'$OPTIONAL_DISTRIBUTED_ENV_STR bash '$LAUNCH_NAME'\" > '$REMOTE_LOG' 2>&1 < /dev/null & ) ; disown -a >/dev/null 2>&1 || true ; echo REMOTE_PID:\$! ; exit 0" 2>&1)"
+REMOTE_START_OUT="$(ssh_remote "cd '$PROJECT_DIR' && mkdir -p '$LOG_DIR' && ( nohup setsid bash -lc \"cd '$PROJECT_DIR' && exec env RUN_ID='$RUN_ID' RESUME='$RESUME' NODE_RANK='$REMOTE_RANK' MAIN_PROCESS_IP='$MAIN_PROCESS_IP' MAIN_PROCESS_PORT='$MAIN_PROCESS_PORT' NUM_MACHINES='$NUM_MACHINES' NUM_PROCESSES='$NUM_PROCESSES' WANDB_MODE='$WANDB_MODE' WANDB_ENABLE='$WANDB_ENABLE' WANDB_DISABLE_ARTIFACT='$WANDB_DISABLE_ARTIFACT' HF_PREWARM='$HF_PREWARM' HF_PREFER_OFFLINE='$HF_PREFER_OFFLINE' HF_CACHE_DIR='$HF_CACHE_DIR' HF_LOCAL_FILES_ONLY='$HF_LOCAL_FILES_ONLY' TRAIN_STEPS='$TRAIN_STEPS' BATCH_SIZE='$BATCH_SIZE' LOG_FREQ='$LOG_FREQ' SAVE_FREQ='$SAVE_FREQ' OPTIMIZER_LR='$OPTIMIZER_LR' SCHEDULER_DECAY_LR='$SCHEDULER_DECAY_LR' DATASET_ROOT='$DATASET_ROOT' DATASET_REPO_ID='$DATASET_REPO_ID' POLICY_REPO_ID='$POLICY_REPO_ID' POLICY_COMPILE='$POLICY_COMPILE' POLICY_COMPILE_MODE='$POLICY_COMPILE_MODE' GRADIENT_CHECKPOINTING='$GRADIENT_CHECKPOINTING' POLICY_PUSH_TO_HUB='$POLICY_PUSH_TO_HUB'$OPTIONAL_DISTRIBUTED_ENV_STR bash '$LAUNCH_NAME'\" > '$REMOTE_LOG' 2>&1 < /dev/null & ) ; disown -a >/dev/null 2>&1 || true ; echo REMOTE_PID:\$! ; exit 0" 2>&1)"
 REMOTE_START_RC=$?
 set -e
 
@@ -233,21 +259,42 @@ if [[ $REMOTE_START_RC -ne 0 ]]; then
   echo "[WARN] remote launch command returned non-zero: $REMOTE_START_RC"
 fi
 
+REMOTE_FOUND=0
+for _ in $(seq 1 20); do
+  if ssh_remote "pgrep -af '$RUN_ID' | grep -E 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' >/dev/null 2>&1"; then
+    REMOTE_FOUND=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ $REMOTE_FOUND -ne 1 ]]; then
+  echo "[ERROR] remote training process not found for RUN_ID=$RUN_ID"
+  echo "[ERROR] remote log tail:"
+  ssh_remote "tail -n 80 '$REMOTE_LOG' 2>/dev/null || true" || true
+  exit 1
+fi
+
+echo "[STEP] start local rank=$LOCAL_RANK"
+nohup setsid bash -lc "cd '$PROJECT_DIR' && exec env RUN_ID='$RUN_ID' RESUME='$RESUME' NODE_RANK='$LOCAL_RANK' MAIN_PROCESS_IP='$MAIN_PROCESS_IP' MAIN_PROCESS_PORT='$MAIN_PROCESS_PORT' NUM_MACHINES='$NUM_MACHINES' NUM_PROCESSES='$NUM_PROCESSES' WANDB_MODE='$WANDB_MODE' WANDB_ENABLE='$WANDB_ENABLE' WANDB_DISABLE_ARTIFACT='$WANDB_DISABLE_ARTIFACT' HF_PREWARM='$HF_PREWARM' HF_PREFER_OFFLINE='$HF_PREFER_OFFLINE' HF_CACHE_DIR='$HF_CACHE_DIR' HF_LOCAL_FILES_ONLY='$HF_LOCAL_FILES_ONLY' TRAIN_STEPS='$TRAIN_STEPS' BATCH_SIZE='$BATCH_SIZE' LOG_FREQ='$LOG_FREQ' SAVE_FREQ='$SAVE_FREQ' OPTIMIZER_LR='$OPTIMIZER_LR' SCHEDULER_DECAY_LR='$SCHEDULER_DECAY_LR' DATASET_ROOT='$DATASET_ROOT' DATASET_REPO_ID='$DATASET_REPO_ID' POLICY_REPO_ID='$POLICY_REPO_ID' POLICY_COMPILE='$POLICY_COMPILE' POLICY_COMPILE_MODE='$POLICY_COMPILE_MODE' GRADIENT_CHECKPOINTING='$GRADIENT_CHECKPOINTING' POLICY_PUSH_TO_HUB='$POLICY_PUSH_TO_HUB'$OPTIONAL_DISTRIBUTED_ENV_STR bash '$LAUNCH_NAME'" > "$LOCAL_LOG" 2>&1 < /dev/null &
+LOCAL_PID=$!
+
 echo "LOCAL_PID:$LOCAL_PID"
 echo "LOCAL_LOG:$LOCAL_LOG"
 echo "REMOTE_LOG:$REMOTE_LOG"
 
 LOCAL_FOUND=0
-REMOTE_FOUND=0
 for _ in $(seq 1 10); do
   if kill -0 "$LOCAL_PID" >/dev/null 2>&1; then
     LOCAL_FOUND=1
-  elif pgrep -af 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' >/dev/null 2>&1; then
+  elif pgrep -af "$RUN_ID" | grep -E 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' >/dev/null 2>&1; then
     LOCAL_FOUND=1
   fi
 
-  if ssh_remote "pgrep -af 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' >/dev/null 2>&1"; then
+  if ssh_remote "pgrep -af '$RUN_ID' | grep -E 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' >/dev/null 2>&1"; then
     REMOTE_FOUND=1
+  else
+    REMOTE_FOUND=0
   fi
 
   if [[ $LOCAL_FOUND -eq 1 && $REMOTE_FOUND -eq 1 ]]; then
@@ -268,8 +315,8 @@ fi
 
 echo "[STEP] process snapshot"
 echo "--- local ---"
-pgrep -af 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' || true
+pgrep -af "$RUN_ID" || true
 echo "--- remote ---"
-ssh_remote "pgrep -af 'run_sft.sh|lerobot.scripts.lerobot_train|accelerate launch|torch.distributed.run|python -' || true" || true
+ssh_remote "pgrep -af '$RUN_ID' || true" || true
 
 echo "[DONE] dual-node launch command submitted."

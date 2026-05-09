@@ -9,21 +9,28 @@
 ```bash
 cd /mnt/data1/ljh/Evo-RL
 
-RUN_ID=socks_short1400_v3_lr5e5_bs512_log50_save2000_compile_reduce_wandb \
+RUN_ID=socks_short1400_v3_lr5e5_bs512_log50_save2000_test0_compile_reduce_wandb_$(date +%Y%m%d_%H%M%S) \
 MAIN_PROCESS_IP=10.0.112.9 \
 MAIN_PROCESS_PORT=29622 \
+NCCL_IB_HCA=mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8 \
+DDP_INIT_SYNC=false \
+LEROBOT_DATASET_LOAD_MODE=main_first \
 WANDB_ENABLE=true \
 WANDB_MODE=online \
 TRAIN_STEPS=20000 \
-BATCH_SIZE=512 \
+BATCH_SIZE=32 \
 LOG_FREQ=50 \
 SAVE_FREQ=2000 \
 OPTIMIZER_LR=5e-5 \
 SCHEDULER_DECAY_LR=1e-6 \
-POLICY_COMPILE=true \
+POLICY_COMPILE=false \
 POLICY_COMPILE_MODE=reduce-overhead \
 GRADIENT_CHECKPOINTING=true \
+HF_LOCAL_FILES_ONLY=true \
+DATASET_ROOT=/mnt/efs_1/lerobot_socks3000_clean_len300_750 \
+DATASET_REPO_ID=local/socks3000_clean_len300_750 \
 bash run_h20_multinode.sh
+
 ```
 
 如果希望离线运行，只使用本地 cache，可以这样启动：
@@ -91,6 +98,11 @@ nvidia-smi
 - `SAVE_FREQ`：checkpoint 保存间隔。
 - `RESUME`：是否 resume。
 
+数据集：
+
+- `DATASET_ROOT`：数据集目录路径（两机/多机必须保持相同路径，并且每台机器上都存在）。
+- `DATASET_REPO_ID`：数据集标识（本地数据集通常写 `local/<name>`，用于日志、输出目录和可能的 Hub 命名）。
+
 优化相关：
 
 - `OPTIMIZER_LR`：优化器学习率。
@@ -118,6 +130,7 @@ Hugging Face cache：
 - `MAIN_PROCESS_IP`：rank 0 机器 IP。
 - `MAIN_PROCESS_PORT`：分布式 rendezvous 端口。
 - `NCCL_SOCKET_IFNAME`、`GLOO_SOCKET_IFNAME`、`NCCL_IB_HCA`：可选的网络接口指定项。
+- `DDP_INIT_SYNC=false`：跳过 DDP 初始化时的参数广播/形状同步检查。当前 H20 双机场景已验证这个设置可以避开 `accelerator.prepare` 阶段的小 allreduce 超时；前提是两台机器加载的是同一个模型和代码版本。
 - `NCCL_DEBUG`、`NCCL_DEBUG_SUBSYS`：可选的 NCCL 调试日志。
 
 ## DDP 行为概要

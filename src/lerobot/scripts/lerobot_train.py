@@ -15,8 +15,10 @@
 # limitations under the License.
 import dataclasses
 import logging
+import os
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -180,6 +182,16 @@ def train(
     if accelerator is None:
         from accelerate.utils import DistributedDataParallelKwargs
 
+        ddp_init_sync = os.environ.get("DDP_INIT_SYNC", "").strip().lower()
+        if ddp_init_sync in {"0", "false", "no", "off"}:
+            original_to_kwargs = DistributedDataParallelKwargs.to_kwargs
+
+            def to_kwargs_without_init_sync(self):
+                kwargs = original_to_kwargs(self)
+                kwargs["init_sync"] = False
+                return kwargs
+
+            DistributedDataParallelKwargs.to_kwargs = to_kwargs_without_init_sync
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when policy.device is set to CPU.
@@ -216,46 +228,82 @@ def train(
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    # Dataset loading synchronization: main process downloads first to avoid race conditions
-    if is_main_process:
-        logging.info("Creating dataset")
+    # Dataset loading synchronization:
+    # - For hub downloads, load on main process first then barrier, to avoid races in the shared cache.
+    # - For an already-present local dataset (root contains meta/info.json), let all ranks load in parallel.
+    #   This avoids a long pre-barrier wait that can exceed the default store timeout on large datasets.
+    dataset_root = Path(cfg.dataset.root) if cfg.dataset.root is not None else None
+    has_local_dataset_meta = (
+        dataset_root is not None
+        and dataset_root.is_dir()
+        and (dataset_root / "meta" / "info.json").is_file()
+        and (dataset_root / "data").is_dir()
+    )
+
+    dataset_load_mode = os.environ.get("LEROBOT_DATASET_LOAD_MODE", "auto").strip().lower()
+    dataset_main_first = dataset_load_mode in {"main_first", "rank0_first", "main-process-first"}
+    dataset_all_ranks = dataset_load_mode in {"all_ranks", "all-ranks", "parallel"}
+
+    if dataset_load_mode not in {"auto", "main_first", "rank0_first", "main-process-first", "all_ranks", "all-ranks", "parallel"}:
+        if is_main_process:
+            logging.warning(
+                "Unknown LEROBOT_DATASET_LOAD_MODE=%r; falling back to auto dataset loading.",
+                dataset_load_mode,
+            )
+        dataset_load_mode = "auto"
+        dataset_main_first = False
+        dataset_all_ranks = False
+
+    if has_local_dataset_meta and not dataset_main_first:
+        if is_main_process:
+            if dataset_all_ranks:
+                logging.info("Creating dataset (LEROBOT_DATASET_LOAD_MODE=all_ranks; loading on all ranks)")
+            else:
+                logging.info("Creating dataset (local root detected; loading on all ranks)")
         dataset = make_dataset(cfg)
-        if cfg.acp.enable:
-            indicator_stats = compute_acp_indicator_stats(dataset, cfg.acp.indicator_field)
-            if indicator_stats is None:
-                logging.warning(
-                    "ACP is enabled but indicator statistics are unavailable for field '%s'.",
-                    cfg.acp.indicator_field,
+    else:
+        if is_main_process:
+            if dataset_main_first:
+                logging.info("Creating dataset (LEROBOT_DATASET_LOAD_MODE=main_first; main process first)")
+            else:
+                logging.info("Creating dataset")
+            dataset = make_dataset(cfg)
+        accelerator.wait_for_everyone()
+        if not is_main_process:
+            if dataset_main_first and accelerator.is_local_main_process:
+                logging.info("Creating dataset (after main process barrier)")
+            dataset = make_dataset(cfg)
+
+    if cfg.acp.enable and is_main_process:
+        indicator_stats = compute_acp_indicator_stats(dataset, cfg.acp.indicator_field)
+        if indicator_stats is None:
+            logging.warning(
+                "ACP is enabled but indicator statistics are unavailable for field '%s'.",
+                cfg.acp.indicator_field,
+            )
+        else:
+            if indicator_stats.total_count >= 0:
+                logging.info(
+                    "ACP indicator stats (%s): field='%s' ratio=%.6f positive=%d total=%d",
+                    indicator_stats.source,
+                    indicator_stats.indicator_field,
+                    indicator_stats.positive_ratio,
+                    indicator_stats.positive_count,
+                    indicator_stats.total_count,
                 )
             else:
-                if indicator_stats.total_count >= 0:
-                    logging.info(
-                        "ACP indicator stats (%s): field='%s' ratio=%.6f positive=%d total=%d",
-                        indicator_stats.source,
-                        indicator_stats.indicator_field,
-                        indicator_stats.positive_ratio,
-                        indicator_stats.positive_count,
-                        indicator_stats.total_count,
-                    )
-                else:
-                    logging.info(
-                        "ACP indicator stats (%s): field='%s' ratio=%.6f",
-                        indicator_stats.source,
-                        indicator_stats.indicator_field,
-                        indicator_stats.positive_ratio,
-                    )
-                if indicator_stats.invalid_count > 0:
-                    logging.warning(
-                        "ACP indicator field '%s' contains %d non-binary values (expected only 0/1).",
-                        indicator_stats.indicator_field,
-                        indicator_stats.invalid_count,
-                    )
-
-    accelerator.wait_for_everyone()
-
-    # Now all other processes can safely load the dataset
-    if not is_main_process:
-        dataset = make_dataset(cfg)
+                logging.info(
+                    "ACP indicator stats (%s): field='%s' ratio=%.6f",
+                    indicator_stats.source,
+                    indicator_stats.indicator_field,
+                    indicator_stats.positive_ratio,
+                )
+            if indicator_stats.invalid_count > 0:
+                logging.warning(
+                    "ACP indicator field '%s' contains %d non-binary values (expected only 0/1).",
+                    indicator_stats.indicator_field,
+                    indicator_stats.invalid_count,
+                )
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
