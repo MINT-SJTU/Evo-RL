@@ -22,6 +22,6 @@ python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --cam-width 424 --cam-height 240 \
 --duration 0.05 \
 --execution-horizon 25 \
---raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks3000_recap1_16k \
+--raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks3000_recap1_16k_v2/raw_socks3000_recap1_16k \
 2>&1 | grep -v "ARX方舟无限"
 ## --joint-traj-dir traj/joint_traj/ 
