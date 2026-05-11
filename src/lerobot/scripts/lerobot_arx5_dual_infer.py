@@ -74,7 +74,10 @@ DEFAULT_POLICY_PATH = "lerobot/pi05_bimanual"
 DEFAULT_LEFT_CAN_PORT = "can0"
 DEFAULT_RIGHT_CAN_PORT = "can1"
 DEFAULT_STATS_PATH = files("lerobot.robots.arx5_follower").joinpath("pi05_arx5_default_stats.json")
-# Hardware / dataset convention: gripper.pos is clipped to [gripper_min, gripper_max]; the upper bound is fully open.
+# Hardware / dataset convention: gripper.pos is clipped to [gripper_min, gripper_max].
+ARX5_GRIPPER_FULLY_CLOSED = float(
+    next(f.default for f in dataclasses.fields(ARX5FollowerConfigBase) if f.name == "gripper_min")
+)
 ARX5_GRIPPER_FULLY_OPEN = float(
     next(f.default for f in dataclasses.fields(ARX5FollowerConfigBase) if f.name == "gripper_max")
 )
@@ -524,7 +527,7 @@ def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
         "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作（VR 内按 [X] 退出） | "
         "[S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
-        "[O] open grippers (when stopped) | [B] teach | [N] record pose"
+        "[O] open grippers (when stopped) | [P] close grippers (when stopped) | [B] teach | [N] record pose"
     )
     if safe_mode:
         base_message += " | [I] 下一段 chunk"
@@ -621,6 +624,18 @@ def _run_keyboard_command(
             pose = arm.get_state()
             arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
         logger.info("已张开双臂夹爪（O）。")
+        return state, request_next_chunk, True, False
+
+    if key == "p":
+        if state != LoopState.STOPPED:
+            logger.warning(
+                "**********[P] 已忽略：仅在停止状态下可闭合夹爪；请先按 [Space] 急停。**********"
+            )
+            return state, request_next_chunk, True, False
+        for arm in (left_arm, right_arm):
+            pose = arm.get_state()
+            arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
+        logger.info("已闭合双臂夹爪（P）。")
         return state, request_next_chunk, True, False
 
     if state == LoopState.STOPPED:
@@ -868,20 +883,6 @@ def _predict_action_chunk_with_acp(
         )
 
     conditional_task = build_acp_tagged_task(task, is_positive=True)
-    if not acp_inference.use_cfg:
-        return _predict_action_chunk(
-            robot_observation=robot_observation,
-            dataset_features=dataset_features,
-            policy=policy,
-            preprocessor=preprocessor,
-            postprocessor=postprocessor,
-            device=device,
-            task=conditional_task,
-            robot_type=robot_type,
-            execution_horizon=execution_horizon,
-            use_amp=use_amp,
-        )
-
     if cond_runtime_state is None or uncond_runtime_state is None:
         raise ValueError("ACP CFG inference requires cond/uncond runtime states.")
 
@@ -926,7 +927,7 @@ def _refresh_acp_runtime_states(
     cond_runtime_state: dict[str, Any] | None,
     uncond_runtime_state: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    if not (acp_inference.enable and acp_inference.use_cfg):
+    if not acp_inference.enable:
         return None, None
 
     latest_state = _capture_policy_runtime_state(policy)
@@ -1357,35 +1358,13 @@ def main() -> None:
         dest="acp_enable",
         action="store_true",
         default=False,
-        help="Enable ACP-tagged inference (otherwise use plain _predict_action_chunk).",
-    )
-    parser.add_argument(
-        "--acp-disable",
-        dest="acp_enable",
-        action="store_false",
-        help="Explicitly disable ACP (default unless --acp-enable is passed).",
-    )
-    parser.add_argument(
-        "--acp-use-cfg",
-        dest="acp_use_cfg",
-        action="store_true",
-        default=True,
-        help=(
-            "When --acp-enable is set: run ACP-tagged and untagged branches and combine with CFG (default). "
-            "Ignored when ACP is not enabled."
-        ),
-    )
-    parser.add_argument(
-        "--acp-no-cfg",
-        dest="acp_use_cfg",
-        action="store_false",
-        help="When --acp-enable is set: use ACP-tagged branch only (no CFG blending). Ignored when ACP is not enabled.",
+        help="Enable ACP-tagged CFG inference (default off). When enabled, combine ACP-tagged and untagged branches.",
     )
     parser.add_argument(
         "--acp-cfg-beta",
         type=float,
-        default=1.0,
-        help="CFG strength when --acp-enable and CFG blending (--acp-use-cfg) are active.",
+        default=1.2,
+        help="CFG strength when --acp-enable is active.",
     )
     parser.add_argument(
         "--stats-path",
@@ -1580,10 +1559,9 @@ def main() -> None:
         joint_vel_recorder = JointVelocityRecorder(args.joint_vel_dir)
 
     execution_horizon = args.execution_horizon or int(policy_cfg.n_action_steps)
-    effective_use_cfg = bool(args.acp_enable and args.acp_use_cfg)
     acp_inference = ACPInferenceConfig(
         enable=bool(args.acp_enable),
-        use_cfg=effective_use_cfg,
+        use_cfg=bool(args.acp_enable),
         cfg_beta=float(args.acp_cfg_beta),
     )
     cond_policy_runtime_state: dict[str, Any] | None = None
@@ -1633,7 +1611,7 @@ def main() -> None:
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-        if args.acp_enable and acp_inference.use_cfg:
+        if args.acp_enable:
             cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
                 policy=policy,
                 acp_inference=acp_inference,
@@ -1673,7 +1651,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
-                    if args.acp_enable and acp_inference.use_cfg:
+                    if args.acp_enable:
                         cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
                             policy=policy,
                             acp_inference=acp_inference,
@@ -1689,7 +1667,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
-                    if args.acp_enable and acp_inference.use_cfg:
+                    if args.acp_enable:
                         cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
                             policy=policy,
                             acp_inference=acp_inference,
@@ -1718,35 +1696,21 @@ def main() -> None:
                 break
 
             sync_infer_start = time.perf_counter()
-            if args.acp_enable:
-                actions = _predict_action_chunk_with_acp(
-                    robot_observation=observation,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    execution_horizon=execution_horizon,
-                    use_amp=policy_cfg.use_amp,
-                    acp_inference=acp_inference,
-                    cond_runtime_state=cond_policy_runtime_state,
-                    uncond_runtime_state=uncond_policy_runtime_state,
-                )
-            else:
-                actions = _predict_action_chunk(
-                    robot_observation=observation,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    execution_horizon=execution_horizon,
-                    use_amp=policy_cfg.use_amp,
-                )
+            actions = _predict_action_chunk_with_acp(
+                robot_observation=observation,
+                dataset_features=dataset_features,
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                device=device,
+                task=args.task,
+                robot_type="arx5_dual",
+                execution_horizon=execution_horizon,
+                use_amp=policy_cfg.use_amp,
+                acp_inference=acp_inference,
+                cond_runtime_state=cond_policy_runtime_state,
+                uncond_runtime_state=uncond_policy_runtime_state,
+            )
             sync_infer_elapsed = time.perf_counter() - sync_infer_start
             logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
