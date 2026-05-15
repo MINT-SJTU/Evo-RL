@@ -87,6 +87,8 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_openarm_follower,
     bi_piper_follower,
+    bi_s1_direct,
+    bi_s1_follower,
     bi_so_follower,
     earthrover_mini_plus,
     hope_jr,
@@ -95,6 +97,8 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     piper_follower,
+    s1_direct,
+    s1_follower,
     reachy2,
     so_follower,
     unitree_g1 as unitree_g1_robot,
@@ -110,6 +114,8 @@ from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_piper_leader,
+    bi_s1_direct_teleop,
+    bi_s1_leader,
     bi_so_leader,
     homunculus,
     koch_leader,
@@ -117,6 +123,8 @@ from lerobot.teleoperators import (  # noqa: F401
     omx_leader,
     openarm_leader,
     piper_leader,
+    s1_direct_teleop,
+    s1_leader,
     reachy2_teleoperator,
     so_leader,
     unitree_g1,
@@ -400,7 +408,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             )
 
         # Load pretrained policy
-        policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+        policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta, rename_map=cfg.dataset.rename_map)
         preprocessor = None
         postprocessor = None
         if cfg.acp_inference.enable and cfg.policy is None:
