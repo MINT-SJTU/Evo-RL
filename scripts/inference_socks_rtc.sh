@@ -19,17 +19,17 @@
 
 python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --task "Fold the socks together and place them on the edge of the desk"  \
---policy-path checkpoints/socks3000_16k_rl400_sft400_recap1/008000/pretrained_model/ \
+--policy-path checkpoints/sft400_rl600_policy_10k \
 --left-can-port can0 \
 --right-can-port can1 \
 --cameras base:254522076820 left_wrist:352122270765  right_wrist:352122273179 \
 --cam-width 424 --cam-height 240 --fps 60 \
 --duration 0.05 \
---execution-horizon 25 \
+--execution-horizon 15 \
 --acp-enable \
 --acp-use-cfg \
---acp-cfg-beta 1.5 \
---raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks3000_16k_sync_recap1_test0  \
+--acp-cfg-beta 1.2 \
+--raw-train-record-dir /home/user/workspace/datasets/RL/raw_socks3000_16k_sync_recap1_fail1  \
 2>&1 | grep -v "ARX方舟无限"
 ## --joint-traj-dir traj/joint_traj/ 
 # --acp-enable \
