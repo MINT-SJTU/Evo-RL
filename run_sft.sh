@@ -60,6 +60,7 @@ MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-10.0.112.9}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29600}"
 NUM_MACHINES="${NUM_MACHINES:-2}"
 NUM_PROCESSES="${NUM_PROCESSES:-16}"
+DIST_TIMEOUT_SECONDS="${DIST_TIMEOUT_SECONDS:-3600}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RESUME="${RESUME:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
@@ -117,7 +118,7 @@ CACHE_BASE="/mnt/data1/ljh/.cache"
 if [[ -z "$HF_CACHE_DIR" ]]; then
   HF_CACHE_DIR="$CACHE_BASE/huggingface"
 fi
-RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-$RUN_BASE/Evo-RL-outputs/pi05_dist_towel_mid300_352ep_$RUN_ID}"
+RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-$RUN_BASE/Evo-RL-outputs/$RUN_ID}"
 RUN_OUTPUT_PARENT="$(dirname "$RUN_OUTPUT_DIR")"
 export TMPDIR="$RUN_BASE/tmp"
 export WANDB_DIR="$RUN_BASE/wandb"
@@ -169,6 +170,7 @@ echo "[INFO] hostname: $(hostname)"
 echo "[INFO] machine_rank: $NODE_RANK"
 echo "[INFO] num_machines: $NUM_MACHINES"
 echo "[INFO] num_processes: $NUM_PROCESSES"
+echo "[INFO] dist_timeout_seconds: $DIST_TIMEOUT_SECONDS"
 echo "[INFO] main_process_ip: $MAIN_PROCESS_IP:$MAIN_PROCESS_PORT"
 echo "[INFO] dataset.root: $DATASET_ROOT"
 echo "[INFO] dataset.repo_id: $DATASET_REPO_ID"
@@ -235,7 +237,7 @@ accelerate launch \
   --policy.push_to_hub=$POLICY_PUSH_TO_HUB \
   --policy.empty_cameras=0 \
   --resume=$RESUME \
-  --job_name=pi05_${NUM_MACHINES}node${NUM_PROCESSES}gpu_towel_mid300_352ep_$RUN_ID \
+  --job_name=$RUN_ID \
   --output_dir=$RUN_OUTPUT_DIR \
   --wandb.enable=$WANDB_ENABLE \
   --wandb.disable_artifact=$WANDB_DISABLE_ARTIFACT

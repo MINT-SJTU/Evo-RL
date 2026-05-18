@@ -9,11 +9,12 @@
 ```bash
 cd /mnt/data1/ljh/Evo-RL
 
-RUN_ID=socks_short1400_v3_lr5e5_bs512_log50_save2000_test0_compile_reduce_wandb_$(date +%Y%m%d_%H%M%S) \
+RUN_ID=socks_short1400_v3_$(date +%Y%m%d_%H%M%S) \
 MAIN_PROCESS_IP=10.0.112.9 \
 MAIN_PROCESS_PORT=29622 \
 NCCL_IB_HCA=mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8 \
 DDP_INIT_SYNC=false \
+DIST_TIMEOUT_SECONDS=7200 \
 LEROBOT_DATASET_LOAD_MODE=main_first \
 WANDB_ENABLE=true \
 WANDB_MODE=online \
@@ -131,6 +132,8 @@ Hugging Face cache：
 - `MAIN_PROCESS_PORT`：分布式 rendezvous 端口。
 - `NCCL_SOCKET_IFNAME`、`GLOO_SOCKET_IFNAME`、`NCCL_IB_HCA`：可选的网络接口指定项。
 - `DDP_INIT_SYNC=false`：跳过 DDP 初始化时的参数广播/形状同步检查。当前 H20 双机场景已验证这个设置可以避开 `accelerator.prepare` 阶段的小 allreduce 超时；前提是两台机器加载的是同一个模型和代码版本。
+- `DIST_TIMEOUT_SECONDS`：分布式 barrier / NCCL 初始化的最长等待时间，单位秒。通过当前启动脚本运行时默认是 `3600`，也就是 60 分钟；如果绕过这些脚本直接启动，PyTorch/NCCL 的默认超时通常是 600 秒。只有当数据集或模型加载可能超过 60 分钟时，才需要显式设为更大的值，例如 `7200`。它只是超时上限，所有 rank 到齐后会立即进入下一步，不会固定等待满这个时间。
+- `LEROBOT_DATASET_LOAD_MODE`：数据集加载模式。`all_ranks` 表示所有 rank 并行加载；`main_first` 表示主进程先加载，其它 rank 在 barrier 等待。大数据集首次加载较慢时，建议配合较大的 `DIST_TIMEOUT_SECONDS` 使用。
 - `NCCL_DEBUG`、`NCCL_DEBUG_SUBSYS`：可选的 NCCL 调试日志。
 
 ## DDP 行为概要
@@ -218,6 +221,8 @@ NCCL timeout 或 rendezvous 失败：
 
 - 确认每台机器都能访问 `MAIN_PROCESS_IP`。
 - 确认 `MAIN_PROCESS_PORT` 没有被占用或被防火墙阻断。
+- 如果日志中出现 `wait timeout after 600000ms`，说明当前启动没有生效更长的超时配置，某个 rank 在分布式同步点等待超过了 PyTorch/NCCL 默认 600 秒。使用当前脚本时会默认设置 `DIST_TIMEOUT_SECONDS=3600`，也可以显式设置 `DIST_TIMEOUT_SECONDS=7200` 进一步增大等待上限。
+- 如果使用 `LEROBOT_DATASET_LOAD_MODE=main_first`，主进程加载数据期间其它 rank 会等待；如果数据加载超过默认超时时间，也需要增大 `DIST_TIMEOUT_SECONDS`。
 - 可以设置 `NCCL_DEBUG=INFO` 查看更详细日志。
 - 必要时指定 `NCCL_SOCKET_IFNAME` 或 `GLOO_SOCKET_IFNAME`。
 

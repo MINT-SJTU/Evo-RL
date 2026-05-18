@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import dataclasses
+import datetime as dt
 import logging
 import os
 import time
@@ -180,7 +181,7 @@ def train(
     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
     # We set find_unused_parameters=True to handle models with conditional computation
     if accelerator is None:
-        from accelerate.utils import DistributedDataParallelKwargs
+        from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 
         ddp_init_sync = os.environ.get("DDP_INIT_SYNC", "").strip().lower()
         if ddp_init_sync in {"0", "false", "no", "off"}:
@@ -193,12 +194,30 @@ def train(
 
             DistributedDataParallelKwargs.to_kwargs = to_kwargs_without_init_sync
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        kwargs_handlers = [ddp_kwargs]
+
+        dist_timeout_seconds = os.environ.get("DIST_TIMEOUT_SECONDS", "").strip()
+        if dist_timeout_seconds:
+            try:
+                timeout_seconds = int(dist_timeout_seconds)
+                if timeout_seconds <= 0:
+                    raise ValueError
+            except ValueError:
+                logging.warning(
+                    "Ignoring invalid DIST_TIMEOUT_SECONDS=%r; expected a positive integer.",
+                    dist_timeout_seconds,
+                )
+            else:
+                kwargs_handlers.append(
+                    InitProcessGroupKwargs(timeout=dt.timedelta(seconds=timeout_seconds))
+                )
+
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when policy.device is set to CPU.
         force_cpu = cfg.policy.device == "cpu"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
-            kwargs_handlers=[ddp_kwargs],
+            kwargs_handlers=kwargs_handlers,
             cpu=force_cpu,
         )
 
