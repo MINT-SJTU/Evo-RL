@@ -277,6 +277,15 @@ def main() -> None:
         action="store_true",
         help="When recording raw data, save per-frame timestamps in each segment (timestamps.json).",
     )
+    parser.add_argument(
+        "--vr-camera-warmup-s",
+        type=float,
+        default=2.0,
+        help=(
+            "Seconds to discard VR camera frames after camera_interface starts, "
+            "before teleop control threads run (arms stay frozen). Use 0 to disable."
+        ),
+    )
     parser.add_argument("--left-can-port", type=str, default=DEFAULT_LEFT_CAN_PORT)
     parser.add_argument("--right-can-port", type=str, default=DEFAULT_RIGHT_CAN_PORT)
     parser.add_argument("--arm-type", type=int, default=0, choices=[0, 1, 2])

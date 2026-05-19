@@ -181,6 +181,7 @@ Other details:
 - **`--duration`**: policy steps and **raw VR recording** both target this interval (VR uses a dedicated record thread with `precise_sleep`, decoupled from teleop control).
 - **`--vr-control-hz`**: VR teleop IK / command rate only (default 50 Hz); does not set raw recording rate.
 - **`--debug-timestamp`**: when raw recording is enabled, each segment also writes `timestamps.json` (per-frame `t_perf_s`, `t_wall_iso`, `t_rel_segment_s`) for debugging actual sample spacing.
+- **`--vr-camera-warmup-s`** (default `2.0`): after VR `camera_interface` starts, discard frames for this many seconds before IK/control threads run. Arms stay frozen at the pre-VR pose; no raw data is written during warmup. Set `0` to disable.
 
 ### 5.2 Raw dataset format
 

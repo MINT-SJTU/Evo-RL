@@ -56,7 +56,9 @@ from lerobot.scripts.lerobot_arx5_infer import (
     _load_policy_bundle,
     _log_predicted_actions,
     _predict_action_chunk,
+    _poll_vr_camera_frames,
     _vr_record_loop,
+    _warmup_vr_cameras_after_start,
 )
 from lerobot.scripts.recording_hil import (
     ACPInferenceConfig,
@@ -1136,6 +1138,7 @@ def _run_vr_teleop_session(
     vr_camera_serial_dict = {name: camera_specs[name] for name in camera_names if name in camera_specs}
 
     vr_bridge = VrRecordBridge()
+    vr_warmup_camera_names = list(recorder.camera_names) if recorder is not None else list(camera_names)
     record_stop_event = threading.Event()
     record_thread: threading.Thread | None = None
 
@@ -1196,7 +1199,21 @@ def _run_vr_teleop_session(
                 return True
             return False
 
+        def _hold_frozen_command(self) -> None:
+            """Hold pre-VR joint targets; ignore VR activation (used during camera warmup)."""
+            for arm_name, controller in self.arm_controllers.items():
+                q_cmd = self._hold_joint_targets.get(arm_name)
+                if q_cmd is None:
+                    q_cmd = np.asarray(controller.get_joint_positions()[:6], dtype=np.float64)
+                    self._hold_joint_targets[arm_name] = q_cmd.copy()
+                controller.set_joint_positions(q_cmd)
+                gripper_config = self.manipulator_config[arm_name]["gripper_config"]
+                joint_name = gripper_config["joint_names"][0]
+                gripper_target = float(self._initial_gripper_by_arm.get(arm_name, self.gripper_pos_target[arm_name][joint_name]))
+                controller.set_catch_pos(gripper_target)
+
         def _robot_setup(self):
+            self._vr_arm_control_enabled = False
             self.arm_controllers = {}
             self._hold_joint_targets: dict[str, np.ndarray] = {}
             self._initial_gripper_by_arm: dict[str, float] = {}
@@ -1222,6 +1239,15 @@ def _run_vr_teleop_session(
                 arm.set_catch_pos(gripper_value)
             time.sleep(0.05)
 
+        def _initialize_camera(self):
+            super()._initialize_camera()
+            _warmup_vr_cameras_after_start(
+                self,
+                warmup_s=float(getattr(self, "_vr_camera_warmup_s", 0.0)),
+                camera_names=list(getattr(self, "_vr_warmup_camera_names", [])),
+                teleop_to_local=None,
+            )
+
         def _placo_setup(self):
             super()._placo_setup()
             for arm_name, controller in self.arm_controllers.items():
@@ -1233,8 +1259,17 @@ def _run_vr_teleop_session(
             self.placo_robot.update_kinematics()
             self.sync_end_effector_poses_to_placo_tasks()
 
+        def _update_ik(self):
+            if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
+                return
+            super()._update_ik()
+
         def _update_gripper_target(self):
             if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
                 return
             super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
@@ -1254,6 +1289,9 @@ def _run_vr_teleop_session(
 
         def _send_command(self):
             if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
+                self._hold_frozen_command()
                 return
             q_cmd_by_arm: dict[str, np.ndarray] = {}
             gripper_by_arm: dict[str, float] = {}
@@ -1290,16 +1328,11 @@ def _run_vr_teleop_session(
                 vr_bridge.clear()
                 return
 
-            images: dict[str, np.ndarray] = {}
-            if self.camera_interface is not None:
-                frames_by_serial = self.camera_interface.get_frames()
-                for serial, frame_data in frames_by_serial.items():
-                    camera_name = self.camera_serial_to_name.get(serial)
-                    if camera_name is None or camera_name not in recorder.camera_names:
-                        continue
-                    color = frame_data.get("color")
-                    if color is not None:
-                        images[camera_name] = color
+            images = _poll_vr_camera_frames(
+                self,
+                camera_names=recorder.camera_names,
+                teleop_to_local=None,
+            )
             self._last_vr_images.update(images)
             images_complete = all(camera_name in self._last_vr_images for camera_name in recorder.camera_names)
 
@@ -1356,6 +1389,8 @@ def _run_vr_teleop_session(
             control_rate_hz=args.vr_control_hz,
             visualize_placo=args.vr_visualize_placo,
         )
+        controller._vr_camera_warmup_s = float(args.vr_camera_warmup_s)
+        controller._vr_warmup_camera_names = vr_warmup_camera_names
         controller.run()
     except KeyboardInterrupt:
         logger.warning("**********VR 遥操作收到 Ctrl+C。当前推荐使用 [X] 退出 VR。**********")
@@ -1504,6 +1539,15 @@ def main() -> None:
         help="In VR teleop, do not open OpenCV camera preview windows.",
     )
     parser.add_argument("--vr-control-hz", type=int, default=50, help="VR teleop IK / control loop rate.")
+    parser.add_argument(
+        "--vr-camera-warmup-s",
+        type=float,
+        default=2.0,
+        help=(
+            "Seconds to discard VR camera frames after camera_interface starts, "
+            "before teleop control threads run (arms stay frozen). Use 0 to disable."
+        ),
+    )
     parser.add_argument(
         "--vr-visualize-placo",
         action="store_true",
