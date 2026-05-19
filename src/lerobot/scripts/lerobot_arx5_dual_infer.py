@@ -49,12 +49,14 @@ from lerobot.scripts.lerobot_arx5_infer import (
     KeyboardListener,
     LoopState,
     TrainRawEpisodeRecorder,
+    VrRecordBridge,
     _discover_next_round_index,
     _ensure_vr2robot_import,
     _list_realsense_cameras,
     _load_policy_bundle,
     _log_predicted_actions,
     _predict_action_chunk,
+    _vr_record_loop,
 )
 from lerobot.scripts.recording_hil import (
     ACPInferenceConfig,
@@ -744,7 +746,12 @@ def _execute_dual_chunk(
             )
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            recorder.record_policy_step(action_dict=action, observation=observation_for_step)
+            record_timestamp = step_start if recorder.debug_timestamp else None
+            recorder.record_policy_step(
+                action_dict=action,
+                observation=observation_for_step,
+                record_timestamp=record_timestamp,
+            )
 
         step_elapsed = time.perf_counter() - step_start
         if step_elapsed > step_duration_s:
@@ -1028,7 +1035,12 @@ def _execute_dual_chunk(
 
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            recorder.record_policy_step(action_dict=action, observation=observation_for_step)
+            record_timestamp = step_start if recorder.debug_timestamp else None
+            recorder.record_policy_step(
+                action_dict=action,
+                observation=observation_for_step,
+                record_timestamp=record_timestamp,
+            )
 
         step_elapsed = time.perf_counter() - step_start
         if step_elapsed > step_duration_s:
@@ -1122,6 +1134,33 @@ def _run_vr_teleop_session(
         logger.warning("**********VR 相机线程仅支持 RealSense 序列号。USB 模式下已关闭 VR 相机采集。**********")
         vr_cam = False
     vr_camera_serial_dict = {name: camera_specs[name] for name in camera_names if name in camera_specs}
+
+    vr_bridge = VrRecordBridge()
+    record_stop_event = threading.Event()
+    record_thread: threading.Thread | None = None
+
+    def _start_vr_record_thread() -> None:
+        nonlocal record_thread
+        if recorder is None:
+            return
+        record_stop_event.clear()
+        record_thread = threading.Thread(
+            target=_vr_record_loop,
+            kwargs={
+                "bridge": vr_bridge,
+                "recorder": recorder,
+                "stop_event": record_stop_event,
+                "step_duration_s": float(args.duration),
+            },
+            name="vr-raw-record-loop",
+            daemon=True,
+        )
+        record_thread.start()
+
+    def _stop_vr_record_thread() -> None:
+        record_stop_event.set()
+        if record_thread is not None and record_thread.is_alive():
+            record_thread.join(timeout=2.0)
 
     def _hold_arm_with_vr_gripper_target(
         arm_name: str,
@@ -1240,13 +1279,15 @@ def _run_vr_teleop_session(
                 return
             if not recorder.recording_active:
                 recorder.finish_active_segment()
+                vr_bridge.clear()
                 return
 
-            should_record_vr_step = _is_any_vr_arm_active(self.active)
-            if not should_record_vr_step:
+            grip_active = _is_any_vr_arm_active(self.active)
+            if not grip_active:
                 if recorder.is_segment_active():
                     logger.info("VR 手柄已松开：暂停原始 VR 录制。")
                     recorder.finish_active_segment()
+                vr_bridge.clear()
                 return
 
             images: dict[str, np.ndarray] = {}
@@ -1260,23 +1301,28 @@ def _run_vr_teleop_session(
                     if color is not None:
                         images[camera_name] = color
             self._last_vr_images.update(images)
-            if not all(camera_name in self._last_vr_images for camera_name in recorder.camera_names):
-                return
+            images_complete = all(camera_name in self._last_vr_images for camera_name in recorder.camera_names)
 
-            if not recorder.is_segment_active():
+            if images_complete and not recorder.is_segment_active():
                 logger.info("VR 手柄已握持：开始原始 VR 录制。")
                 recorder.start_vr_segment()
                 recorder.mark_vr_takeover()
 
-            full_images = {camera_name: self._last_vr_images[camera_name] for camera_name in recorder.camera_names}
+            full_images = (
+                {camera_name: self._last_vr_images[camera_name] for camera_name in recorder.camera_names}
+                if images_complete
+                else {}
+            )
             action_vector = _serialize_dual_arm_targets(
                 q_cmd_by_arm=q_cmd_by_arm,
                 gripper_by_arm=gripper_by_arm,
             )
-            recorder.record_vr_step(
+            vr_bridge.update_snapshot(
+                grip_active=True,
                 action_vector=action_vector,
                 state_vector=action_vector,
                 images=full_images,
+                images_complete=images_complete,
             )
 
         def _shutdown_robot(self):
@@ -1293,6 +1339,8 @@ def _run_vr_teleop_session(
     )
     controller: _VRHoldController | None = None
     try:
+        if recorder is not None:
+            _start_vr_record_thread()
         controller = _VRHoldController(
             robot_urdf_path=DEFAULT_DUAL_ARX_X5_URDF_PATH,
             manipulator_config=DEFAULT_DUAL_ARX_X5_MANIPULATOR_CONFIG,
@@ -1314,6 +1362,8 @@ def _run_vr_teleop_session(
     except Exception:
         logger.exception("VR teleop failed.")
     finally:
+        _stop_vr_record_thread()
+        vr_bridge.clear()
         if recorder is not None:
             recorder.finish_active_segment()
 
@@ -1406,6 +1456,11 @@ def main() -> None:
         ),
     )
     parser.add_argument("--duration", type=float, default=0.1, help="Seconds per action step.")
+    parser.add_argument(
+        "--debug-timestamp",
+        action="store_true",
+        help="When recording raw data, save per-frame timestamps in each segment (timestamps.json).",
+    )
 
     parser.add_argument("--left-can-port", type=str, default=DEFAULT_LEFT_CAN_PORT)
     parser.add_argument("--right-can-port", type=str, default=DEFAULT_RIGHT_CAN_PORT)
@@ -1568,6 +1623,7 @@ def main() -> None:
             task=args.task,
             dt_s=args.duration,
             image_save_size_hw=(args.cam_height, args.cam_width),
+            debug_timestamp=args.debug_timestamp,
         )
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None
     if args.end_traj_dir is not None:

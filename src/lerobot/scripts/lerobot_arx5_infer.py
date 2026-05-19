@@ -28,6 +28,7 @@ import termios
 import threading
 import time
 import tty
+from datetime import datetime, timezone
 from contextlib import nullcontext
 from enum import Enum, auto
 from importlib.resources import files
@@ -413,6 +414,55 @@ def _discover_next_round_index(record_dir: Path) -> int:
     return (max(indices) + 1) if indices else 0
 
 
+class VrRecordBridge:
+    """Thread-safe latest VR command/images snapshot for the dedicated record loop."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._grip_active = False
+        self._action_vector: list[float] | None = None
+        self._state_vector: list[float] | None = None
+        self._images: dict[str, np.ndarray] = {}
+        self._images_complete = False
+
+    def update_snapshot(
+        self,
+        *,
+        grip_active: bool,
+        action_vector: list[float],
+        state_vector: list[float],
+        images: dict[str, np.ndarray],
+        images_complete: bool,
+    ) -> None:
+        with self._lock:
+            self._grip_active = grip_active
+            self._action_vector = [float(x) for x in action_vector]
+            self._state_vector = [float(x) for x in state_vector]
+            if images:
+                self._images = {name: np.asarray(img).copy() for name, img in images.items()}
+            self._images_complete = images_complete
+
+    def copy_snapshot_for_record(self) -> dict[str, Any] | None:
+        with self._lock:
+            if not self._grip_active or not self._images_complete:
+                return None
+            if self._action_vector is None or self._state_vector is None:
+                return None
+            return {
+                "action_vector": list(self._action_vector),
+                "state_vector": list(self._state_vector),
+                "images": {name: img.copy() for name, img in self._images.items()},
+            }
+
+    def clear(self) -> None:
+        with self._lock:
+            self._grip_active = False
+            self._action_vector = None
+            self._state_vector = None
+            self._images = {}
+            self._images_complete = False
+
+
 class TrainRawEpisodeRecorder:
     """
     Record robot data in a lightweight "raw" format for later conversion to LeRobotDataset.
@@ -444,6 +494,7 @@ class TrainRawEpisodeRecorder:
         image_save_size_hw: tuple[int, int] | None = None,
         collector_policy_id_policy: str = "policy",
         collector_policy_id_human: str = "human",
+        debug_timestamp: bool = False,
     ) -> None:
         self.raw_record_root = raw_record_root
         self.action_keys = action_keys
@@ -454,6 +505,7 @@ class TrainRawEpisodeRecorder:
         self.image_save_size_hw = image_save_size_hw
         self.collector_policy_id_policy = collector_policy_id_policy
         self.collector_policy_id_human = collector_policy_id_human
+        self.debug_timestamp = bool(debug_timestamp)
 
         self.enabled = raw_record_root is not None
         self._episode_dir: Path | None = None
@@ -470,6 +522,8 @@ class TrainRawEpisodeRecorder:
         self._step_idx = 0
         self._active_actions: list[list[float]] = []
         self._active_states: list[list[float]] = []
+        self._active_timestamps: list[dict[str, Any]] = []
+        self._segment_t0_perf: float | None = None
         self._segment_lock = threading.RLock()
         self._writer_queue: queue.Queue[tuple[Path, np.ndarray] | None] | None = None
         self._writer_thread: threading.Thread | None = None
@@ -575,6 +629,7 @@ class TrainRawEpisodeRecorder:
             "collector_policy_id_human": self.collector_policy_id_human,
             "episode_success": None,
             "has_vr_takeover": False,
+            "debug_timestamp": self.debug_timestamp,
         }
         (self._episode_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
@@ -604,6 +659,8 @@ class TrainRawEpisodeRecorder:
             self._active_segment_source = source
             self._active_actions = []
             self._active_states = []
+            self._active_timestamps = []
+            self._segment_t0_perf = time.perf_counter()
             self._seg_idx += 1
             self._step_idx = 0
 
@@ -636,6 +693,7 @@ class TrainRawEpisodeRecorder:
         action_vector: list[float],
         state_vector: list[float],
         images: dict[str, np.ndarray],
+        record_timestamp: float | None = None,
     ) -> None:
         with self._segment_lock:
             if not self.recording_active or self._active_segment_dir is None:
@@ -649,6 +707,16 @@ class TrainRawEpisodeRecorder:
                     raise ValueError(f"Missing image for camera '{cam}' in recorder.record_*_step().")
             self._active_actions.append([float(x) for x in action_vector])
             self._active_states.append([float(x) for x in state_vector])
+            if self.debug_timestamp and record_timestamp is not None:
+                segment_t0 = self._segment_t0_perf if self._segment_t0_perf is not None else record_timestamp
+                self._active_timestamps.append(
+                    {
+                        "step_index": int(self._step_idx),
+                        "t_perf_s": float(record_timestamp),
+                        "t_wall_iso": datetime.now(timezone.utc).isoformat(),
+                        "t_rel_segment_s": float(record_timestamp - segment_t0),
+                    }
+                )
 
             images_dir = self._active_segment_dir / "images"
             for cam in self.camera_names:
@@ -673,11 +741,22 @@ class TrainRawEpisodeRecorder:
                     self._writer_queue.put((img_path, img.copy()))
             self._step_idx += 1
 
-    def record_policy_step(self, *, action_dict: dict[str, float], observation: dict[str, Any]) -> None:
+    def record_policy_step(
+        self,
+        *,
+        action_dict: dict[str, float],
+        observation: dict[str, Any],
+        record_timestamp: float | None = None,
+    ) -> None:
         action_vector = [float(action_dict[k]) for k in self.action_keys]
         state_vector = [float(observation[k]) for k in self.action_keys]
         images = {cam: observation[cam] for cam in self.camera_names}
-        self._append_step(action_vector=action_vector, state_vector=state_vector, images=images)
+        self._append_step(
+            action_vector=action_vector,
+            state_vector=state_vector,
+            images=images,
+            record_timestamp=record_timestamp,
+        )
 
     def record_vr_step(
         self,
@@ -685,8 +764,14 @@ class TrainRawEpisodeRecorder:
         action_vector: list[float],
         state_vector: list[float],
         images: dict[str, np.ndarray],
+        record_timestamp: float | None = None,
     ) -> None:
-        self._append_step(action_vector=action_vector, state_vector=state_vector, images=images)
+        self._append_step(
+            action_vector=action_vector,
+            state_vector=state_vector,
+            images=images,
+            record_timestamp=record_timestamp,
+        )
 
     def finish_active_segment(self) -> None:
         with self._segment_lock:
@@ -695,6 +780,7 @@ class TrainRawEpisodeRecorder:
             active_segment_dir = self._active_segment_dir
             active_actions = list(self._active_actions)
             active_states = list(self._active_states)
+            active_timestamps = list(self._active_timestamps)
             self._flush_image_queue()
             (active_segment_dir / "actions.json").write_text(
                 json.dumps(active_actions, indent=2) + "\n",
@@ -704,10 +790,17 @@ class TrainRawEpisodeRecorder:
                 json.dumps(active_states, indent=2) + "\n",
                 encoding="utf-8",
             )
+            if self.debug_timestamp:
+                (active_segment_dir / "timestamps.json").write_text(
+                    json.dumps(active_timestamps, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             self._active_segment_dir = None
             self._active_segment_source = None
             self._active_actions = []
             self._active_states = []
+            self._active_timestamps = []
+            self._segment_t0_perf = None
 
     def stop_episode(self, *, success_value: int) -> None:
         if not self.recording_active and not self.waiting_for_success_label:
@@ -778,6 +871,42 @@ class TrainRawEpisodeRecorder:
         self.stop_episode(success_value=success_value)
         logger.info("Raw episode finalized: episode_success=%d.", success_value)
         return True
+
+
+def _vr_record_loop(
+    *,
+    bridge: VrRecordBridge,
+    recorder: TrainRawEpisodeRecorder,
+    stop_event: threading.Event,
+    step_duration_s: float,
+) -> None:
+    """Record VR raw frames at ``step_duration_s`` using ``precise_sleep`` (decoupled from control rate)."""
+    while not stop_event.is_set():
+        step_start = time.perf_counter()
+        snap = bridge.copy_snapshot_for_record()
+        if snap is None or not recorder.recording_active:
+            time.sleep(0.001)
+            continue
+        if not recorder.is_segment_active():
+            time.sleep(0.001)
+            continue
+        record_timestamp = step_start if recorder.debug_timestamp else None
+        recorder.record_vr_step(
+            action_vector=snap["action_vector"],
+            state_vector=snap["state_vector"],
+            images=snap["images"],
+            record_timestamp=record_timestamp,
+        )
+        step_elapsed = time.perf_counter() - step_start
+        if step_elapsed > step_duration_s:
+            logger.warning(
+                "VR 录制步超时：elapsed=%.4fs > duration=%.4fs (overrun=%.4fs)",
+                step_elapsed,
+                step_duration_s,
+                step_elapsed - step_duration_s,
+            )
+        precise_sleep(max(step_duration_s - step_elapsed, 0.0))
+
 
 def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
@@ -856,14 +985,37 @@ def _run_vr_teleop_session(
         robot.hold_position()
         time.sleep(0.1)
         pre_switch_q = np.asarray(robot.get_joint_vector(), dtype=np.float64)
-        if recorder is not None and recorder.recording_active:
-            logger.info("Recording VR segment.")
-            recorder.start_vr_segment()
-            recorder.mark_vr_takeover()
         logger.info(
             "Handing off the same ARX5 client to VR (no CAN reconnect; no protect_mode on arm)."
         )
         robot.disconnect(protect=False, release_arm_to=arx_runtime)
+
+    vr_bridge = VrRecordBridge()
+    record_stop_event = threading.Event()
+    record_thread: threading.Thread | None = None
+
+    def _start_vr_record_thread() -> None:
+        nonlocal record_thread
+        if recorder is None:
+            return
+        record_stop_event.clear()
+        record_thread = threading.Thread(
+            target=_vr_record_loop,
+            kwargs={
+                "bridge": vr_bridge,
+                "recorder": recorder,
+                "stop_event": record_stop_event,
+                "step_duration_s": float(args.duration),
+            },
+            name="vr-raw-record-loop",
+            daemon=True,
+        )
+        record_thread.start()
+
+    def _stop_vr_record_thread() -> None:
+        record_stop_event.set()
+        if record_thread is not None and record_thread.is_alive():
+            record_thread.join(timeout=2.0)
 
     class _VRHoldController(ARXX5TeleopController):
         """Same-process VR: no go_home; Placo + gripper match hardware until user uses VR."""
@@ -933,6 +1085,9 @@ def _run_vr_teleop_session(
             super()._update_gripper_target()
 
         def _send_command(self):
+            record_arm_name = self._record_arm_name
+            last_q_cmd: np.ndarray | None = None
+            last_gripper_target = 0.0
             for arm_name, controller in self.arm_controllers.items():
                 if self.active.get(arm_name, False):
                     q_cmd = self.placo_robot.state.q[self.placo_arm_joint_slice[arm_name]].copy()
@@ -952,42 +1107,61 @@ def _run_vr_teleop_session(
                 else:
                     gripper_target = float(0.0)
 
-                # Record VR actions + full step images.
-                if (
-                    recorder is not None
-                    and recorder.recording_active
-                    and self._record_arm_name is not None
-                    and arm_name == self._record_arm_name
-                ):
-                    images: dict[str, np.ndarray] = {}
-                    if self.camera_interface is not None:
-                        frames_by_serial = self.camera_interface.get_frames()
-                        # Map vr2robot camera names -> Evo-RL local camera names.
-                        teleop_to_local = {"base": "side", "left_wrist": "wrist", "right_wrist": "front"}
-                        for serial, frame_data in frames_by_serial.items():
-                            teleop_name = self.camera_serial_to_name.get(serial)
-                            if teleop_name is None:
-                                continue
-                            local_name = teleop_to_local.get(teleop_name)
-                            if local_name is None or local_name not in recorder.camera_names:
-                                continue
-                            color = frame_data.get("color", None)
-                            if color is None:
-                                continue
-                            images[local_name] = color
-                    # Cache last images so we can still record every control tick.
-                    self._last_vr_images.update(images)
-                    if all(cam in self._last_vr_images for cam in recorder.camera_names):
-                        full_images = {cam: self._last_vr_images[cam] for cam in recorder.camera_names}
-                        action_vector = (
-                            q_cmd[:6].astype(np.float64, copy=False).tolist()
-                            + [float(gripper_target)]
-                        )
-                        recorder.record_vr_step(
-                            action_vector=action_vector,
-                            state_vector=action_vector,
-                            images=full_images,
-                        )
+                if record_arm_name is not None and arm_name == record_arm_name:
+                    last_q_cmd = np.asarray(q_cmd, dtype=np.float64)
+                    last_gripper_target = float(gripper_target)
+
+            if recorder is None or record_arm_name is None:
+                return
+            if not recorder.recording_active:
+                recorder.finish_active_segment()
+                vr_bridge.clear()
+                return
+
+            grip_active = bool(self.active.get(record_arm_name, False))
+            if not grip_active:
+                if recorder.is_segment_active():
+                    logger.info("VR grip released: pausing raw VR recording.")
+                    recorder.finish_active_segment()
+                vr_bridge.clear()
+                return
+
+            images: dict[str, np.ndarray] = {}
+            if self.camera_interface is not None:
+                frames_by_serial = self.camera_interface.get_frames()
+                teleop_to_local = {"base": "side", "left_wrist": "wrist", "right_wrist": "front"}
+                for serial, frame_data in frames_by_serial.items():
+                    teleop_name = self.camera_serial_to_name.get(serial)
+                    if teleop_name is None:
+                        continue
+                    local_name = teleop_to_local.get(teleop_name)
+                    if local_name is None or local_name not in recorder.camera_names:
+                        continue
+                    color = frame_data.get("color", None)
+                    if color is None:
+                        continue
+                    images[local_name] = color
+            self._last_vr_images.update(images)
+            images_complete = all(cam in self._last_vr_images for cam in recorder.camera_names)
+
+            if images_complete and not recorder.is_segment_active():
+                logger.info("VR grip active: starting raw VR recording segment.")
+                recorder.start_vr_segment()
+                recorder.mark_vr_takeover()
+
+            if last_q_cmd is None:
+                return
+            full_images = (
+                {cam: self._last_vr_images[cam] for cam in recorder.camera_names} if images_complete else {}
+            )
+            action_vector = last_q_cmd[:6].astype(np.float64, copy=False).tolist() + [last_gripper_target]
+            vr_bridge.update_snapshot(
+                grip_active=True,
+                action_vector=action_vector,
+                state_vector=action_vector,
+                images=full_images,
+                images_complete=images_complete,
+            )
 
         def _shutdown_robot(self):
             for arm_name, controller in self.arm_controllers.items():
@@ -1007,6 +1181,8 @@ def _run_vr_teleop_session(
         arx_runtime.connect(recorded_pose_path=robot.recorded_pose_path)
 
     try:
+        if recorder is not None:
+            _start_vr_record_thread()
         vr_cam = not args.vr_no_camera
         controller = _VRHoldController(
             robot_urdf_path=DEFAULT_ARX_X5_URDF_PATH,
@@ -1028,6 +1204,8 @@ def _run_vr_teleop_session(
     except Exception:
         logger.exception("VR teleop failed.")
     finally:
+        _stop_vr_record_thread()
+        vr_bridge.clear()
         if recorder is not None:
             recorder.finish_active_segment()
         arm_back = arx_runtime.take_client()
@@ -1170,7 +1348,12 @@ def _execute_chunk(
             observation_for_step = robot.get_observation()
         robot.send_action(action)
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            recorder.record_policy_step(action_dict=action, observation=observation_for_step)
+            record_timestamp = step_start if recorder.debug_timestamp else None
+            recorder.record_policy_step(
+                action_dict=action,
+                observation=observation_for_step,
+                record_timestamp=record_timestamp,
+            )
         precise_sleep(max(step_duration_s - (time.perf_counter() - step_start), 0.0))
 
     if recorder is not None:
@@ -1202,6 +1385,11 @@ def main() -> None:
     )
     parser.add_argument("--execution-horizon", type=int, default=None)
     parser.add_argument("--duration", type=float, default=0.1, help="Seconds per action step.")
+    parser.add_argument(
+        "--debug-timestamp",
+        action="store_true",
+        help="When recording raw data, save per-frame timestamps in each segment (timestamps.json).",
+    )
 
     parser.add_argument("--can-port", type=str, default="can0")
     parser.add_argument("--arm-type", type=int, default=0, choices=[0, 1, 2])
@@ -1310,6 +1498,7 @@ def main() -> None:
             camera_names=camera_names,
             task=args.task,
             dt_s=args.duration,
+            debug_timestamp=args.debug_timestamp,
         )
     execution_horizon = args.execution_horizon or int(policy_cfg.n_action_steps)
     keyboard = None if args.no_keyboard else KeyboardListener()

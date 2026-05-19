@@ -272,6 +272,11 @@ def main() -> None:
     parser.add_argument("--policy-device", type=str, default=None)
     parser.add_argument("--stats-path", type=Path, default=None)
     parser.add_argument("--duration", type=float, default=0.1)
+    parser.add_argument(
+        "--debug-timestamp",
+        action="store_true",
+        help="When recording raw data, save per-frame timestamps in each segment (timestamps.json).",
+    )
     parser.add_argument("--left-can-port", type=str, default=DEFAULT_LEFT_CAN_PORT)
     parser.add_argument("--right-can-port", type=str, default=DEFAULT_RIGHT_CAN_PORT)
     parser.add_argument("--arm-type", type=int, default=0, choices=[0, 1, 2])
@@ -431,6 +436,7 @@ def main() -> None:
             task=args.task,
             dt_s=args.duration,
             image_save_size_hw=(args.cam_height, args.cam_width),
+            debug_timestamp=args.debug_timestamp,
         )
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None
     if args.end_traj_dir is not None:

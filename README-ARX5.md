@@ -178,6 +178,9 @@ Other details:
 - VR segments are stored under `segment_*_vr/`
 - During conversion to LeRobot Dataset, `segment_*_vr` is mapped to
 `complementary_info.is_intervention=1`
+- **`--duration`**: policy steps and **raw VR recording** both target this interval (VR uses a dedicated record thread with `precise_sleep`, decoupled from teleop control).
+- **`--vr-control-hz`**: VR teleop IK / command rate only (default 50 Hz); does not set raw recording rate.
+- **`--debug-timestamp`**: when raw recording is enabled, each segment also writes `timestamps.json` (per-frame `t_perf_s`, `t_wall_iso`, `t_rel_segment_s`) for debugging actual sample spacing.
 
 ### 5.2 Raw dataset format
 
@@ -196,6 +199,7 @@ raw_root/
             ...
         actions.json   # [T, action_dim], action_dim=7 (6 joints + gripper)
         states.json    # [T, 7] state vector aligned with action
+        timestamps.json  # optional: --debug-timestamp (per-frame timing metadata)
       segment_0001_vr/
         images/
           {camera_name}/
@@ -204,6 +208,7 @@ raw_root/
             ...
         actions.json
         states.json
+        timestamps.json  # optional: --debug-timestamp
   episode_0001/
   ...
 ```
