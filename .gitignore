@@ -179,6 +179,7 @@ outputs/
 *.part
 AGENTS.md
 
+traj/
 checkpoints/
 inference_records/
 outputs*

@@ -155,6 +155,23 @@ class ARX5ArmClient:
         state[6] = gripper
         return state.tolist()
 
+    def get_joint_velocities(self) -> list[float]:
+        """Read 6-DoF joint velocities from the ARX5 SDK.
+
+        Returns a zero vector for the stub arm or when the SDK omits the API
+        (e.g. older firmware). Gripper velocity is not exposed by the SDK.
+        """
+        getter = getattr(self.arm, "get_joint_velocities", None)
+        if getter is None:
+            return [0.0] * 6
+        try:
+            velocities = np.asarray(getter(), dtype=np.float64).reshape(-1)
+        except Exception:
+            return [0.0] * 6
+        out = np.zeros(6, dtype=np.float64)
+        out[: min(6, velocities.size)] = velocities[:6]
+        return out.tolist()
+
     def send_joint(self, joint: list[float]) -> list[float]:
         full_joint = list(joint[:7])
         if len(full_joint) < 7:

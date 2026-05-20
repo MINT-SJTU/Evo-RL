@@ -49,12 +49,16 @@ from lerobot.scripts.lerobot_arx5_infer import (
     KeyboardListener,
     LoopState,
     TrainRawEpisodeRecorder,
+    VrRecordBridge,
     _discover_next_round_index,
     _ensure_vr2robot_import,
     _list_realsense_cameras,
     _load_policy_bundle,
     _log_predicted_actions,
     _predict_action_chunk,
+    _poll_vr_camera_frames,
+    _vr_record_loop,
+    _warmup_vr_cameras_after_start,
 )
 from lerobot.scripts.recording_hil import (
     ACPInferenceConfig,
@@ -759,7 +763,12 @@ def _execute_dual_chunk(
             )
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            recorder.record_policy_step(action_dict=action, observation=observation_for_step)
+            record_timestamp = step_start if recorder.debug_timestamp else None
+            recorder.record_policy_step(
+                action_dict=action,
+                observation=observation_for_step,
+                record_timestamp=record_timestamp,
+            )
 
         step_elapsed = time.perf_counter() - step_start
         if step_elapsed > step_duration_s:
@@ -1029,7 +1038,12 @@ def _execute_dual_chunk(
 
 
         if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            recorder.record_policy_step(action_dict=action, observation=observation_for_step)
+            record_timestamp = step_start if recorder.debug_timestamp else None
+            recorder.record_policy_step(
+                action_dict=action,
+                observation=observation_for_step,
+                record_timestamp=record_timestamp,
+            )
 
         step_elapsed = time.perf_counter() - step_start
         if step_elapsed > step_duration_s:
@@ -1124,6 +1138,34 @@ def _run_vr_teleop_session(
         vr_cam = False
     vr_camera_serial_dict = {name: camera_specs[name] for name in camera_names if name in camera_specs}
 
+    vr_bridge = VrRecordBridge()
+    vr_warmup_camera_names = list(recorder.camera_names) if recorder is not None else list(camera_names)
+    record_stop_event = threading.Event()
+    record_thread: threading.Thread | None = None
+
+    def _start_vr_record_thread() -> None:
+        nonlocal record_thread
+        if recorder is None:
+            return
+        record_stop_event.clear()
+        record_thread = threading.Thread(
+            target=_vr_record_loop,
+            kwargs={
+                "bridge": vr_bridge,
+                "recorder": recorder,
+                "stop_event": record_stop_event,
+                "step_duration_s": float(args.duration),
+            },
+            name="vr-raw-record-loop",
+            daemon=True,
+        )
+        record_thread.start()
+
+    def _stop_vr_record_thread() -> None:
+        record_stop_event.set()
+        if record_thread is not None and record_thread.is_alive():
+            record_thread.join(timeout=2.0)
+
     def _hold_arm_with_vr_gripper_target(
         arm_name: str,
         arm_client: ARX5ArmClient,
@@ -1158,7 +1200,21 @@ def _run_vr_teleop_session(
                 return True
             return False
 
+        def _hold_frozen_command(self) -> None:
+            """Hold pre-VR joint targets; ignore VR activation (used during camera warmup)."""
+            for arm_name, controller in self.arm_controllers.items():
+                q_cmd = self._hold_joint_targets.get(arm_name)
+                if q_cmd is None:
+                    q_cmd = np.asarray(controller.get_joint_positions()[:6], dtype=np.float64)
+                    self._hold_joint_targets[arm_name] = q_cmd.copy()
+                controller.set_joint_positions(q_cmd)
+                gripper_config = self.manipulator_config[arm_name]["gripper_config"]
+                joint_name = gripper_config["joint_names"][0]
+                gripper_target = float(self._initial_gripper_by_arm.get(arm_name, self.gripper_pos_target[arm_name][joint_name]))
+                controller.set_catch_pos(gripper_target)
+
         def _robot_setup(self):
+            self._vr_arm_control_enabled = False
             self.arm_controllers = {}
             self._hold_joint_targets: dict[str, np.ndarray] = {}
             self._initial_gripper_by_arm: dict[str, float] = {}
@@ -1184,6 +1240,15 @@ def _run_vr_teleop_session(
                 arm.set_catch_pos(gripper_value)
             time.sleep(0.05)
 
+        def _initialize_camera(self):
+            super()._initialize_camera()
+            _warmup_vr_cameras_after_start(
+                self,
+                warmup_s=float(getattr(self, "_vr_camera_warmup_s", 0.0)),
+                camera_names=list(getattr(self, "_vr_warmup_camera_names", [])),
+                teleop_to_local=None,
+            )
+
         def _placo_setup(self):
             super()._placo_setup()
             for arm_name, controller in self.arm_controllers.items():
@@ -1195,8 +1260,17 @@ def _run_vr_teleop_session(
             self.placo_robot.update_kinematics()
             self.sync_end_effector_poses_to_placo_tasks()
 
+        def _update_ik(self):
+            if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
+                return
+            super()._update_ik()
+
         def _update_gripper_target(self):
             if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
                 return
             super()._update_gripper_target()
             for arm_name, should_hold in self._vr_gripper_hold_until_trigger.items():
@@ -1216,6 +1290,9 @@ def _run_vr_teleop_session(
 
         def _send_command(self):
             if self._request_vr_exit_if_needed():
+                return
+            if not getattr(self, "_vr_arm_control_enabled", True):
+                self._hold_frozen_command()
                 return
             q_cmd_by_arm: dict[str, np.ndarray] = {}
             gripper_by_arm: dict[str, float] = {}
@@ -1241,43 +1318,45 @@ def _run_vr_teleop_session(
                 return
             if not recorder.recording_active:
                 recorder.finish_active_segment()
+                vr_bridge.clear()
                 return
 
-            should_record_vr_step = _is_any_vr_arm_active(self.active)
-            if not should_record_vr_step:
+            grip_active = _is_any_vr_arm_active(self.active)
+            if not grip_active:
                 if recorder.is_segment_active():
                     logger.info("VR 手柄已松开：暂停原始 VR 录制。")
                     recorder.finish_active_segment()
+                vr_bridge.clear()
                 return
 
-            images: dict[str, np.ndarray] = {}
-            if self.camera_interface is not None:
-                frames_by_serial = self.camera_interface.get_frames()
-                for serial, frame_data in frames_by_serial.items():
-                    camera_name = self.camera_serial_to_name.get(serial)
-                    if camera_name is None or camera_name not in recorder.camera_names:
-                        continue
-                    color = frame_data.get("color")
-                    if color is not None:
-                        images[camera_name] = color
+            images = _poll_vr_camera_frames(
+                self,
+                camera_names=recorder.camera_names,
+                teleop_to_local=None,
+            )
             self._last_vr_images.update(images)
-            if not all(camera_name in self._last_vr_images for camera_name in recorder.camera_names):
-                return
+            images_complete = all(camera_name in self._last_vr_images for camera_name in recorder.camera_names)
 
-            if not recorder.is_segment_active():
+            if images_complete and not recorder.is_segment_active():
                 logger.info("VR 手柄已握持：开始原始 VR 录制。")
                 recorder.start_vr_segment()
                 recorder.mark_vr_takeover()
 
-            full_images = {camera_name: self._last_vr_images[camera_name] for camera_name in recorder.camera_names}
+            full_images = (
+                {camera_name: self._last_vr_images[camera_name] for camera_name in recorder.camera_names}
+                if images_complete
+                else {}
+            )
             action_vector = _serialize_dual_arm_targets(
                 q_cmd_by_arm=q_cmd_by_arm,
                 gripper_by_arm=gripper_by_arm,
             )
-            recorder.record_vr_step(
+            vr_bridge.update_snapshot(
+                grip_active=True,
                 action_vector=action_vector,
                 state_vector=action_vector,
                 images=full_images,
+                images_complete=images_complete,
             )
 
         def _shutdown_robot(self):
@@ -1294,6 +1373,8 @@ def _run_vr_teleop_session(
     )
     controller: _VRHoldController | None = None
     try:
+        if recorder is not None:
+            _start_vr_record_thread()
         controller = _VRHoldController(
             robot_urdf_path=DEFAULT_DUAL_ARX_X5_URDF_PATH,
             manipulator_config=DEFAULT_DUAL_ARX_X5_MANIPULATOR_CONFIG,
@@ -1309,12 +1390,16 @@ def _run_vr_teleop_session(
             control_rate_hz=args.vr_control_hz,
             visualize_placo=args.vr_visualize_placo,
         )
+        controller._vr_camera_warmup_s = float(args.vr_camera_warmup_s)
+        controller._vr_warmup_camera_names = vr_warmup_camera_names
         controller.run()
     except KeyboardInterrupt:
         logger.warning("**********VR 遥操作收到 Ctrl+C。当前推荐使用 [X] 退出 VR。**********")
     except Exception:
         logger.exception("VR teleop failed.")
     finally:
+        _stop_vr_record_thread()
+        vr_bridge.clear()
         if recorder is not None:
             recorder.finish_active_segment()
 
@@ -1385,6 +1470,11 @@ def main() -> None:
         ),
     )
     parser.add_argument("--duration", type=float, default=0.1, help="Seconds per action step.")
+    parser.add_argument(
+        "--debug-timestamp",
+        action="store_true",
+        help="When recording raw data, save per-frame timestamps in each segment (timestamps.json).",
+    )
 
     parser.add_argument("--left-can-port", type=str, default=DEFAULT_LEFT_CAN_PORT)
     parser.add_argument("--right-can-port", type=str, default=DEFAULT_RIGHT_CAN_PORT)
@@ -1428,6 +1518,15 @@ def main() -> None:
         help="In VR teleop, do not open OpenCV camera preview windows.",
     )
     parser.add_argument("--vr-control-hz", type=int, default=50, help="VR teleop IK / control loop rate.")
+    parser.add_argument(
+        "--vr-camera-warmup-s",
+        type=float,
+        default=2.0,
+        help=(
+            "Seconds to discard VR camera frames after camera_interface starts, "
+            "before teleop control threads run (arms stay frozen). Use 0 to disable."
+        ),
+    )
     parser.add_argument(
         "--vr-visualize-placo",
         action="store_true",
@@ -1547,6 +1646,7 @@ def main() -> None:
             task=args.task,
             dt_s=args.duration,
             image_save_size_hw=(args.cam_height, args.cam_width),
+            debug_timestamp=args.debug_timestamp,
         )
     end_traj_recorder: EndEffectorTrajectoryRecorder | None = None
     if args.end_traj_dir is not None:
@@ -1696,21 +1796,35 @@ def main() -> None:
                 break
 
             sync_infer_start = time.perf_counter()
-            actions = _predict_action_chunk_with_acp(
-                robot_observation=observation,
-                dataset_features=dataset_features,
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                device=device,
-                task=args.task,
-                robot_type="arx5_dual",
-                execution_horizon=execution_horizon,
-                use_amp=policy_cfg.use_amp,
-                acp_inference=acp_inference,
-                cond_runtime_state=cond_policy_runtime_state,
-                uncond_runtime_state=uncond_policy_runtime_state,
-            )
+            if args.acp_enable:
+                actions = _predict_action_chunk_with_acp(
+                    robot_observation=observation,
+                    dataset_features=dataset_features,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    device=device,
+                    task=args.task,
+                    robot_type="arx5_dual",
+                    execution_horizon=execution_horizon,
+                    use_amp=policy_cfg.use_amp,
+                    acp_inference=acp_inference,
+                    cond_runtime_state=cond_policy_runtime_state,
+                    uncond_runtime_state=uncond_policy_runtime_state,
+                )
+            else:
+                actions = _predict_action_chunk(
+                    robot_observation=observation,
+                    dataset_features=dataset_features,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    device=device,
+                    task=args.task,
+                    robot_type="arx5_dual",
+                    execution_horizon=execution_horizon,
+                    use_amp=policy_cfg.use_amp,
+                )
             sync_infer_elapsed = time.perf_counter() - sync_infer_start
             logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
