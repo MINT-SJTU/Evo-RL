@@ -24,6 +24,7 @@ token IDs and attention masks, which are then added to the observation dictionar
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,47 @@ if TYPE_CHECKING or _transformers_available:
 else:
     AutoProcessor = None
     AutoTokenizer = None
+
+logger = logging.getLogger(__name__)
+
+
+def _str_to_bool(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _hf_cache_dir() -> str | None:
+    return (
+        os.environ.get("HF_CACHE_DIR")
+        or os.environ.get("TRANSFORMERS_CACHE")
+        or os.environ.get("HF_HOME")
+        or None
+    )
+
+
+def _from_pretrained_prefer_cache(loader: Any, pretrained_name_or_path: str, **kwargs: Any) -> Any:
+    """Load from the configured HF cache first, then fall back to the Hub."""
+    cache_dir = _hf_cache_dir()
+    if cache_dir and "cache_dir" not in kwargs:
+        kwargs["cache_dir"] = cache_dir
+
+    force_local = _str_to_bool(os.environ.get("HF_LOCAL_FILES_ONLY"))
+    prefer_cache = not _str_to_bool(os.environ.get("HF_DISABLE_CACHE_FIRST"))
+
+    if force_local:
+        return loader.from_pretrained(pretrained_name_or_path, local_files_only=True, **kwargs)
+
+    if prefer_cache:
+        try:
+            return loader.from_pretrained(pretrained_name_or_path, local_files_only=True, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Could not load %s from local Hugging Face cache%s; falling back to Hub. Error: %s",
+                pretrained_name_or_path,
+                f" ({cache_dir})" if cache_dir else "",
+                exc,
+            )
+
+    return loader.from_pretrained(pretrained_name_or_path, **kwargs)
 
 
 @dataclass
@@ -108,7 +150,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         elif self.tokenizer_name is not None:
             if AutoTokenizer is None:
                 raise ImportError("AutoTokenizer is not available")
-            self.input_tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+            self.input_tokenizer = _from_pretrained_prefer_cache(AutoTokenizer, self.tokenizer_name)
         else:
             raise ValueError(
                 "Either 'tokenizer' or 'tokenizer_name' must be provided. "
@@ -376,7 +418,8 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
         elif self.action_tokenizer_name is not None:
             if AutoProcessor is None:
                 raise ImportError("AutoProcessor is not available")
-            self.action_tokenizer = AutoProcessor.from_pretrained(
+            self.action_tokenizer = _from_pretrained_prefer_cache(
+                AutoProcessor,
                 self.action_tokenizer_name, trust_remote_code=self.trust_remote_code
             )
         else:
@@ -385,7 +428,8 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
 
-        self._paligemma_tokenizer = AutoTokenizer.from_pretrained(
+        self._paligemma_tokenizer = _from_pretrained_prefer_cache(
+            AutoTokenizer,
             self.paligemma_tokenizer_name,
             trust_remote_code=self.trust_remote_code,
             add_eos_token=True,
