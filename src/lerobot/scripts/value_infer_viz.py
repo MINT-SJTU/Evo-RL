@@ -188,8 +188,8 @@ def _draw_overlay(
     y_max: float,
     indicators: np.ndarray | None = None,
 ) -> Image.Image:
-    # Keep signature/call-sites stable; style does not use these signals.
-    _ = (advantage_t, acp_t, highlight_current_point, indicators)
+    # Keep signature/call-sites stable; advantage is not rendered in this overlay.
+    _ = (advantage_t, highlight_current_point)
 
     rgba = frame.convert("RGBA")
     overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
@@ -241,6 +241,46 @@ def _draw_overlay(
     if len(points) >= 2:
         draw.line(points, fill=(100, 200, 255, 220), width=curve_width)
 
+    if indicators is not None and len(indicators) == n:
+        indicator_values = np.asarray(indicators, dtype=np.float32)
+        indicator_y0 = chart_y0 + int(round(chart_h * 0.70))
+        indicator_h = max(1, int(round(chart_h * 0.25)))
+        indicator_points = _curve_points(
+            values=indicator_values,
+            current_step=last,
+            x0=chart_x0,
+            y0=indicator_y0,
+            width=chart_w,
+            height=indicator_h,
+            y_min=-0.05,
+            y_max=1.05,
+        )
+        draw.line(
+            [(chart_x0, indicator_y0 + indicator_h), (chart_x1, indicator_y0 + indicator_h)],
+            fill=(255, 165, 0, 70),
+            width=1,
+        )
+        draw.line(
+            [(chart_x0, indicator_y0), (chart_x1, indicator_y0)],
+            fill=(255, 165, 0, 45),
+            width=1,
+        )
+        if len(indicator_points) >= 2:
+            draw.line(indicator_points, fill=(255, 165, 0, 230), width=max(2, curve_width))
+        if len(indicator_points) >= 1:
+            ipx, ipy = indicator_points[-1]
+            indicator_radius = max(3, curve_width + 1)
+            indicator_color = (255, 80, 80, 255) if int(acp_t) == 1 else (255, 165, 0, 255)
+            draw.ellipse(
+                (
+                    ipx - indicator_radius,
+                    ipy - indicator_radius,
+                    ipx + indicator_radius,
+                    ipy + indicator_radius,
+                ),
+                fill=indicator_color,
+            )
+
     if len(points) >= 1:
         px, py = points[-1]
         radius = max(4, curve_width + 2)
@@ -252,7 +292,7 @@ def _draw_overlay(
         )
 
         value_font = _load_font(max(16, height // 22))
-        value_text = f"{float(values[last]):.4f}"
+        value_text = f"value {float(values[last]):.4f} | indicator {int(acp_t)}"
         value_bbox = draw.textbbox((0, 0), value_text, font=value_font)
         text_w = value_bbox[2] - value_bbox[0]
         text_h = value_bbox[3] - value_bbox[1]
@@ -270,6 +310,29 @@ def _draw_overlay(
     fy = height - frame_h - 6
     draw.rectangle((fx - 3, fy - 1, fx + frame_w + 3, fy + frame_h + 1), fill=(0, 0, 0, 140))
     draw.text((fx, fy), frame_text, fill=(200, 200, 200, 220), font=small_font)
+
+    legend_x = chart_x0 + 4
+    legend_y = chart_y0 + 4
+    legend_font = _load_font(max(12, height // 34))
+    legend_items = [
+        ((100, 200, 255, 230), "value"),
+        ((255, 165, 0, 230), "indicator"),
+    ]
+    for color, label in legend_items:
+        bbox = draw.textbbox((0, 0), label, font=legend_font)
+        label_w = bbox[2] - bbox[0]
+        label_h = bbox[3] - bbox[1]
+        draw.rectangle(
+            (legend_x - 3, legend_y - 2, legend_x + label_w + 18, legend_y + label_h + 2),
+            fill=(0, 0, 0, 120),
+        )
+        draw.line(
+            [(legend_x, legend_y + label_h // 2), (legend_x + 12, legend_y + label_h // 2)],
+            fill=color,
+            width=max(2, curve_width),
+        )
+        draw.text((legend_x + 16, legend_y), label, fill=(235, 235, 235, 230), font=legend_font)
+        legend_y += label_h + 6
 
     return Image.alpha_composite(rgba, overlay).convert("RGB")
 

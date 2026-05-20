@@ -67,8 +67,8 @@ def get_wandb_run_id_from_filesystem(log_dir: Path) -> str:
 
 
 def get_safe_wandb_artifact_name(name: str):
-    """WandB artifacts don't accept ":" or "/" in their name."""
-    return name.replace(":", "_").replace("/", "_")
+    """WandB artifact names only allow alphanumeric characters, dots, dashes, and underscores."""
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
 
 
 class WandBLogger:
