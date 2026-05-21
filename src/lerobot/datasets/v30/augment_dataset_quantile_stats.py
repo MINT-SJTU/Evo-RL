@@ -15,15 +15,12 @@
 # limitations under the License.
 
 """
-This script augments existing LeRobot datasets with quantile statistics.
+Recompute global LeRobot dataset statistics directly from dataset samples.
 
-Most datasets created before the quantile feature was added do not contain
-quantile statistics (q01, q10, q50, q90, q99) in their metadata. This script:
-
-1. Loads an existing LeRobot dataset in v3.0 format
-2. Checks if it already contains quantile statistics
-3. If missing, computes quantile statistics for all features
-4. Updates the dataset metadata with the new quantile statistics
+This script is intended for datasets whose existing `meta/stats.json` is missing
+quantiles or should be regenerated from scratch. Unlike approaches that aggregate
+episode- or shard-level stats, this script scans the dataset itself and computes
+new global feature statistics over the full merged dataset contents.
 
 Usage:
 
@@ -34,7 +31,6 @@ python src/lerobot/datasets/v30/augment_dataset_quantile_stats.py \
 """
 
 import argparse
-import concurrent.futures
 import logging
 from pathlib import Path
 
@@ -44,7 +40,7 @@ from huggingface_hub import HfApi
 from requests import HTTPError
 from tqdm import tqdm
 
-from lerobot.datasets.compute_stats import DEFAULT_QUANTILES, aggregate_stats, get_feature_stats
+from lerobot.datasets.compute_stats import DEFAULT_QUANTILES, get_feature_stats
 from lerobot.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDataset
 from lerobot.datasets.utils import write_stats
 from lerobot.utils.utils import init_logging
@@ -72,111 +68,96 @@ def has_quantile_stats(stats: dict[str, dict] | None, quantile_list_keys: list[s
     return False
 
 
-def process_single_episode(dataset: LeRobotDataset, episode_idx: int) -> dict:
-    """Process a single episode and return its statistics.
+def _stack_feature_values(values: list[torch.Tensor | np.ndarray]) -> np.ndarray:
+    tensors = [v if isinstance(v, torch.Tensor) else torch.as_tensor(v) for v in values]
+    return torch.stack(tensors).cpu().numpy()
 
-    Args:
-        dataset: The LeRobot dataset
-        episode_idx: Index of the episode to process
 
-    Returns:
-        Dictionary containing episode statistics
-    """
-    logging.info(f"Computing stats for episode {episode_idx}")
+def _compute_feature_stats(dataset: LeRobotDataset, key: str) -> dict[str, np.ndarray]:
+    feature = dataset.features[key]
+    dtype = feature["dtype"]
+    if dtype == "string":
+        raise ValueError(f"String feature '{key}' does not have numeric statistics.")
 
-    start_idx = dataset.meta.episodes[episode_idx]["dataset_from_index"]
-    end_idx = dataset.meta.episodes[episode_idx]["dataset_to_index"]
-
-    collected_data: dict[str, list] = {}
-    for idx in range(start_idx, end_idx):
+    values = []
+    for idx in tqdm(range(dataset.num_frames), desc=f"Feature {key}", leave=False):
         item = dataset[idx]
-        for key, value in item.items():
-            if key not in dataset.features:
-                continue
+        values.append(item[key])
 
-            if key not in collected_data:
-                collected_data[key] = []
-            collected_data[key].append(value)
+    if not values:
+        raise ValueError(f"No samples found for feature '{key}'.")
 
-    ep_stats = {}
-    for key, data_list in collected_data.items():
-        if dataset.features[key]["dtype"] == "string":
-            continue
+    data = _stack_feature_values(values)
+    if dtype in ["image", "video"]:
+        if data.dtype == np.uint8:
+            data = data.astype(np.float32) / 255.0
+        axes_to_reduce = (0, 2, 3)
+        keepdims = True
+    else:
+        axes_to_reduce = 0
+        keepdims = data.ndim == 1
 
-        data = torch.stack(data_list).cpu().numpy()
-        if dataset.features[key]["dtype"] in ["image", "video"]:
-            if data.dtype == np.uint8:
-                data = data.astype(np.float32) / 255.0
+    stats = get_feature_stats(data, axis=axes_to_reduce, keepdims=keepdims, quantile_list=DEFAULT_QUANTILES)
+    if dtype in ["image", "video"]:
+        stats = {k: v if k == "count" else np.squeeze(v, axis=0) for k, v in stats.items()}
+    return stats
 
-            axes_to_reduce = (0, 2, 3)
-            keepdims = True
-        else:
-            axes_to_reduce = 0
-            keepdims = data.ndim == 1
 
-        ep_stats[key] = get_feature_stats(
-            data, axis=axes_to_reduce, keepdims=keepdims, quantile_list=DEFAULT_QUANTILES
+def _compute_selected_feature_stats(dataset: LeRobotDataset, feature_keys: list[str]) -> dict[str, dict[str, np.ndarray]]:
+    """Compute stats for multiple selected non-visual features in a single dataset scan."""
+    if not feature_keys:
+        raise ValueError("feature_keys must not be empty.")
+
+    feature_values: dict[str, list[torch.Tensor | np.ndarray]] = {key: [] for key in feature_keys}
+    for idx in tqdm(range(dataset.num_frames), desc="Selected features", leave=False):
+        item = dataset[idx]
+        for key in feature_keys:
+            feature_values[key].append(item[key])
+
+    stats: dict[str, dict[str, np.ndarray]] = {}
+    for key in feature_keys:
+        feature = dataset.features[key]
+        dtype = feature["dtype"]
+        if dtype in {"string", "image", "video"}:
+            raise ValueError(f"Selected feature '{key}' must be a non-visual numeric feature, got dtype={dtype}.")
+
+        values = feature_values[key]
+        if not values:
+            raise ValueError(f"No samples found for feature '{key}'.")
+
+        data = _stack_feature_values(values)
+        stats[key] = get_feature_stats(
+            data,
+            axis=0,
+            keepdims=data.ndim == 1,
+            quantile_list=DEFAULT_QUANTILES,
         )
 
-        if dataset.features[key]["dtype"] in ["image", "video"]:
-            ep_stats[key] = {
-                k: v if k == "count" else np.squeeze(v, axis=0) for k, v in ep_stats[key].items()
-            }
-
-    return ep_stats
+    return stats
 
 
-def compute_quantile_stats_for_dataset(dataset: LeRobotDataset) -> dict[str, dict]:
-    """Compute quantile statistics for all episodes in the dataset.
+def compute_quantile_stats_for_dataset(
+    dataset: LeRobotDataset,
+    feature_keys: list[str] | None = None,
+) -> dict[str, dict]:
+    """Compute dataset-level statistics directly from all frames in the dataset."""
+    logging.info(
+        "Computing global dataset statistics from %d frames across %d episodes",
+        dataset.num_frames,
+        dataset.num_episodes,
+    )
 
-    Args:
-        dataset: The LeRobot dataset to compute statistics for
+    if feature_keys is None:
+        feature_keys = [key for key, ft in dataset.features.items() if ft["dtype"] != "string"]
+    if not feature_keys:
+        raise ValueError("Dataset has no numeric/image/video features to compute statistics for.")
 
-    Returns:
-        Dictionary containing aggregated statistics with quantiles
+    stats: dict[str, dict] = {}
+    for key in feature_keys:
+        logging.info("Computing global stats for feature '%s'", key)
+        stats[key] = _compute_feature_stats(dataset, key)
 
-    Note:
-        Video decoding operations are not thread-safe, so we process episodes sequentially
-        when video keys are present. For datasets without videos, we use parallel processing
-        with ThreadPoolExecutor for better performance.
-    """
-    logging.info(f"Computing quantile statistics for dataset with {dataset.num_episodes} episodes")
-
-    episode_stats_list = []
-    has_videos = len(dataset.meta.video_keys) > 0
-
-    if has_videos:
-        logging.info("Dataset contains video keys - using sequential processing for thread safety")
-        for episode_idx in tqdm(range(dataset.num_episodes), desc="Processing episodes"):
-            ep_stats = process_single_episode(dataset, episode_idx)
-            episode_stats_list.append(ep_stats)
-    else:
-        logging.info("Dataset has no video keys - using parallel processing for better performance")
-        max_workers = min(dataset.num_episodes, 16)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_episode = {
-                executor.submit(process_single_episode, dataset, episode_idx): episode_idx
-                for episode_idx in range(dataset.num_episodes)
-            }
-
-            episode_results = {}
-            with tqdm(total=dataset.num_episodes, desc="Processing episodes") as pbar:
-                for future in concurrent.futures.as_completed(future_to_episode):
-                    episode_idx = future_to_episode[future]
-                    ep_stats = future.result()
-                    episode_results[episode_idx] = ep_stats
-                    pbar.update(1)
-
-        for episode_idx in range(dataset.num_episodes):
-            if episode_idx in episode_results:
-                episode_stats_list.append(episode_results[episode_idx])
-
-    if not episode_stats_list:
-        raise ValueError("No episode data found for computing statistics")
-
-    logging.info(f"Aggregating statistics from {len(episode_stats_list)} episodes")
-    return aggregate_stats(episode_stats_list)
+    return stats
 
 
 def augment_dataset_with_quantile_stats(
@@ -184,6 +165,7 @@ def augment_dataset_with_quantile_stats(
     root: str | Path | None = None,
     overwrite: bool = False,
     push_to_hub: bool = False,
+    include_visual_stats: bool = True,
 ) -> None:
     """Augment a dataset with quantile statistics if they are missing.
 
@@ -192,6 +174,7 @@ def augment_dataset_with_quantile_stats(
         root: Local root directory for the dataset
         overwrite: Overwrite existing quantile statistics if they already exist
         push_to_hub: Whether to push updated metadata to the Hugging Face Hub
+        include_visual_stats: Whether to recompute stats for image/video features
     """
     logging.info(f"Loading dataset: {repo_id}")
     dataset = LeRobotDataset(
@@ -205,7 +188,25 @@ def augment_dataset_with_quantile_stats(
 
     logging.info("Dataset does not contain quantile statistics. Computing them now...")
 
-    new_stats = compute_quantile_stats_for_dataset(dataset)
+    if include_visual_stats:
+        new_stats = compute_quantile_stats_for_dataset(dataset)
+    else:
+        logging.info(
+            "Skipping visual features and restricting stats to policy-critical features: observation.state, action."
+        )
+        selected_feature_keys = [
+            key for key in ["observation.state", "action"] if key in dataset.features
+        ]
+        if not selected_feature_keys:
+            raise ValueError(
+                "Neither 'observation.state' nor 'action' exists in the dataset features."
+            )
+
+        logging.info(
+            "Fast path: computing selected non-visual features in one scan: %s",
+            ", ".join(selected_feature_keys),
+        )
+        new_stats = _compute_selected_feature_stats(dataset, selected_feature_keys)
 
     logging.info("Updating dataset metadata with new quantile statistics")
     dataset.meta.stats = new_stats
@@ -254,6 +255,11 @@ def main():
         action="store_true",
         help="Push updated dataset metadata to the Hugging Face Hub after recomputing stats.",
     )
+    parser.add_argument(
+        "--exclude-visual-stats",
+        action="store_true",
+        help="Skip image/video features. Useful for policies such as pi0/pi05 where VISUAL=IDENTITY.",
+    )
 
     args = parser.parse_args()
     root = Path(args.root) if args.root else None
@@ -265,6 +271,7 @@ def main():
         root=root,
         overwrite=args.overwrite,
         push_to_hub=args.push_to_hub,
+        include_visual_stats=not args.exclude_visual_stats,
     )
 
 

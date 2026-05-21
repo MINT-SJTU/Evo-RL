@@ -23,7 +23,7 @@ python -u -m lerobot.scripts.lerobot_arx5_dual_infer   \
 --left-can-port can0 \
 --right-can-port can1 \
 --cameras base:254522076820 left_wrist:260522278233  right_wrist:352122273179 \
---cam-width 424 --cam-height 240 --fps 60 \
+--cam-width 424 --cam-height 240 \
 --duration 0.05 \
 --debug-timestamp \
 --execution-horizon 25 \
