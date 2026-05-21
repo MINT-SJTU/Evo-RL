@@ -183,6 +183,7 @@ def augment_dataset_with_quantile_stats(
     repo_id: str,
     root: str | Path | None = None,
     overwrite: bool = False,
+    push_to_hub: bool = False,
 ) -> None:
     """Augment a dataset with quantile statistics if they are missing.
 
@@ -190,6 +191,7 @@ def augment_dataset_with_quantile_stats(
         repo_id: Repository ID of the dataset
         root: Local root directory for the dataset
         overwrite: Overwrite existing quantile statistics if they already exist
+        push_to_hub: Whether to push updated metadata to the Hugging Face Hub
     """
     logging.info(f"Loading dataset: {repo_id}")
     dataset = LeRobotDataset(
@@ -211,6 +213,10 @@ def augment_dataset_with_quantile_stats(
     write_stats(new_stats, dataset.meta.root)
 
     logging.info("Successfully updated dataset with quantile statistics")
+    if not push_to_hub:
+        logging.info("Skipping push_to_hub; local dataset metadata has been updated only.")
+        return
+
     dataset.push_to_hub()
 
     hub_api = HfApi()
@@ -243,6 +249,11 @@ def main():
         action="store_true",
         help="Overwrite existing quantile statistics if they already exist",
     )
+    parser.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help="Push updated dataset metadata to the Hugging Face Hub after recomputing stats.",
+    )
 
     args = parser.parse_args()
     root = Path(args.root) if args.root else None
@@ -253,6 +264,7 @@ def main():
         repo_id=args.repo_id,
         root=root,
         overwrite=args.overwrite,
+        push_to_hub=args.push_to_hub,
     )
 
 
