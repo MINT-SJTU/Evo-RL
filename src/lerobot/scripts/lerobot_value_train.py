@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
+import datetime as dt
 import logging
+import os
 import time
 from contextlib import nullcontext
 from pprint import pformat
@@ -82,13 +84,31 @@ def value_train(
     cfg.validate()
 
     if accelerator is None:
-        from accelerate.utils import DistributedDataParallelKwargs
+        from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        kwargs_handlers = [ddp_kwargs]
+
+        dist_timeout_seconds = os.environ.get("DIST_TIMEOUT_SECONDS", "").strip()
+        if dist_timeout_seconds:
+            try:
+                timeout_seconds = int(dist_timeout_seconds)
+                if timeout_seconds <= 0:
+                    raise ValueError
+            except ValueError:
+                logging.warning(
+                    "Ignoring invalid DIST_TIMEOUT_SECONDS=%r; expected a positive integer.",
+                    dist_timeout_seconds,
+                )
+            else:
+                kwargs_handlers.append(
+                    InitProcessGroupKwargs(timeout=dt.timedelta(seconds=timeout_seconds))
+                )
+
         force_cpu = cfg.value.device == "cpu"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
-            kwargs_handlers=[ddp_kwargs],
+            kwargs_handlers=kwargs_handlers,
             cpu=force_cpu,
         )
 
