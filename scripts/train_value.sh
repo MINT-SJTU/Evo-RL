@@ -1,0 +1,17 @@
+accelerate launch \
+--mixed_precision=bf16 \
+-m lerobot.scripts.lerobot_value_train  \
+--value.type=pistar06 \
+--value.backbone_source=pi05 \
+--value.freeze_language_model=false \
+--value.freeze_vision_encoder=false \
+--targets.length_scale_quantile=0.9 \
+--batch_size=16 --steps=50000 \
+--save_freq=5000 \
+--save_checkpoint=true  \
+--wandb.enable=true  \
+--wandb.disable_artifact=true  \
+--job_name=value_socks6000_unfreeze_all_b16_gpu8 \
+--dataset.repo_id=noetix/socks6000  \
+--dataset.root=/mnt/data2/datasets/lerobot_socks_sft3000_auto1300_vr800/  \
+--output_dir=outputs/value_train/value_socks6000_unfreeze_all_b16_gpu8 
