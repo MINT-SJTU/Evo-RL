@@ -70,6 +70,7 @@ from lerobot.scripts.lerobot_arx5_rtc_utils import (
 )
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.errors import DeviceNotConnectedError
+from lerobot.utils.filter_algo import SimpleKalmanFilter
 from lerobot.utils.robot_utils import precise_sleep
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
@@ -109,6 +110,9 @@ RIGHT_STATE_KEYS = STATE_KEYS[:7]
 # LEFT_STATE_KEYS = STATE_KEYS[7:]
 # RIGHT_STATE_KEYS = STATE_KEYS[:7]
 ARM_ORDER = ("left_arm", "right_arm")
+ACTION_KALMAN_PROCESS_VARIANCE = 0.001
+ACTION_KALMAN_MEASUREMENT_VARIANCE = 0.005
+ACTION_KALMAN_PASSTHROUGH_KEYS = (RIGHT_STATE_KEYS[-1], LEFT_STATE_KEYS[-1])
 
 
 class EndEffectorTrajectoryRecorder:
@@ -479,6 +483,29 @@ def _split_dual_action(action: dict[str, float]) -> tuple[list[float], list[floa
     left_joint = [float(action[key]) for key in LEFT_STATE_KEYS]
     right_joint = [float(action[key]) for key in RIGHT_STATE_KEYS]
     return left_joint, right_joint
+
+
+def _filter_action(
+    action: dict[str, float],
+    action_kalman_filter: SimpleKalmanFilter | None,
+) -> tuple[dict[str, float], SimpleKalmanFilter]:
+    current_action = np.asarray([action[key] for key in STATE_KEYS], dtype=np.float64)
+    if action_kalman_filter is None or action_kalman_filter.dims != len(current_action):
+        action_kalman_filter = SimpleKalmanFilter(
+            process_variance=ACTION_KALMAN_PROCESS_VARIANCE,
+            measurement_variance=ACTION_KALMAN_MEASUREMENT_VARIANCE,
+            dims=len(current_action),
+            initial_position=current_action,
+        )
+
+    action_kalman_filter.predict()
+    filtered_position = action_kalman_filter.update(current_action)
+    filtered_action = dict(action)
+    for index, key in enumerate(STATE_KEYS):
+        filtered_action[key] = float(filtered_position[index])
+    for key in ACTION_KALMAN_PASSTHROUGH_KEYS:
+        filtered_action[key] = float(action[key])
+    return filtered_action, action_kalman_filter
 
 
 def _clip_safe_actions(
@@ -1294,6 +1321,7 @@ def main() -> None:
 
     parser.add_argument("--safe-mode", action="store_true", default=False)
     parser.add_argument("--max-joint-step", type=float, default=0.02)
+    parser.add_argument("--use_kf", action="store_true", default=False, help="Enable Kalman filtering for actions.")
     parser.add_argument("--no-keyboard", action="store_true")
     parser.add_argument(
         "--vr-scale-factor",
@@ -1501,6 +1529,7 @@ def main() -> None:
     camera_failure: Exception | None = None
     chunk_index = 0
     joint_vel_global_step = 0
+    action_kalman_filter: SimpleKalmanFilter | None = None
     infer_ctl: _AsyncInferCtl | None = None
     infer_stop_evt: threading.Event | None = None
     infer_pause_evt: threading.Event | None = None
@@ -1583,95 +1612,95 @@ def main() -> None:
                 "raw_recorder": raw_recorder,
             }
 
-            if keyboard is None:
-                bootstrap_obs = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-                logger.info(
-                    "双臂 async bootstrap 前（与 cmd14 同序：右7+左7）\n  obs14=%s",
-                    _state_cmd14_from_observation(bootstrap_obs),
-                )
-                _bootstrap_predict_t0 = time.perf_counter()
-                _H_rtc = int(policy_cfg.chunk_size)
-                _boot_eh = _execution_horizon_kwarg(horizon=_H_rtc, s_steps=0, d_used=0)
-                bootstrap_post, bootstrap_raw = _predict_pi05_action_chunk_rtc(
-                    robot_observation=bootstrap_obs,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    use_amp=policy_cfg.use_amp,
-                    inference_delay=0,
-                    prev_chunk_left_over=None,
-                    execution_horizon=_boot_eh,
-                )
-                bootstrap_act = _chunk_tensor_to_action_dict_list(bootstrap_post, dataset_features)
-                logger.info(
-                    "双臂 async bootstrap：predict_wall_s=%.4f",
-                    time.perf_counter() - _bootstrap_predict_t0,
-                )
-                if len(bootstrap_act) < infer_ctl.s_min:
-                    logger.error(
-                        "双臂 async bootstrap：chunk 长度 %d < s_min (%d)；退出。",
-                        len(bootstrap_act),
-                        infer_ctl.s_min,
-                    )
-                    sys.exit(1)
-                infer_ctl.actions_cur = bootstrap_act
-                infer_ctl.chunk_cur_raw = bootstrap_raw.squeeze(0).detach().cpu().to(dtype=torch.float32)
-                infer_ctl.idx = 0
-                infer_ctl.chunk_serial = 1
-                infer_ctl.obs_cur = bootstrap_obs
-                logger.info(
-                    "双臂 async bootstrap：s(idx_at_predict_start)=0 chunk_serial=%d（加载后）",
-                    infer_ctl.chunk_serial,
-                )
-                if state != LoopState.RUNNING:
-                    infer_pause_evt.set()
-                if args.record_dir is not None:
-                    assert infer_round_lock is not None
-                    assert infer_round_holder is not None
-                    with infer_round_lock:
-                        ri_boot = infer_round_holder[0]
-                        infer_round_holder[0] = ri_boot + 1
-                    st_list = [float(bootstrap_obs[k]) for k in STATE_KEYS]
-                    bs_dir = _save_chunk_io(
-                        record_dir=args.record_dir,
-                        round_index=ri_boot,
-                        observation=bootstrap_obs,
-                        state=st_list,
-                        actions=bootstrap_act,
-                        camera_names=camera_names,
-                    )
-                    logger.info("双臂 async：bootstrap chunk %d 已保存至 %s", ri_boot, bs_dir)
-                left_bg = [round(float(a[LEFT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
-                right_bg = [round(float(a[RIGHT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
-                logger.info(
-                    "双臂 async：bootstrap %d 步 horizon。左手第一关节:%s 右手第一关节:%s",
+        if keyboard is None:
+            bootstrap_obs = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+            logger.info(
+                "双臂 async bootstrap 前（与 cmd14 同序：右7+左7）\n  obs14=%s",
+                _state_cmd14_from_observation(bootstrap_obs),
+            )
+            _bootstrap_predict_t0 = time.perf_counter()
+            _H_rtc = int(policy_cfg.chunk_size)
+            _boot_eh = _execution_horizon_kwarg(horizon=_H_rtc, s_steps=0, d_used=0)
+            bootstrap_post, bootstrap_raw = _predict_pi05_action_chunk_rtc(
+                robot_observation=bootstrap_obs,
+                dataset_features=dataset_features,
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                device=device,
+                task=args.task,
+                robot_type="arx5_dual",
+                use_amp=policy_cfg.use_amp,
+                inference_delay=0,
+                prev_chunk_left_over=None,
+                execution_horizon=_boot_eh,
+            )
+            bootstrap_act = _chunk_tensor_to_action_dict_list(bootstrap_post, dataset_features)
+            logger.info(
+                "双臂 async bootstrap：predict_wall_s=%.4f",
+                time.perf_counter() - _bootstrap_predict_t0,
+            )
+            if len(bootstrap_act) < infer_ctl.s_min:
+                logger.error(
+                    "双臂 async bootstrap：chunk 长度 %d < s_min (%d)；退出。",
                     len(bootstrap_act),
-                    left_bg,
-                    right_bg,
+                    infer_ctl.s_min,
                 )
-                _log_predicted_actions(bootstrap_act)
-                infer_worker_thr = threading.Thread(
-                    target=_dual_async_inference_worker,
-                    kwargs=dual_async_worker_kwargs,
-                    daemon=True,
-                    name="dual-arx5-async-policy",
-                )
-                infer_worker_thr.start()
-            else:
-                infer_ctl.actions_cur = []
-                infer_ctl.chunk_cur_raw = None
-                infer_ctl.idx = 0
-                infer_ctl.chunk_serial = 0
-                infer_ctl.obs_cur = {}
-                infer_worker_thr = None
+                sys.exit(1)
+            infer_ctl.actions_cur = bootstrap_act
+            infer_ctl.chunk_cur_raw = bootstrap_raw.squeeze(0).detach().cpu().to(dtype=torch.float32)
+            infer_ctl.idx = 0
+            infer_ctl.chunk_serial = 1
+            infer_ctl.obs_cur = bootstrap_obs
+            logger.info(
+                "双臂 async bootstrap：s(idx_at_predict_start)=0 chunk_serial=%d（加载后）",
+                infer_ctl.chunk_serial,
+            )
+            if state != LoopState.RUNNING:
                 infer_pause_evt.set()
-                logger.info(
-                    "双臂 async：尚未进行第一段推理；请按 [R] 开始（将运行 bootstrap 并启动后台推理线程）。"
+            if args.record_dir is not None:
+                assert infer_round_lock is not None
+                assert infer_round_holder is not None
+                with infer_round_lock:
+                    ri_boot = infer_round_holder[0]
+                    infer_round_holder[0] = ri_boot + 1
+                st_list = [float(bootstrap_obs[k]) for k in STATE_KEYS]
+                bs_dir = _save_chunk_io(
+                    record_dir=args.record_dir,
+                    round_index=ri_boot,
+                    observation=bootstrap_obs,
+                    state=st_list,
+                    actions=bootstrap_act,
+                    camera_names=camera_names,
                 )
+                logger.info("双臂 async：bootstrap chunk %d 已保存至 %s", ri_boot, bs_dir)
+            left_bg = [round(float(a[LEFT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
+            right_bg = [round(float(a[RIGHT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
+            logger.info(
+                "双臂 async：bootstrap %d 步 horizon。左手第一关节:%s 右手第一关节:%s",
+                len(bootstrap_act),
+                left_bg,
+                right_bg,
+            )
+            _log_predicted_actions(bootstrap_act)
+            infer_worker_thr = threading.Thread(
+                target=_dual_async_inference_worker,
+                kwargs=dual_async_worker_kwargs,
+                daemon=True,
+                name="dual-arx5-async-policy",
+            )
+            infer_worker_thr.start()
+        else:
+            infer_ctl.actions_cur = []
+            infer_ctl.chunk_cur_raw = None
+            infer_ctl.idx = 0
+            infer_ctl.chunk_serial = 0
+            infer_ctl.obs_cur = {}
+            infer_worker_thr = None
+            infer_pause_evt.set()
+            logger.info(
+                "双臂 async：尚未进行第一段推理；请按 [R] 开始（将运行 bootstrap 并启动后台推理线程）。"
+            )
 
         while running:
             if keyboard is not None:
@@ -1708,6 +1737,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
+                    action_kalman_filter = None
                     state = LoopState.STOPPED
                     request_next_chunk = False if args.safe_mode else True
                     if infer_pause_evt is not None:
@@ -1717,6 +1747,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
+                    action_kalman_filter = None
                     if (
                         infer_ctl is not None
                         and infer_stop_evt is not None
@@ -1884,6 +1915,9 @@ def main() -> None:
                 )
             else:
                 clipped_here = False
+
+            if args.use_kf:
+                action, action_kalman_filter = _filter_action(action, action_kalman_filter)
 
             if (
                 raw_recorder is not None

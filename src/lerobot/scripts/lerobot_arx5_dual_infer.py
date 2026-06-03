@@ -69,6 +69,7 @@ from lerobot.scripts.recording_hil import (
 )
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.errors import DeviceNotConnectedError
+from lerobot.utils.filter_algo import SimpleKalmanFilter
 from lerobot.utils.robot_utils import precise_sleep
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
@@ -108,6 +109,9 @@ RIGHT_STATE_KEYS = STATE_KEYS[:7]
 # LEFT_STATE_KEYS = STATE_KEYS[7:]
 # RIGHT_STATE_KEYS = STATE_KEYS[:7]
 ARM_ORDER = ("left_arm", "right_arm")
+ACTION_KALMAN_PROCESS_VARIANCE = 0.001
+ACTION_KALMAN_MEASUREMENT_VARIANCE = 0.005
+ACTION_KALMAN_PASSTHROUGH_KEYS = (RIGHT_STATE_KEYS[-1], LEFT_STATE_KEYS[-1])
 
 
 class EndEffectorTrajectoryRecorder:
@@ -473,6 +477,29 @@ def _split_dual_action(action: dict[str, float]) -> tuple[list[float], list[floa
     left_joint = [float(action[key]) for key in LEFT_STATE_KEYS]
     right_joint = [float(action[key]) for key in RIGHT_STATE_KEYS]
     return left_joint, right_joint
+
+
+def _filter_action(
+    action: dict[str, float],
+    action_kalman_filter: SimpleKalmanFilter | None,
+) -> tuple[dict[str, float], SimpleKalmanFilter]:
+    current_action = np.asarray([action[key] for key in STATE_KEYS], dtype=np.float64)
+    if action_kalman_filter is None or action_kalman_filter.dims != len(current_action):
+        action_kalman_filter = SimpleKalmanFilter(
+            process_variance=ACTION_KALMAN_PROCESS_VARIANCE,
+            measurement_variance=ACTION_KALMAN_MEASUREMENT_VARIANCE,
+            dims=len(current_action),
+            initial_position=current_action,
+        )
+
+    action_kalman_filter.predict()
+    filtered_position = action_kalman_filter.update(current_action)
+    filtered_action = dict(action)
+    for index, key in enumerate(STATE_KEYS):
+        filtered_action[key] = float(filtered_position[index])
+    for key in ACTION_KALMAN_PASSTHROUGH_KEYS:
+        filtered_action[key] = float(action[key])
+    return filtered_action, action_kalman_filter
 
 
 def _clip_safe_actions(
@@ -970,7 +997,9 @@ def _execute_dual_chunk(
     chunk_index: int = -1,
     clipped_mask: list[bool] | None = None,
     global_step_start: int = 0,
-) -> tuple[LoopState, bool, bool, int]:
+    action_kalman_filter: SimpleKalmanFilter | None = None,
+    use_kf: bool = False,
+) -> tuple[LoopState, bool, bool, int, SimpleKalmanFilter | None]:
     state = LoopState.RUNNING
     request_next_chunk = not safe_mode
     running = True
@@ -1000,6 +1029,8 @@ def _execute_dual_chunk(
         if recorder is not None and recorder.recording_active:
             observation_for_step = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
 
+        if use_kf:
+            action, action_kalman_filter = _filter_action(action, action_kalman_filter)
         left_joint, right_joint = _split_dual_action(action)
         left_thread = threading.Thread(target=left_arm.send_joint, args=(left_joint,))
         right_thread = threading.Thread(target=right_arm.send_joint, args=(right_joint,))
@@ -1058,7 +1089,7 @@ def _execute_dual_chunk(
 
     if recorder is not None:
         recorder.finish_active_segment()
-    return state, request_next_chunk, running, global_step
+    return state, request_next_chunk, running, global_step, action_kalman_filter
 
 
 def _run_vr_teleop_session(
@@ -1500,6 +1531,7 @@ def main() -> None:
 
     parser.add_argument("--safe-mode", action="store_true", default=False)
     parser.add_argument("--max-joint-step", type=float, default=0.02)
+    parser.add_argument("--use_kf", action="store_true", default=False, help="Enable Kalman filtering for actions.")
     parser.add_argument("--no-keyboard", action="store_true")
     parser.add_argument(
         "--vr-scale-factor",
@@ -1674,6 +1706,7 @@ def main() -> None:
     camera_failure: Exception | None = None
     chunk_index = 0
     joint_vel_global_step = 0
+    action_kalman_filter: SimpleKalmanFilter | None = None
 
     try:
         logger.info("Connecting cameras.")
@@ -1751,6 +1784,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
+                    action_kalman_filter = None
                     if args.acp_enable:
                         cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
                             policy=policy,
@@ -1767,6 +1801,7 @@ def main() -> None:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
+                    action_kalman_filter = None
                     if args.acp_enable:
                         cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
                             policy=policy,
@@ -1877,7 +1912,7 @@ def main() -> None:
                 raw_recorder.start_policy_segment()
 
             chunk_index += 1
-            state, request_next_chunk, running, joint_vel_global_step = _execute_dual_chunk(
+            state, request_next_chunk, running, joint_vel_global_step, action_kalman_filter = _execute_dual_chunk(
                 left_arm=left_arm,
                 right_arm=right_arm,
                 cameras=cameras,
@@ -1892,6 +1927,8 @@ def main() -> None:
                 chunk_index=chunk_index,
                 clipped_mask=clipped_mask,
                 global_step_start=joint_vel_global_step,
+                action_kalman_filter=action_kalman_filter,
+                use_kf=args.use_kf,
             )
             if args.safe_mode and state == LoopState.RUNNING:
                 logger.info("安全模式：请按 [I] 获取下一段 chunk。")
