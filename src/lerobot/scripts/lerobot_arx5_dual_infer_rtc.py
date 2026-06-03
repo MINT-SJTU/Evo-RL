@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run dual-arm LeRobot Pi0.5 inference directly on two ARX5 arms."""
+"""Run dual-arm LeRobot Pi0.5 async RTC inference on two ARX5 arms."""
+
+from __future__ import annotations
 
 import argparse
 import dataclasses
@@ -24,7 +26,6 @@ import logging
 import sys
 import threading
 import time
-from contextlib import nullcontext
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -42,9 +43,7 @@ from lerobot.datasets.utils import combine_feature_dicts, hw_to_dataset_features
 from lerobot.robots.arx5_follower.arx5_client import ARX5ArmClient
 from lerobot.robots.arx5_follower.config_arx5_follower import ARX5FollowerConfigBase
 from lerobot.robots.arx5_follower.arx5_runtime import Arx5Runtime, SharedARXX5Interface
-from lerobot.datasets.utils import build_dataset_frame
-from lerobot.policies.utils import prepare_observation_for_inference
-from lerobot.rl.acp_tags import build_acp_tagged_task
+from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 from lerobot.scripts.lerobot_arx5_infer import (
     KeyboardListener,
     LoopState,
@@ -55,17 +54,19 @@ from lerobot.scripts.lerobot_arx5_infer import (
     _list_realsense_cameras,
     _load_policy_bundle,
     _log_predicted_actions,
-    _predict_action_chunk,
     _poll_vr_camera_frames,
     _vr_record_loop,
     _warmup_vr_cameras_after_start,
 )
-from lerobot.scripts.recording_hil import (
-    ACPInferenceConfig,
-    _capture_policy_runtime_state,
-    _get_torch_rng_state,
-    _restore_policy_runtime_state,
-    _set_torch_rng_state,
+from lerobot.scripts.lerobot_arx5_rtc_utils import (
+    _AsyncInferCtl,
+    _chunk_tensor_to_action_dict_list,
+    _clamp_d_used_for_chunk,
+    _copy_observation_for_predict,
+    _execution_horizon_kwarg,
+    _predict_pi05_action_chunk_rtc,
+    _prev_chunk_left_over_from_raw_tail,
+    apply_pi05_rtc_for_inference,
 )
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.errors import DeviceNotConnectedError
@@ -443,6 +444,11 @@ def _build_dual_observation(
     return observation
 
 
+def _state_cmd14_from_observation(observation: dict[str, Any]) -> list[float]:
+    """14-dim joint state in STATE_KEYS order with same rounding as async-step cmd14."""
+    return [round(float(observation[k]), 4) for k in STATE_KEYS]
+
+
 def _serialize_dual_arm_targets(
     q_cmd_by_arm: dict[str, np.ndarray],
     gripper_by_arm: dict[str, float],
@@ -558,10 +564,10 @@ def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
         "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作（VR 内按 [X] 退出） | "
         "[S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
-        "[Y] 张开左夹爪 | [U] 闭合左夹爪 | [O] 张开右夹爪 | [P] 闭合右夹爪 | [B] teach | [N] record pose"
+        "[O] open grippers (when stopped) | [P] close grippers (when stopped) | [B] teach | [N] record pose"
     )
     if safe_mode:
-        base_message += " | [I] 下一段 chunk"
+        base_message += " | [I] 下一步 action"
     logger.info(base_message)
 
 
@@ -643,51 +649,30 @@ def _run_keyboard_command(
     if key == "q":
         logger.info("用户请求退出。")
         return state, request_next_chunk, False, False
-    
-    if key == "y":
-        if state != LoopState.STOPPED:
-            logger.warning(
-                "**********[Y] 已忽略：仅在停止状态下可张开左夹爪；请先按 [Space] 急停。**********"
-            )
-            return state, request_next_chunk, True, False
-        # send_joint -> set_joint_positions(6) + set_catch_pos(gripper). Fully open == gripper_max (not gripper_min).
-        pose = left_arm.get_state()
-        left_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
-        logger.info("已张开左臂夹爪（Y）。")
-        return state, request_next_chunk, True, False
-
-    if key == "u":
-        if state != LoopState.STOPPED:
-            logger.warning(
-                "**********[U] 已忽略：仅在停止状态下可闭合左夹爪；请先按 [Space] 急停。**********"
-            )
-            return state, request_next_chunk, True, False
-        pose = left_arm.get_state()
-        left_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
-        logger.info("已闭合左臂夹爪（U）。")
-        return state, request_next_chunk, True, False
 
     if key == "o":
         if state != LoopState.STOPPED:
             logger.warning(
-                "**********[O] 已忽略：仅在停止状态下可张开右夹爪；请先按 [Space] 急停。**********"
+                "**********[O] 已忽略：仅在停止状态下可张开夹爪；请先按 [Space] 急停。**********"
             )
             return state, request_next_chunk, True, False
         # send_joint -> set_joint_positions(6) + set_catch_pos(gripper). Fully open == gripper_max (not gripper_min).
-        pose = right_arm.get_state()
-        right_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
-        logger.info("已张开右臂夹爪（O）。")
+        for arm in (left_arm, right_arm):
+            pose = arm.get_state()
+            arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
+        logger.info("已张开双臂夹爪（O）。")
         return state, request_next_chunk, True, False
 
     if key == "p":
         if state != LoopState.STOPPED:
             logger.warning(
-                "**********[P] 已忽略：仅在停止状态下可闭合右夹爪；请先按 [Space] 急停。**********"
+                "**********[P] 已忽略：仅在停止状态下可闭合夹爪；请先按 [Space] 急停。**********"
             )
             return state, request_next_chunk, True, False
-        pose = right_arm.get_state()
-        right_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
-        logger.info("已闭合右臂夹爪（P）。")
+        for arm in (left_arm, right_arm):
+            pose = arm.get_state()
+            arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
+        logger.info("已闭合双臂夹爪（P）。")
         return state, request_next_chunk, True, False
 
     if state == LoopState.STOPPED:
@@ -748,186 +733,80 @@ def _run_keyboard_command(
             logger.info("已保存双臂位姿。")
             return LoopState.STOPPED, False, True, False
     elif state == LoopState.RUNNING and safe_mode and key == "i":
-        logger.info("安全模式：已请求下一段 chunk。")
+        logger.info("安全模式：已请求下一步 action。")
         return state, True, True, False
     return state, request_next_chunk, True, False
 
 
-def _execute_dual_chunk(
+def _dual_async_inference_worker(
     *,
-    left_arm: ARX5ArmClient,
-    right_arm: ARX5ArmClient,
-    cameras: dict[str, Any],
-    actions: list[dict[str, float]],
-    step_duration_s: float,
-    keyboard: KeyboardListener | None,
-    safe_mode: bool,
-    recorder: TrainRawEpisodeRecorder | None = None,
-    end_traj_recorder: EndEffectorTrajectoryRecorder | None = None,
-    joint_traj_recorder: JointTrajectoryRecorder | None = None,
-) -> tuple[LoopState, bool, bool]:
-    state = LoopState.RUNNING
-    request_next_chunk = not safe_mode
-    running = True
-    for index, action in enumerate(actions):
-        step_start = time.perf_counter()
-        if keyboard is not None:
-            key = keyboard.get_key()
-            state, request_next_chunk, running, _vr = _run_keyboard_command(
-                key=key,
-                left_arm=left_arm,
-                right_arm=right_arm,
-                state=state,
-                safe_mode=safe_mode,
-                request_next_chunk=request_next_chunk,
-                recorder=recorder,
-                end_traj_recorder=end_traj_recorder,
-                joint_traj_recorder=joint_traj_recorder,
-            )
-            if state != LoopState.RUNNING or not running:
+    ctl: _AsyncInferCtl,
+    stop_event: threading.Event,
+    inference_pause: threading.Event,
+    dataset_features: dict[str, dict[str, Any]],
+    policy: PI05Policy,
+    preprocessor,
+    postprocessor,
+    device: torch.device,
+    task: str,
+    robot_type: str,
+    use_amp: bool,
+    policy_chunk_size: int,
+    async_rtc_delay_min: int,
+    record_dir: Path | None,
+    camera_names: list[str],
+    record_round_holder: list[int] | None,
+    record_round_lock: threading.Lock | None,
+    recording_segment_lock: threading.Lock | None,
+    raw_recorder: TrainRawEpisodeRecorder | None,
+) -> None:
+    while not stop_event.is_set():
+        if inference_pause.is_set():
+            time.sleep(0.02)
+            continue
+        with ctl.lock:
+            while ctl.idx < ctl.s_min and not stop_event.is_set():
+                ctl.cv.wait(timeout=0.05)
+            if stop_event.is_set():
                 break
-
-        observation_for_step: dict[str, Any] | None = None
-        if recorder is not None and recorder.recording_active:
-            observation_for_step = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-
-        left_joint, right_joint = _split_dual_action(action)
-        left_thread = threading.Thread(target=left_arm.send_joint, args=(left_joint,))
-        right_thread = threading.Thread(target=right_arm.send_joint, args=(right_joint,))
-        left_thread.start()
-        right_thread.start()
-        left_thread.join()
-        right_thread.join()
-
-        if end_traj_recorder is not None:
-            end_traj_recorder.record(step_index=index, left_arm=left_arm, right_arm=right_arm)
-        if joint_traj_recorder is not None:
-            joint_traj_recorder.record(
-                step_index=index,
-                left_cmd=left_joint,
-                right_cmd=right_joint,
-                left_arm=left_arm,
-                right_arm=right_arm,
+            obs_snapshot = _copy_observation_for_predict(ctl.obs_cur)
+            idx_before = ctl.idx
+            prev_len = len(ctl.actions_cur)
+            serial_at_predict = ctl.chunk_serial
+            prev_tail_raw = (
+                ctl.chunk_cur_raw[idx_before:].clone()
+                if ctl.chunk_cur_raw is not None and idx_before < ctl.chunk_cur_raw.shape[0]
+                else None
             )
 
-        if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            record_timestamp = step_start if recorder.debug_timestamp else None
-            recorder.record_policy_step(
-                action_dict=action,
-                observation=observation_for_step,
-                record_timestamp=record_timestamp,
-            )
-
-        step_elapsed = time.perf_counter() - step_start
-        if step_elapsed > step_duration_s:
+        hist_max = max(ctl.rtc_delay_q) if ctl.rtc_delay_q else 0
+        d_obs = max(hist_max, ctl.rtc_d_init)
+        d_raw = max(int(async_rtc_delay_min), int(d_obs))
+        horizon = int(policy_chunk_size)
+        d_used, clamped_d = _clamp_d_used_for_chunk(d_raw, horizon)
+        if clamped_d:
             logger.warning(
-                "控制步超时：step=%d elapsed=%.4fs > duration=%.4fs (overrun=%.4fs)",
-                index,
-                step_elapsed,
-                step_duration_s,
-                step_elapsed - step_duration_s,
+                "RTC: clamped inference_delay from %d to %d (chunk_len=%d) to keep merge non-empty.",
+                d_raw,
+                d_used,
+                horizon,
             )
-        precise_sleep(max(step_duration_s - step_elapsed, 0.0))
-
-    if recorder is not None:
-        recorder.finish_active_segment()
-    return state, request_next_chunk, running
-
-
-def _actions_from_chunk(
-    *,
-    action_chunk: torch.Tensor,
-    dataset_features: dict[str, dict[str, Any]],
-    execution_horizon: int,
-) -> list[dict[str, float]]:
-    action_names = dataset_features[ACTION]["names"]
-    action_chunk = action_chunk.squeeze(0).to("cpu")
-    horizon = min(int(execution_horizon), int(action_chunk.shape[0]))
-    actions: list[dict[str, float]] = []
-    for index in range(horizon):
-        row = action_chunk[index]
-        actions.append({name: float(row[offset]) for offset, name in enumerate(action_names)})
-    return actions
-
-
-def _predict_action_chunk_tensor(
-    *,
-    robot_observation: dict[str, Any],
-    dataset_features: dict[str, dict[str, Any]],
-    policy,
-    preprocessor,
-    postprocessor,
-    device: torch.device,
-    task: str,
-    robot_type: str,
-    use_amp: bool,
-) -> torch.Tensor:
-    observation_frame = build_dataset_frame(dataset_features, robot_observation, prefix=OBS_STR)
-    processed_observation = prepare_observation_for_inference(
-        dict(observation_frame),
-        device,
-        task=task,
-        robot_type=robot_type,
-    )
-    with (
-        torch.inference_mode(),
-        torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
-    ):
-        processed_observation = preprocessor(processed_observation)
-        action_chunk_raw = policy.predict_action_chunk(processed_observation)
-        action_chunk = postprocessor(action_chunk_raw)
-    return action_chunk
-
-
-def _predict_action_chunk_tensor_with_runtime_state(
-    *,
-    robot_observation: dict[str, Any],
-    dataset_features: dict[str, dict[str, Any]],
-    policy,
-    preprocessor,
-    postprocessor,
-    device: torch.device,
-    task: str,
-    robot_type: str,
-    use_amp: bool,
-    runtime_state: dict[str, Any],
-) -> torch.Tensor:
-    _restore_policy_runtime_state(policy, runtime_state)
-    action_chunk = _predict_action_chunk_tensor(
-        robot_observation=robot_observation,
-        dataset_features=dataset_features,
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        device=device,
-        task=task,
-        robot_type=robot_type,
-        use_amp=use_amp,
-    )
-    runtime_state.clear()
-    runtime_state.update(_capture_policy_runtime_state(policy))
-    return action_chunk
-
-
-def _predict_action_chunk_with_acp(
-    *,
-    robot_observation: dict[str, Any],
-    dataset_features: dict[str, dict[str, Any]],
-    policy,
-    preprocessor,
-    postprocessor,
-    device: torch.device,
-    task: str,
-    robot_type: str,
-    execution_horizon: int,
-    use_amp: bool,
-    acp_inference: ACPInferenceConfig,
-    cond_runtime_state: dict[str, Any] | None = None,
-    uncond_runtime_state: dict[str, Any] | None = None,
-) -> list[dict[str, float]]:
-    if not acp_inference.enable:
-        return _predict_action_chunk(
-            robot_observation=robot_observation,
+        exec_hor_kw = _execution_horizon_kwarg(horizon=horizon, s_steps=idx_before, d_used=d_used)
+        prev_arg = _prev_chunk_left_over_from_raw_tail(prev_tail_raw, device)
+        q_snapshot = list(ctl.rtc_delay_q)
+        logger.info(
+            "双臂 async worker：next_serial=%d s(idx_before)=%d d_used=%d exec_hor_kw=%d len_A_prev=%d Q_len=%d Q=%s",
+            serial_at_predict + 1,
+            idx_before,
+            d_used,
+            exec_hor_kw,
+            prev_tail_raw.shape[0] if prev_tail_raw is not None else 0,
+            len(q_snapshot),
+            q_snapshot,
+        )
+        _predict_t0 = time.perf_counter()
+        chunk_t_post, chunk_t_raw = _predict_pi05_action_chunk_rtc(
+            robot_observation=obs_snapshot,
             dataset_features=dataset_features,
             policy=policy,
             preprocessor=preprocessor,
@@ -935,182 +814,85 @@ def _predict_action_chunk_with_acp(
             device=device,
             task=task,
             robot_type=robot_type,
-            execution_horizon=execution_horizon,
             use_amp=use_amp,
+            inference_delay=int(d_used),
+            prev_chunk_left_over=prev_arg,
+            execution_horizon=int(exec_hor_kw),
+        )
+        actions = _chunk_tensor_to_action_dict_list(chunk_t_post, dataset_features)
+        predict_wall_s = time.perf_counter() - _predict_t0
+        logger.info("双臂 async worker：predict_wall_s=%.4f", predict_wall_s)
+        if stop_event.is_set():
+            continue
+        if not actions:
+            logger.warning("双臂 async worker：策略未返回动作，重试中。")
+            time.sleep(0.05)
+            continue
+
+        with ctl.lock:
+            if stop_event.is_set():
+                break
+            idx_at_merge = ctl.idx
+            k = idx_at_merge - idx_before
+            if k < 0:
+                ctl.async_rtc_fatal = (
+                    "双臂 RTC rebase：无效的 k=%d (idx_at_merge=%d idx_before=%d)" % (k, idx_at_merge, idx_before)
+                )
+                logger.error("%s", ctl.async_rtc_fatal)
+                stop_event.set()
+                break
+            if k >= len(actions):
+                ctl.async_rtc_fatal = (
+                    "双臂 RTC rebase fatal：重叠步数 k=%d ≥ len(新chunk)=%d "
+                    "(idx_before=%d idx_at_merge=%d)；推理过慢或 horizon 过短。"
+                    % (k, len(actions), idx_before, idx_at_merge)
+                )
+                logger.error("%s", ctl.async_rtc_fatal)
+                stop_event.set()
+                break
+            ctl.chunk_serial += 1
+            ctl.actions_cur = actions
+            ctl.chunk_cur_raw = chunk_t_raw.squeeze(0).detach().cpu().to(dtype=torch.float32)
+            ctl.idx = k
+            ctl.rtc_delay_q.append(k)
+            tail_left = prev_len - idx_at_merge
+            if tail_left > 0:
+                logger.info(
+                    "双臂 async：合并新 chunk；上一段末尾 %d 个未执行步已跳过。",
+                    tail_left,
+                )
+            ctl.cv.notify_all()
+
+        if raw_recorder is not None and raw_recorder.recording_active:
+            assert recording_segment_lock is not None
+            with recording_segment_lock:
+                raw_recorder.finish_active_segment()
+                raw_recorder.start_policy_segment()
+
+        left_j1 = [round(float(action[LEFT_STATE_KEYS[0]]), 4) for action in actions]
+        right_j1 = [round(float(action[RIGHT_STATE_KEYS[0]]), 4) for action in actions]
+        logger.info(
+            "双臂 async worker：完整 horizon %d 步。左手第一关节:%s 右手第一关节:%s",
+            len(actions),
+            left_j1,
+            right_j1,
         )
 
-    conditional_task = build_acp_tagged_task(task, is_positive=True)
-    if cond_runtime_state is None or uncond_runtime_state is None:
-        raise ValueError("ACP CFG inference requires cond/uncond runtime states.")
-
-    cpu_state, cuda_state = _get_torch_rng_state(device)
-    action_chunk_cond = _predict_action_chunk_tensor_with_runtime_state(
-        robot_observation=robot_observation,
-        dataset_features=dataset_features,
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        device=device,
-        task=conditional_task,
-        robot_type=robot_type,
-        use_amp=use_amp,
-        runtime_state=cond_runtime_state,
-    )
-    _set_torch_rng_state(device, cpu_state, cuda_state)
-    action_chunk_uncond = _predict_action_chunk_tensor_with_runtime_state(
-        robot_observation=robot_observation,
-        dataset_features=dataset_features,
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        device=device,
-        task=task,
-        robot_type=robot_type,
-        use_amp=use_amp,
-        runtime_state=uncond_runtime_state,
-    )
-    action_chunk = action_chunk_uncond + acp_inference.cfg_beta * (action_chunk_cond - action_chunk_uncond)
-    return _actions_from_chunk(
-        action_chunk=action_chunk,
-        dataset_features=dataset_features,
-        execution_horizon=execution_horizon,
-    )
-
-
-def _refresh_acp_runtime_states(
-    *,
-    policy,
-    acp_inference: ACPInferenceConfig,
-    cond_runtime_state: dict[str, Any] | None,
-    uncond_runtime_state: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    if not acp_inference.enable:
-        return None, None
-
-    latest_state = _capture_policy_runtime_state(policy)
-    if cond_runtime_state is None:
-        cond_runtime_state = {}
-    else:
-        cond_runtime_state.clear()
-    cond_runtime_state.update(latest_state)
-
-    if uncond_runtime_state is None:
-        uncond_runtime_state = {}
-    else:
-        uncond_runtime_state.clear()
-    uncond_runtime_state.update(_capture_policy_runtime_state(policy))
-    return cond_runtime_state, uncond_runtime_state
-
-
-def _execute_dual_chunk(
-    *,
-    left_arm: ARX5ArmClient,
-    right_arm: ARX5ArmClient,
-    cameras: dict[str, Any],
-    actions: list[dict[str, float]],
-    step_duration_s: float,
-    keyboard: KeyboardListener | None,
-    safe_mode: bool,
-    recorder: TrainRawEpisodeRecorder | None = None,
-    end_traj_recorder: EndEffectorTrajectoryRecorder | None = None,
-    joint_traj_recorder: JointTrajectoryRecorder | None = None,
-    joint_vel_recorder: JointVelocityRecorder | None = None,
-    chunk_index: int = -1,
-    clipped_mask: list[bool] | None = None,
-    global_step_start: int = 0,
-    action_kalman_filter: SimpleKalmanFilter | None = None,
-    use_kf: bool = False,
-) -> tuple[LoopState, bool, bool, int, SimpleKalmanFilter | None]:
-    state = LoopState.RUNNING
-    request_next_chunk = not safe_mode
-    running = True
-    global_step = int(global_step_start)
-    if clipped_mask is None:
-        clipped_mask = [False] * len(actions)
-    for index, action in enumerate(actions):
-        step_start = time.perf_counter()
-        if keyboard is not None:
-            key = keyboard.get_key()
-            state, request_next_chunk, running, _vr = _run_keyboard_command(
-                key=key,
-                left_arm=left_arm,
-                right_arm=right_arm,
-                state=state,
-                safe_mode=safe_mode,
-                request_next_chunk=request_next_chunk,
-                recorder=recorder,
-                end_traj_recorder=end_traj_recorder,
-                joint_traj_recorder=joint_traj_recorder,
-                joint_vel_recorder=joint_vel_recorder,
+        if record_dir is not None and record_round_holder is not None:
+            assert record_round_lock is not None
+            with record_round_lock:
+                ri = record_round_holder[0]
+                record_round_holder[0] = ri + 1
+            joint_state = [float(obs_snapshot[k]) for k in STATE_KEYS]
+            round_dir = _save_chunk_io(
+                record_dir=record_dir,
+                round_index=ri,
+                observation=obs_snapshot,
+                state=joint_state,
+                actions=actions,
+                camera_names=camera_names,
             )
-            if state != LoopState.RUNNING or not running:
-                break
-
-        observation_for_step: dict[str, Any] | None = None
-        if recorder is not None and recorder.recording_active:
-            observation_for_step = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
-
-        if use_kf:
-            action, action_kalman_filter = _filter_action(action, action_kalman_filter)
-        left_joint, right_joint = _split_dual_action(action)
-        left_thread = threading.Thread(target=left_arm.send_joint, args=(left_joint,))
-        right_thread = threading.Thread(target=right_arm.send_joint, args=(right_joint,))
-        left_thread.start()
-        right_thread.start()
-        left_thread.join()
-        right_thread.join()
-
-        if end_traj_recorder is not None:
-            end_traj_recorder.record(step_index=index, left_arm=left_arm, right_arm=right_arm)
-        if joint_traj_recorder is not None:
-            joint_traj_recorder.record(
-                step_index=index,
-                left_cmd=left_joint,
-                right_cmd=right_joint,
-                left_arm=left_arm,
-                right_arm=right_arm,
-            )
-        if joint_vel_recorder is not None:
-            source = (
-                "policy_safe_clipped"
-                if index < len(clipped_mask) and clipped_mask[index]
-                else "policy"
-            )
-            joint_vel_recorder.record(
-                step_index=global_step,
-                chunk_index=chunk_index,
-                step_in_chunk=index,
-                source=source,
-                left_arm=left_arm,
-                right_arm=right_arm,
-                left_cmd=left_joint,
-                right_cmd=right_joint,
-            )
-            global_step += 1
-
-
-        if recorder is not None and recorder.recording_active and observation_for_step is not None:
-            record_timestamp = step_start if recorder.debug_timestamp else None
-            recorder.record_policy_step(
-                action_dict=action,
-                observation=observation_for_step,
-                record_timestamp=record_timestamp,
-            )
-
-        step_elapsed = time.perf_counter() - step_start
-        if step_elapsed > step_duration_s:
-            logger.warning(
-                "控制步超时：step=%d elapsed=%.4fs > duration=%.4fs (overrun=%.4fs)",
-                index,
-                step_elapsed,
-                step_duration_s,
-                step_elapsed - step_duration_s,
-            )
-        precise_sleep(max(step_duration_s - step_elapsed, 0.0))
-
-    if recorder is not None:
-        recorder.finish_active_segment()
-    return state, request_next_chunk, running, global_step, action_kalman_filter
+            logger.info("双臂 async：worker 已保存 round %d 至 %s", ri, round_dir)
 
 
 def _run_vr_teleop_session(
@@ -1484,25 +1266,12 @@ def _run_vr_teleop_session(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run LeRobot pi05 dual-arm policy on two ARX5 arms.",
+        description="Run LeRobot pi05 dual-arm async RTC policy on two ARX5 arms.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--task", type=str, default=None, help="Natural language task instruction.")
     parser.add_argument("--policy-path", type=str, default=DEFAULT_POLICY_PATH)
     parser.add_argument("--policy-device", type=str, default=None)
-    parser.add_argument(
-        "--acp-enable",
-        dest="acp_enable",
-        action="store_true",
-        default=False,
-        help="Enable ACP-tagged CFG inference (default off). When enabled, combine ACP-tagged and untagged branches.",
-    )
-    parser.add_argument(
-        "--acp-cfg-beta",
-        type=float,
-        default=1.2,
-        help="CFG strength when --acp-enable is active.",
-    )
     parser.add_argument(
         "--stats-path",
         type=Path,
@@ -1613,7 +1382,35 @@ def main() -> None:
         default=None,
         help="If set, enable raw training recording controlled by keyboard: S starts, R resumes policy, D ends, 0/1/2 finalize failure/success/abandon.",
     )
-    # TODO: 讨论一下要不要修改
+    parser.add_argument(
+        "--rtc-delay-buffer-b",
+        type=int,
+        default=8,
+        help="RTC delay queue Q max length b; each entry is overlap step k after merge.",
+    )
+    parser.add_argument(
+        "--rtc-d-init",
+        type=int,
+        default=0,
+        help="When Q is empty, delay floor; d_obs = max(max(Q) or 0, d_init).",
+    )
+    parser.add_argument(
+        "--rtc-max-guidance-weight",
+        type=float,
+        default=10.0,
+        help="PI05 RTC guided denoise max_guidance_weight.",
+    )
+    parser.add_argument(
+        "--rtc-inference-delay-min",
+        type=int,
+        default=0,
+        help="inference_delay lower bound: d_used = max(this, d_obs).",
+    )
+    parser.add_argument(
+        "--rtc-debug",
+        action="store_true",
+        help="Enable RTC processor debug output.",
+    )
     parser.add_argument("--protect-on-disconnect", action="store_true", default=True)
     parser.add_argument("--no-protect-on-disconnect", dest="protect_on_disconnect", action="store_false")
 
@@ -1628,8 +1425,12 @@ def main() -> None:
         parser.error("--execution-horizon 必须为正数。")
     if args.safe_mode and args.no_keyboard:
         parser.error("安全模式需要键盘控制。")
-    if args.acp_cfg_beta < 0:
-        parser.error("--acp-cfg-beta 必须为非负数。")
+    if args.rtc_delay_buffer_b <= 0:
+        parser.error("--rtc-delay-buffer-b 必须为正整数。")
+    if args.rtc_inference_delay_min < 0:
+        parser.error("--rtc-inference-delay-min 必须为非负数。")
+    if args.rtc_max_guidance_weight < 0:
+        parser.error("--rtc-max-guidance-weight 必须为非负数。")
 
     logger.info("Loading policy config from %s", args.policy_path)
     policy_cfg = PreTrainedConfig.from_pretrained(args.policy_path)
@@ -1689,6 +1490,14 @@ def main() -> None:
         stats_path=args.stats_path,
         policy_cfg=policy_cfg,
     )
+    if not isinstance(policy, PI05Policy):
+        parser.error("RTC 推理需要 PI05 (pi05) 策略 checkpoint。")
+    apply_pi05_rtc_for_inference(
+        policy,
+        max_guidance_weight=float(args.rtc_max_guidance_weight),
+        rtc_debug=bool(args.rtc_debug),
+    )
+
     dataset_features = _build_dataset_features(camera_configs)
     raw_recorder: TrainRawEpisodeRecorder | None = None
     if args.raw_train_record_dir is not None:
@@ -1712,13 +1521,6 @@ def main() -> None:
         joint_vel_recorder = JointVelocityRecorder(args.joint_vel_dir)
 
     execution_horizon = args.execution_horizon or int(policy_cfg.n_action_steps)
-    acp_inference = ACPInferenceConfig(
-        enable=bool(args.acp_enable),
-        use_cfg=bool(args.acp_enable),
-        cfg_beta=float(args.acp_cfg_beta),
-    )
-    cond_policy_runtime_state: dict[str, Any] | None = None
-    uncond_policy_runtime_state: dict[str, Any] | None = None
     keyboard = None if args.no_keyboard else KeyboardListener()
     state = LoopState.RUNNING if keyboard is None else LoopState.STOPPED
     request_next_chunk = keyboard is None or not args.safe_mode
@@ -1728,6 +1530,14 @@ def main() -> None:
     chunk_index = 0
     joint_vel_global_step = 0
     action_kalman_filter: SimpleKalmanFilter | None = None
+    infer_ctl: _AsyncInferCtl | None = None
+    infer_stop_evt: threading.Event | None = None
+    infer_pause_evt: threading.Event | None = None
+    infer_worker_thr: threading.Thread | None = None
+    infer_round_holder: list[int] | None = None
+    infer_round_lock: threading.Lock | None = None
+    infer_seg_roll_lock: threading.Lock | None = None
+    dual_async_worker_kwargs: dict[str, Any] | None = None
 
     try:
         logger.info("Connecting cameras.")
@@ -1758,22 +1568,139 @@ def main() -> None:
                     "若发生过 VR 接管，[0] 不可用，须选择 [1] 或 [2]。"
                 )
             if args.safe_mode:
-                logger.info("安全模式已启用。请按 [R] 恢复运行，每段 chunk 按 [I] 继续。")
+                logger.info("安全模式已启用。请按 [R] 恢复运行，每一步按 [I] 继续。")
         else:
             logger.info("正在无键盘控制下持续运行双臂推理循环。")
 
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-        if args.acp_enable:
-            cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-                policy=policy,
-                acp_inference=acp_inference,
-                cond_runtime_state=cond_policy_runtime_state,
-                uncond_runtime_state=uncond_policy_runtime_state,
-            )
+
+        infer_ctl = _AsyncInferCtl(
+            execution_horizon,
+            rtc_delay_buffer_b=args.rtc_delay_buffer_b,
+            rtc_d_init=args.rtc_d_init,
+        )
+        infer_stop_evt = threading.Event()
+        infer_pause_evt = threading.Event()
+        infer_seg_roll_lock = threading.Lock()
+        if args.record_dir is not None:
+            infer_round_lock = threading.Lock()
+            infer_round_holder = [round_index]
         else:
-            cond_policy_runtime_state, uncond_policy_runtime_state = None, None
+            infer_round_holder = None
+            infer_round_lock = None
+        dual_async_worker_kwargs = {
+                "ctl": infer_ctl,
+                "stop_event": infer_stop_evt,
+                "inference_pause": infer_pause_evt,
+                "dataset_features": dataset_features,
+                "policy": policy,
+                "preprocessor": preprocessor,
+                "postprocessor": postprocessor,
+                "device": device,
+                "task": args.task,
+                "robot_type": "arx5_dual",
+                "use_amp": policy_cfg.use_amp,
+                "policy_chunk_size": int(policy_cfg.chunk_size),
+                "async_rtc_delay_min": int(args.rtc_inference_delay_min),
+                "record_dir": args.record_dir,
+                "camera_names": camera_names,
+                "record_round_holder": infer_round_holder,
+                "record_round_lock": infer_round_lock,
+                "recording_segment_lock": infer_seg_roll_lock,
+                "raw_recorder": raw_recorder,
+            }
+
+        if keyboard is None:
+            bootstrap_obs = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+            logger.info(
+                "双臂 async bootstrap 前（与 cmd14 同序：右7+左7）\n  obs14=%s",
+                _state_cmd14_from_observation(bootstrap_obs),
+            )
+            _bootstrap_predict_t0 = time.perf_counter()
+            _H_rtc = int(policy_cfg.chunk_size)
+            _boot_eh = _execution_horizon_kwarg(horizon=_H_rtc, s_steps=0, d_used=0)
+            bootstrap_post, bootstrap_raw = _predict_pi05_action_chunk_rtc(
+                robot_observation=bootstrap_obs,
+                dataset_features=dataset_features,
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                device=device,
+                task=args.task,
+                robot_type="arx5_dual",
+                use_amp=policy_cfg.use_amp,
+                inference_delay=0,
+                prev_chunk_left_over=None,
+                execution_horizon=_boot_eh,
+            )
+            bootstrap_act = _chunk_tensor_to_action_dict_list(bootstrap_post, dataset_features)
+            logger.info(
+                "双臂 async bootstrap：predict_wall_s=%.4f",
+                time.perf_counter() - _bootstrap_predict_t0,
+            )
+            if len(bootstrap_act) < infer_ctl.s_min:
+                logger.error(
+                    "双臂 async bootstrap：chunk 长度 %d < s_min (%d)；退出。",
+                    len(bootstrap_act),
+                    infer_ctl.s_min,
+                )
+                sys.exit(1)
+            infer_ctl.actions_cur = bootstrap_act
+            infer_ctl.chunk_cur_raw = bootstrap_raw.squeeze(0).detach().cpu().to(dtype=torch.float32)
+            infer_ctl.idx = 0
+            infer_ctl.chunk_serial = 1
+            infer_ctl.obs_cur = bootstrap_obs
+            logger.info(
+                "双臂 async bootstrap：s(idx_at_predict_start)=0 chunk_serial=%d（加载后）",
+                infer_ctl.chunk_serial,
+            )
+            if state != LoopState.RUNNING:
+                infer_pause_evt.set()
+            if args.record_dir is not None:
+                assert infer_round_lock is not None
+                assert infer_round_holder is not None
+                with infer_round_lock:
+                    ri_boot = infer_round_holder[0]
+                    infer_round_holder[0] = ri_boot + 1
+                st_list = [float(bootstrap_obs[k]) for k in STATE_KEYS]
+                bs_dir = _save_chunk_io(
+                    record_dir=args.record_dir,
+                    round_index=ri_boot,
+                    observation=bootstrap_obs,
+                    state=st_list,
+                    actions=bootstrap_act,
+                    camera_names=camera_names,
+                )
+                logger.info("双臂 async：bootstrap chunk %d 已保存至 %s", ri_boot, bs_dir)
+            left_bg = [round(float(a[LEFT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
+            right_bg = [round(float(a[RIGHT_STATE_KEYS[0]]), 4) for a in bootstrap_act]
+            logger.info(
+                "双臂 async：bootstrap %d 步 horizon。左手第一关节:%s 右手第一关节:%s",
+                len(bootstrap_act),
+                left_bg,
+                right_bg,
+            )
+            _log_predicted_actions(bootstrap_act)
+            infer_worker_thr = threading.Thread(
+                target=_dual_async_inference_worker,
+                kwargs=dual_async_worker_kwargs,
+                daemon=True,
+                name="dual-arx5-async-policy",
+            )
+            infer_worker_thr.start()
+        else:
+            infer_ctl.actions_cur = []
+            infer_ctl.chunk_cur_raw = None
+            infer_ctl.idx = 0
+            infer_ctl.chunk_serial = 0
+            infer_ctl.obs_cur = {}
+            infer_worker_thr = None
+            infer_pause_evt.set()
+            logger.info(
+                "双臂 async：尚未进行第一段推理；请按 [R] 开始（将运行 bootstrap 并启动后台推理线程）。"
+            )
 
         while running:
             if keyboard is not None:
@@ -1792,6 +1719,11 @@ def main() -> None:
                     joint_vel_recorder=joint_vel_recorder,
                 )
                 if vr_req:
+                    if infer_stop_evt is not None:
+                        infer_stop_evt.set()
+                        if infer_worker_thr is not None:
+                            infer_worker_thr.join(timeout=120.0)
+                            infer_worker_thr = None
                     left_arm, right_arm = _run_vr_teleop_session(
                         left_arm=left_arm,
                         right_arm=right_arm,
@@ -1806,41 +1738,117 @@ def main() -> None:
                     preprocessor.reset()
                     postprocessor.reset()
                     action_kalman_filter = None
-                    if args.acp_enable:
-                        cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-                            policy=policy,
-                            acp_inference=acp_inference,
-                            cond_runtime_state=cond_policy_runtime_state,
-                            uncond_runtime_state=uncond_policy_runtime_state,
-                        )
-                    else:
-                        cond_policy_runtime_state, uncond_policy_runtime_state = None, None
                     state = LoopState.STOPPED
                     request_next_chunk = False if args.safe_mode else True
+                    if infer_pause_evt is not None:
+                        infer_pause_evt.set()
                     continue
                 if previous_state != LoopState.RUNNING and state == LoopState.RUNNING:
                     policy.reset()
                     preprocessor.reset()
                     postprocessor.reset()
                     action_kalman_filter = None
-                    if args.acp_enable:
-                        cond_policy_runtime_state, uncond_policy_runtime_state = _refresh_acp_runtime_states(
-                            policy=policy,
-                            acp_inference=acp_inference,
-                            cond_runtime_state=cond_policy_runtime_state,
-                            uncond_runtime_state=uncond_policy_runtime_state,
+                    if (
+                        infer_ctl is not None
+                        and infer_stop_evt is not None
+                        and dual_async_worker_kwargs is not None
+                    ):
+                        infer_stop_evt.set()
+                        if infer_worker_thr is not None:
+                            infer_worker_thr.join(timeout=120.0)
+                            infer_worker_thr = None
+                        infer_stop_evt.clear()
+                        obs_rb = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
+                        logger.info(
+                            "双臂 async [R] bootstrap 前（与 cmd14 同序：右7+左7）\n  obs14=%s",
+                            _state_cmd14_from_observation(obs_rb),
                         )
-                    else:
-                        cond_policy_runtime_state, uncond_policy_runtime_state = None, None
+                        _r_bootstrap_predict_t0 = time.perf_counter()
+                        _H_rb = int(policy_cfg.chunk_size)
+                        _rb_eh = _execution_horizon_kwarg(horizon=_H_rb, s_steps=0, d_used=0)
+                        rb_post, rb_raw = _predict_pi05_action_chunk_rtc(
+                            robot_observation=obs_rb,
+                            dataset_features=dataset_features,
+                            policy=policy,
+                            preprocessor=preprocessor,
+                            postprocessor=postprocessor,
+                            device=device,
+                            task=args.task,
+                            robot_type="arx5_dual",
+                            use_amp=policy_cfg.use_amp,
+                            inference_delay=0,
+                            prev_chunk_left_over=None,
+                            execution_horizon=_rb_eh,
+                        )
+                        acts_rb = _chunk_tensor_to_action_dict_list(rb_post, dataset_features)
+                        logger.info(
+                            "双臂 async [R] bootstrap：predict_wall_s=%.4f",
+                            time.perf_counter() - _r_bootstrap_predict_t0,
+                        )
+                        if len(acts_rb) < infer_ctl.s_min:
+                            logger.error(
+                                "双臂 async [R] bootstrap：chunk %d < s_min %d，停止循环。",
+                                len(acts_rb),
+                                infer_ctl.s_min,
+                            )
+                            running = False
+                            continue
+                        if args.record_dir is not None and infer_round_holder is not None and infer_round_lock is not None:
+                            with infer_round_lock:
+                                ri_rb = infer_round_holder[0]
+                                infer_round_holder[0] = ri_rb + 1
+                            st_rb = [float(obs_rb[k]) for k in STATE_KEYS]
+                            rb_dir = _save_chunk_io(
+                                record_dir=args.record_dir,
+                                round_index=ri_rb,
+                                observation=obs_rb,
+                                state=st_rb,
+                                actions=acts_rb,
+                                camera_names=camera_names,
+                            )
+                            logger.info("双臂 async：[R] bootstrap chunk %d 已保存至 %s", ri_rb, rb_dir)
+                        with infer_ctl.lock:
+                            infer_ctl.actions_cur = acts_rb
+                            infer_ctl.chunk_cur_raw = rb_raw.squeeze(0).detach().cpu().to(dtype=torch.float32)
+                            infer_ctl.idx = 0
+                            infer_ctl.chunk_serial = 1
+                            infer_ctl.obs_cur = obs_rb
+                            infer_ctl.cv.notify_all()
+                        infer_worker_thr = threading.Thread(
+                            target=_dual_async_inference_worker,
+                            kwargs=dual_async_worker_kwargs,
+                            daemon=True,
+                            name="dual-arx5-async-policy",
+                        )
+                        infer_worker_thr.start()
             if not running:
                 break
+
+            if infer_pause_evt is not None:
+                if state != LoopState.RUNNING:
+                    infer_pause_evt.set()
+                    time.sleep(0.05)
+                    continue
+                infer_pause_evt.clear()
+
             if state != LoopState.RUNNING:
                 time.sleep(0.05)
                 continue
+
             if args.safe_mode and not request_next_chunk:
+                if infer_pause_evt is not None:
+                    infer_pause_evt.set()
                 time.sleep(0.05)
                 continue
 
+            if infer_pause_evt is not None:
+                infer_pause_evt.clear()
+
+            assert infer_ctl is not None
+            if infer_ctl.async_rtc_fatal is not None:
+                logger.error("双臂 async 停止：%s", infer_ctl.async_rtc_fatal)
+                running = False
+                break
             try:
                 observation = _build_dual_observation(left_arm=left_arm, right_arm=right_arm, cameras=cameras)
             except (DeviceNotConnectedError, TimeoutError, RuntimeError) as error:
@@ -1851,109 +1859,163 @@ def main() -> None:
                 running = False
                 break
 
-            sync_infer_start = time.perf_counter()
-            if args.acp_enable:
-                actions = _predict_action_chunk_with_acp(
-                    robot_observation=observation,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    execution_horizon=execution_horizon,
-                    use_amp=policy_cfg.use_amp,
-                    acp_inference=acp_inference,
-                    cond_runtime_state=cond_policy_runtime_state,
-                    uncond_runtime_state=uncond_policy_runtime_state,
-                )
-            else:
-                actions = _predict_action_chunk(
-                    robot_observation=observation,
-                    dataset_features=dataset_features,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    device=device,
-                    task=args.task,
-                    robot_type="arx5_dual",
-                    execution_horizon=execution_horizon,
-                    use_amp=policy_cfg.use_amp,
-                )
-            sync_infer_elapsed = time.perf_counter() - sync_infer_start
-            logger.info("同步推理耗时：%.4fs", sync_infer_elapsed)
             current_state = [float(observation[key]) for key in STATE_KEYS]
+
+            with infer_ctl.lock:
+                infer_ctl.obs_cur = observation
+                dead_limit = time.perf_counter() + 30.0
+                while infer_ctl.idx >= len(infer_ctl.actions_cur):
+                    infer_ctl.cv.wait(timeout=0.15)
+                    if time.perf_counter() > dead_limit:
+                        logger.error("双臂 async：等待推理缓冲超时（worker 可能异常）。")
+                        running = False
+                        break
+                if not running:
+                    continue
+                chunk_ix = infer_ctl.chunk_serial
+                idx_at_step = infer_ctl.idx
+                action = dict(infer_ctl.actions_cur[idx_at_step])
+
+            step_start = time.perf_counter()
+
+            if keyboard is not None:
+                ik = keyboard.get_key()
+                inner_state, inner_chunk_req, inner_running, _vr2 = _run_keyboard_command(
+                    key=ik,
+                    left_arm=left_arm,
+                    right_arm=right_arm,
+                    state=state,
+                    safe_mode=args.safe_mode,
+                    request_next_chunk=request_next_chunk,
+                    recorder=raw_recorder,
+                    end_traj_recorder=end_traj_recorder,
+                    joint_traj_recorder=joint_traj_recorder,
+                    joint_vel_recorder=joint_vel_recorder,
+                )
+                state = inner_state
+                running = inner_running
+                request_next_chunk = inner_chunk_req
+                if inner_state != LoopState.RUNNING or not inner_running:
+                    continue
+
+            action_pre_clip = dict(action)
             if args.safe_mode:
-                actions_pre_clip = actions
-                actions = _clip_safe_actions(
-                    actions_pre_clip,
+                clipped_actions = _clip_safe_actions(
+                    [action],
                     current_state=current_state,
                     max_joint_step=args.max_joint_step,
                 )
-                clipped_mask = [
-                    any(abs(float(pre[key]) - float(post[key])) > 1e-12 for key in STATE_KEYS)
-                    for pre, post in zip(actions_pre_clip, actions, strict=False)
-                ]
-            else:
-                clipped_mask = [False] * len(actions)
-            if not actions:
-                logger.warning("**********策略未返回动作，正在重试。**********")
-                time.sleep(0.1)
-                continue
-
-            left_grippers = [round(float(action[LEFT_STATE_KEYS[-1]]), 4) for action in actions]
-            right_grippers = [round(float(action[RIGHT_STATE_KEYS[-1]]), 4) for action in actions]
-            logger.info(
-                "Predicted %d actions. Left grippers: %s Right grippers: %s",
-                len(actions),
-                left_grippers,
-                right_grippers,
-            )
-            _log_predicted_actions(actions)
-            request_next_chunk = False
-
-            if args.record_dir is not None:
-                round_dir = _save_chunk_io(
-                    record_dir=args.record_dir,
-                    round_index=round_index,
-                    observation=observation,
-                    state=current_state,
-                    actions=actions,
-                    camera_names=camera_names,
-                )
-                logger.info("已将 chunk %d 保存至 %s", round_index, round_dir)
-                round_index += 1
-                if args.safe_mode:
-                    logger.info("安全模式：请按 [I] 获取下一段 chunk。")
-                if raw_recorder is None:
+                if not clipped_actions:
+                    logger.warning("**********双臂 async：安全裁剪后无可用动作。**********")
+                    time.sleep(0.1)
                     continue
+                action = clipped_actions[0]
+                clipped_here = any(
+                    abs(float(action_pre_clip[k]) - float(action[k])) > 1e-12 for k in STATE_KEYS
+                )
+            else:
+                clipped_here = False
 
+            if args.use_kf:
+                action, action_kalman_filter = _filter_action(action, action_kalman_filter)
+
+            if (
+                raw_recorder is not None
+                and raw_recorder.recording_active
+                and not raw_recorder.is_segment_active()
+            ):
+                assert infer_seg_roll_lock is not None
+                with infer_seg_roll_lock:
+                    if not raw_recorder.is_segment_active():
+                        raw_recorder.start_policy_segment()
+
+            observation_for_step: dict[str, Any] | None = None
             if raw_recorder is not None and raw_recorder.recording_active:
-                raw_recorder.start_policy_segment()
+                observation_for_step = _build_dual_observation(
+                    left_arm=left_arm, right_arm=right_arm, cameras=cameras
+                )
+                record_timestamp = step_start if raw_recorder.debug_timestamp else None
+            else:
+                record_timestamp = None
 
-            chunk_index += 1
-            state, request_next_chunk, running, joint_vel_global_step, action_kalman_filter = _execute_dual_chunk(
-                left_arm=left_arm,
-                right_arm=right_arm,
-                cameras=cameras,
-                actions=actions,
-                step_duration_s=args.duration,
-                keyboard=keyboard,
-                safe_mode=args.safe_mode,
-                recorder=raw_recorder,
-                end_traj_recorder=end_traj_recorder,
-                joint_traj_recorder=joint_traj_recorder,
-                joint_vel_recorder=joint_vel_recorder,
-                chunk_index=chunk_index,
-                clipped_mask=clipped_mask,
-                global_step_start=joint_vel_global_step,
-                action_kalman_filter=action_kalman_filter,
-                use_kf=args.use_kf,
+            left_joint, right_joint = _split_dual_action(action)
+            cmd14 = [round(float(action[k]), 4) for k in STATE_KEYS]
+            obs14 = _state_cmd14_from_observation(observation)
+            logger.info(
+                "双臂 async 步进：chunk_serial=%d index_in_chunk=%d\n"
+                "  cmd14=%s\n"
+                "  obs14=%s\n"
+                "  （STATE_KEYS 顺序：右7+左7）",
+                chunk_ix,
+                idx_at_step,
+                cmd14,
+                obs14,
             )
+            left_thread = threading.Thread(target=left_arm.send_joint, args=(left_joint,))
+            right_thread = threading.Thread(target=right_arm.send_joint, args=(right_joint,))
+            left_thread.start()
+            right_thread.start()
+            left_thread.join()
+            right_thread.join()
+
+            if end_traj_recorder is not None:
+                end_traj_recorder.record(step_index=idx_at_step, left_arm=left_arm, right_arm=right_arm)
+            if joint_traj_recorder is not None:
+                joint_traj_recorder.record(
+                    step_index=idx_at_step,
+                    left_cmd=left_joint,
+                    right_cmd=right_joint,
+                    left_arm=left_arm,
+                    right_arm=right_arm,
+                )
+            if joint_vel_recorder is not None:
+                source = "policy_safe_clipped" if clipped_here else "policy"
+                joint_vel_recorder.record(
+                    step_index=joint_vel_global_step,
+                    chunk_index=chunk_ix,
+                    step_in_chunk=idx_at_step,
+                    source=source,
+                    left_arm=left_arm,
+                    right_arm=right_arm,
+                    left_cmd=left_joint,
+                    right_cmd=right_joint,
+                )
+                joint_vel_global_step += 1
+
+            if (
+                raw_recorder is not None
+                and raw_recorder.recording_active
+                and observation_for_step is not None
+            ):
+                raw_recorder.record_policy_step(
+                    action_dict=action,
+                    observation=observation_for_step,
+                    record_timestamp=record_timestamp,
+                )
+
+            with infer_ctl.lock:
+                infer_ctl.idx += 1
+                infer_ctl.cv.notify_all()
+
+            step_elapsed = time.perf_counter() - step_start
+            if step_elapsed > args.duration:
+                logger.warning(
+                    "控制步超时：step=%d elapsed=%.4fs > duration=%.4fs (overrun=%.4fs)",
+                    idx_at_step,
+                    step_elapsed,
+                    args.duration,
+                    step_elapsed - args.duration,
+                )
+            precise_sleep(max(args.duration - step_elapsed, 0.0))
+
             if args.safe_mode and state == LoopState.RUNNING:
-                logger.info("安全模式：请按 [I] 获取下一段 chunk。")
+                request_next_chunk = False
+                logger.info("安全模式：请按 [I] 进行下一步 action。")
     finally:
+        if infer_stop_evt is not None:
+            infer_stop_evt.set()
+        if infer_worker_thr is not None:
+            infer_worker_thr.join(timeout=120.0)
         if raw_recorder is not None:
             try:
                 raw_recorder.finish_active_segment()
