@@ -531,7 +531,7 @@ def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
         "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作（VR 内按 [X] 退出） | "
         "[S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
-        "[O] open grippers (when stopped) | [P] close grippers (when stopped) | [B] teach | [N] record pose"
+        "[Y] 张开左夹爪 | [U] 闭合左夹爪 | [O] 张开右夹爪 | [P] 闭合右夹爪 | [B] teach | [N] record pose"
     )
     if safe_mode:
         base_message += " | [I] 下一段 chunk"
