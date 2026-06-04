@@ -49,6 +49,7 @@ POLICY_REPO_ID="${POLICY_REPO_ID:-local/pi05_socks3000_8gpu}"
 POLICY_PRETRAINED_PATH="${POLICY_PRETRAINED_PATH:-lerobot/pi05_base}"
 
 NUM_PROCESSES="${NUM_PROCESSES:-8}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-0}"
 TRAIN_STEPS="${TRAIN_STEPS:-50000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LOG_FREQ="${LOG_FREQ:-200}"
@@ -74,7 +75,7 @@ if [[ -n "${HF_CACHE_DIR:-}" ]]; then
   mkdir -p "$HF_CACHE_DIR"
 fi
 
-mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
 echo "[INFO] run_name: $RUN_NAME"
 echo "[INFO] output_dir: $OUTPUT_DIR"
@@ -83,6 +84,7 @@ echo "[INFO] conda_env: ${CONDA_DEFAULT_ENV:-<none>}"
 echo "[INFO] python: $(command -v python)"
 echo "[INFO] accelerate: $(command -v accelerate)"
 echo "[INFO] dist_timeout_seconds: $DIST_TIMEOUT_SECONDS"
+echo "[INFO] main_process_port: $MAIN_PROCESS_PORT"
 echo "[INFO] cuda_visible_devices: $CUDA_VISIBLE_DEVICES"
 echo "[INFO] dataset.root: $DATASET_ROOT"
 echo "[INFO] dataset.repo_id: $DATASET_REPO_ID"
@@ -97,6 +99,7 @@ accelerate launch \
   --multi_gpu \
   --num_machines 1 \
   --num_processes "$NUM_PROCESSES" \
+  --main_process_port "$MAIN_PROCESS_PORT" \
   --mixed_precision=bf16 \
   --dynamo_backend=no \
   -m lerobot.scripts.lerobot_train \
@@ -120,4 +123,3 @@ accelerate launch \
   --wandb.disable_artifact="$WANDB_DISABLE_ARTIFACT" \
   --job_name="$RUN_NAME" \
   --output_dir="$OUTPUT_DIR" 2>&1 | tee -a "$LOG_FILE"
-
