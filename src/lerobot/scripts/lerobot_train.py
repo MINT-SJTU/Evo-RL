@@ -111,6 +111,8 @@ def update_policy(
     lr_scheduler=None,
     lock=None,
     sample_weights_provider=None,
+    sample_weights=None,
+    sample_weight_stats=None,
     sample_weight_log_prefix: str | None = None,
 ) -> tuple[MetricsTracker, dict]:
     """
@@ -129,6 +131,8 @@ def update_policy(
         lr_scheduler: An optional learning rate scheduler.
         lock: An optional lock for thread-safe optimizer updates.
         sample_weights_provider: Optional provider for per-sample loss weights.
+        sample_weights: Optional precomputed per-sample loss weights.
+        sample_weight_stats: Optional stats for precomputed per-sample weights.
         sample_weight_log_prefix: Prefix for provider stats in logs.
 
     Returns:
@@ -139,9 +143,7 @@ def update_policy(
     start_time = time.perf_counter()
     policy.train()
 
-    sample_weights = None
-    sample_weight_stats = None
-    if sample_weights_provider is not None:
+    if sample_weights is None and sample_weights_provider is not None:
         sample_weights, sample_weight_stats = sample_weights_provider.compute_batch_weights(batch)
 
     # Let accelerator handle mixed precision
@@ -574,6 +576,14 @@ def train(
         batch = next(dl_iter)
         if acp_raw_batch_hook is not None:
             batch = acp_raw_batch_hook(batch, step)
+
+        sample_weights = None
+        sample_weight_stats = None
+        sample_weights_provider_for_update = sample_weights_provider
+        if sample_weight_log_prefix == "weighted_bc" and sample_weights_provider is not None:
+            sample_weights, sample_weight_stats = sample_weights_provider.compute_batch_weights(batch)
+            sample_weights_provider_for_update = None
+
         batch = preprocessor(batch)
 
         if is_main_process and not logged_first_prompt:
@@ -602,7 +612,9 @@ def train(
             cfg.optimizer.grad_clip_norm,
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
-            sample_weights_provider=sample_weights_provider,
+            sample_weights_provider=sample_weights_provider_for_update,
+            sample_weights=sample_weights,
+            sample_weight_stats=sample_weight_stats,
             sample_weight_log_prefix=sample_weight_log_prefix,
         )
 
