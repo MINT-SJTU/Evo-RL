@@ -564,7 +564,7 @@ def _log_keyboard_help(safe_mode: bool) -> None:
     base_message = (
         "键盘：[Space] 急停| [H] 回零 | [M] 前往记录位姿 | [V] VR 遥操作（VR 内按 [X] 退出） | "
         "[S] 开始录制 | [R] 执行推理 | [D] 结束录制 | [Q] 退出 | "
-        "[O] open grippers (when stopped) | [P] close grippers (when stopped) | [B] teach | [N] record pose"
+        "[Y] 张开左夹爪 | [U] 闭合左夹爪 | [O] 张开右夹爪 | [P] 闭合右夹爪 | [B] teach | [N] record pose"
     )
     if safe_mode:
         base_message += " | [I] 下一步 action"
@@ -650,29 +650,50 @@ def _run_keyboard_command(
         logger.info("用户请求退出。")
         return state, request_next_chunk, False, False
 
-    if key == "o":
+    if key == "y":
         if state != LoopState.STOPPED:
             logger.warning(
-                "**********[O] 已忽略：仅在停止状态下可张开夹爪；请先按 [Space] 急停。**********"
+                "**********[Y] 已忽略：仅在停止状态下可张开左夹爪；请先按 [Space] 急停。**********"
             )
             return state, request_next_chunk, True, False
         # send_joint -> set_joint_positions(6) + set_catch_pos(gripper). Fully open == gripper_max (not gripper_min).
-        for arm in (left_arm, right_arm):
-            pose = arm.get_state()
-            arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
-        logger.info("已张开双臂夹爪（O）。")
+        pose = left_arm.get_state()
+        left_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
+        logger.info("已张开左臂夹爪（Y）。")
+        return state, request_next_chunk, True, False
+
+    if key == "u":
+        if state != LoopState.STOPPED:
+            logger.warning(
+                "**********[U] 已忽略：仅在停止状态下可闭合左夹爪；请先按 [Space] 急停。**********"
+            )
+            return state, request_next_chunk, True, False
+        pose = left_arm.get_state()
+        left_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
+        logger.info("已闭合左臂夹爪（U）。")
+        return state, request_next_chunk, True, False
+
+    if key == "o":
+        if state != LoopState.STOPPED:
+            logger.warning(
+                "**********[O] 已忽略：仅在停止状态下可张开右夹爪；请先按 [Space] 急停。**********"
+            )
+            return state, request_next_chunk, True, False
+        # send_joint -> set_joint_positions(6) + set_catch_pos(gripper). Fully open == gripper_max (not gripper_min).
+        pose = right_arm.get_state()
+        right_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_OPEN])
+        logger.info("已张开右臂夹爪（O）。")
         return state, request_next_chunk, True, False
 
     if key == "p":
         if state != LoopState.STOPPED:
             logger.warning(
-                "**********[P] 已忽略：仅在停止状态下可闭合夹爪；请先按 [Space] 急停。**********"
+                "**********[P] 已忽略：仅在停止状态下可闭合右夹爪；请先按 [Space] 急停。**********"
             )
             return state, request_next_chunk, True, False
-        for arm in (left_arm, right_arm):
-            pose = arm.get_state()
-            arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
-        logger.info("已闭合双臂夹爪（P）。")
+        pose = right_arm.get_state()
+        right_arm.send_joint([float(pose[i]) for i in range(6)] + [ARX5_GRIPPER_FULLY_CLOSED])
+        logger.info("已闭合右臂夹爪（P）。")
         return state, request_next_chunk, True, False
 
     if state == LoopState.STOPPED:
