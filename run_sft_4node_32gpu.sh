@@ -77,6 +77,7 @@ POLICY_COMPILE="${POLICY_COMPILE:-false}"
 POLICY_COMPILE_MODE="${POLICY_COMPILE_MODE:-reduce-overhead}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 POLICY_PUSH_TO_HUB="${POLICY_PUSH_TO_HUB:-false}"
+WEIGHTED_BC_ENABLE="${WEIGHTED_BC_ENABLE:-false}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-}"
 HF_LOCAL_FILES_ONLY="${HF_LOCAL_FILES_ONLY:-false}"
 
@@ -166,16 +167,12 @@ echo "[INFO] policy_compile_mode: $POLICY_COMPILE_MODE"
 echo "[INFO] gradient_checkpointing: $GRADIENT_CHECKPOINTING"
 echo "[INFO] hf_cache_dir: $HF_CACHE_DIR"
 echo "[INFO] hf_local_files_only: $HF_LOCAL_FILES_ONLY"
+echo "[INFO] weighted_bc_enable: $WEIGHTED_BC_ENABLE"
 echo "[INFO] nccl_debug: ${NCCL_DEBUG:-<unset>}"
 echo "[INFO] nccl_debug_subsys: ${NCCL_DEBUG_SUBSYS:-<unset>}"
 echo "[INFO] nccl_socket_ifname: ${NCCL_SOCKET_IFNAME:-<unset>}"
 echo "[INFO] nccl_ib_hca: ${NCCL_IB_HCA:-<unset>}"
 echo "[INFO] gloo_socket_ifname: ${GLOO_SOCKET_IFNAME:-<unset>}"
-
-if [[ ! -d "$DATASET_ROOT" ]]; then
-  echo "[ERROR] 数据集目录不存在: $DATASET_ROOT"
-  exit 1
-fi
 
 if ! command -v accelerate >/dev/null 2>&1; then
   echo "[ERROR] 当前环境缺少 accelerate，请检查 $CONDA_ENV_NAME 依赖"
@@ -210,6 +207,7 @@ accelerate launch \
   --policy.compile_mode="$POLICY_COMPILE_MODE" \
   --policy.push_to_hub="$POLICY_PUSH_TO_HUB" \
   --policy.empty_cameras=0 \
+  --weighted_bc.enable="$WEIGHTED_BC_ENABLE" \
   --resume="$RESUME" \
   --job_name="pi05_${NUM_MACHINES}node${NUM_PROCESSES}gpu_towel_mid300_352ep_$RUN_ID" \
   --output_dir="$RUN_OUTPUT_DIR" \

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -54,6 +55,22 @@ from .core import EnvAction, EnvTransition, PolicyAction, RobotAction, RobotObse
 # Generic type variables for pipeline input and output.
 TInput = TypeVar("TInput")
 TOutput = TypeVar("TOutput")
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_IGNORED_PROCESSOR_STEPS = {
+    # Added in newer pi0.5 processor configs. Older branches do not implement it,
+    # and training can safely use the older action pipeline without this step.
+    "relative_actions_processor",
+    "absolute_actions_processor",
+}
+
+
+def _ignored_processor_steps() -> set[str]:
+    ignored = set(DEFAULT_IGNORED_PROCESSOR_STEPS)
+    extra_steps = os.environ.get("LEROBOT_IGNORE_PROCESSOR_STEPS", "")
+    ignored.update(step.strip() for step in extra_steps.split(",") if step.strip())
+    return ignored
 
 
 class ProcessorStepRegistry:
@@ -770,9 +787,25 @@ class DataProcessorPipeline(HubMixin, Generic[TInput, TOutput]):
         steps: list[ProcessorStep] = []
         override_keys = set(overrides.keys())
 
+        ignored_steps = _ignored_processor_steps()
         for step_entry in loaded_config["steps"]:
             # 1. Get step class and key
-            step_class, step_key = cls._resolve_step_class(step_entry)
+            try:
+                step_class, step_key = cls._resolve_step_class(step_entry)
+            except ImportError:
+                step_name = cls._step_name_for_compat(step_entry)
+                if step_name in ignored_steps:
+                    logger.warning(
+                        "Skipping unsupported processor step '%s' while loading %s from %s. "
+                        "Set LEROBOT_IGNORE_PROCESSOR_STEPS to adjust the compatibility ignore list.",
+                        step_name,
+                        loaded_config.get("name", "DataProcessorPipeline"),
+                        model_id,
+                    )
+                    if step_name in override_keys:
+                        override_keys.discard(step_name)
+                    continue
+                raise
 
             # 2. Instantiate step with overrides
             step_instance = cls._instantiate_step(step_entry, step_class, step_key, overrides)
@@ -787,6 +820,14 @@ class DataProcessorPipeline(HubMixin, Generic[TInput, TOutput]):
             steps.append(step_instance)
 
         return steps, override_keys
+
+    @classmethod
+    def _step_name_for_compat(cls, step_entry: dict[str, Any]) -> str:
+        if "registry_name" in step_entry:
+            return str(step_entry["registry_name"])
+        if "class" in step_entry:
+            return str(step_entry["class"]).rsplit(".", 1)[-1]
+        return "Unknown"
 
     @classmethod
     def _resolve_step_class(cls, step_entry: dict[str, Any]) -> tuple[type[ProcessorStep], str]:
