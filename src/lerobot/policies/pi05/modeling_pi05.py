@@ -1160,6 +1160,9 @@ class PI05Policy(PreTrainedPolicy):
         for key in present_img_keys:
             img = batch[key]
 
+            # Normalize from [0,1] to [-1,1] as expected by siglip
+            img = img * 2.0 - 1.0
+            
             # Ensure tensor is on the same device as the model
             if img.device != device:
                 img = img.to(device)
@@ -1178,9 +1181,6 @@ class PI05Policy(PreTrainedPolicy):
             # from openpi preprocess_observation_pytorch: Resize with padding if needed
             if img.shape[1:3] != self.config.image_resolution:
                 img = resize_with_pad_torch(img, *self.config.image_resolution)
-
-            # Normalize from [0,1] to [-1,1] as expected by siglip
-            img = img * 2.0 - 1.0
 
             # from openpi preprocess_observation_pytorch: Convert back to [B, C, H, W] format if it was originally channels-first
             if is_channels_first:
