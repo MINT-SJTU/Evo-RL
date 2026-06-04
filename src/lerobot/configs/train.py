@@ -42,6 +42,17 @@ class ACPConfig:
 
 
 @dataclass
+class WeightedBCConfig:
+    enable: bool = False
+    pre_intervention_s: float = 1.0
+    model_weight: float = 1.0
+    pre_intervention_weight: float = 0.5
+    intervention_weight: float = 4.0
+    expert_weight: float = 2.0
+    normalize: bool = False
+
+
+@dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     env: envs.EnvConfig | None = None
@@ -75,6 +86,7 @@ class TrainPipelineConfig(HubMixin):
     wandb: WandBConfig = field(default_factory=WandBConfig)
     peft: PeftConfig | None = None
     acp: ACPConfig = field(default_factory=ACPConfig)
+    weighted_bc: WeightedBCConfig = field(default_factory=WeightedBCConfig)
 
     # RA-BC (Reward-Aligned Behavior Cloning) parameters
     use_rabc: bool = False  # Enable reward-weighted training
@@ -135,9 +147,6 @@ class TrainPipelineConfig(HubMixin):
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
             self.output_dir = Path("outputs/train") / train_dir
 
-        if isinstance(self.dataset.repo_id, list):
-            raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
-
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
             raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
         elif self.use_policy_training_preset and not self.resume:
@@ -156,9 +165,31 @@ class TrainPipelineConfig(HubMixin):
         if self.acp.instance_table_path is not None and not self.acp.instance_table_path:
             raise ValueError("'acp.instance_table_path' must be non-empty when provided.")
 
+        if self.weighted_bc.enable and self.use_rabc:
+            raise ValueError("'weighted_bc.enable=true' and 'use_rabc=true' are mutually exclusive.")
+        if self.weighted_bc.pre_intervention_s < 0:
+            raise ValueError("'weighted_bc.pre_intervention_s' must be >= 0.")
+        for field_name in (
+            "model_weight",
+            "pre_intervention_weight",
+            "intervention_weight",
+            "expert_weight",
+        ):
+            if getattr(self.weighted_bc, field_name) < 0:
+                raise ValueError(f"'weighted_bc.{field_name}' must be >= 0.")
+
         if self.use_rabc and not self.rabc_progress_path:
             # Auto-detect from dataset path
             repo_id = self.dataset.repo_id
+            if (
+                isinstance(repo_id, list)
+                or (isinstance(repo_id, str) and "," in repo_id)
+                or (self.dataset.root is not None and "," in self.dataset.root)
+            ):
+                raise ValueError(
+                    "Automatic RA-BC progress path detection is ambiguous with multiple datasets. "
+                    "Please set `rabc_progress_path` explicitly."
+                )
             if self.dataset.root:
                 self.rabc_progress_path = str(Path(self.dataset.root) / "sarm_progress.parquet")
             else:

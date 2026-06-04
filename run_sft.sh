@@ -75,6 +75,7 @@ POLICY_COMPILE="${POLICY_COMPILE:-false}"
 POLICY_COMPILE_MODE="${POLICY_COMPILE_MODE:-reduce-overhead}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 POLICY_PUSH_TO_HUB="${POLICY_PUSH_TO_HUB:-false}"
+WEIGHTED_BC_ENABLE="${WEIGHTED_BC_ENABLE:-false}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-}"
 HF_LOCAL_FILES_ONLY="${HF_LOCAL_FILES_ONLY:-false}"
 
@@ -190,17 +191,13 @@ echo "[INFO] policy_compile: $POLICY_COMPILE"
 echo "[INFO] policy_compile_mode: $POLICY_COMPILE_MODE"
 echo "[INFO] hf_cache_dir: $HF_CACHE_DIR"
 echo "[INFO] hf_local_files_only: $HF_LOCAL_FILES_ONLY"
+echo "[INFO] weighted_bc_enable: $WEIGHTED_BC_ENABLE"
 echo "[INFO] nccl_debug: ${NCCL_DEBUG:-<unset>}"
 echo "[INFO] nccl_debug_subsys: ${NCCL_DEBUG_SUBSYS:-<unset>}"
 echo "[INFO] nccl_socket_ifname: ${NCCL_SOCKET_IFNAME:-<unset>}"
 echo "[INFO] nccl_ib_hca: ${NCCL_IB_HCA:-<unset>}"
 echo "[INFO] gloo_socket_ifname: ${GLOO_SOCKET_IFNAME:-<unset>}"
 echo "[INFO] ddp_init_sync: ${DDP_INIT_SYNC:-<unset>}"
-
-if [[ ! -d "$DATASET_ROOT" ]]; then
-  echo "[ERROR] 数据集目录不存在: $DATASET_ROOT"
-  exit 1
-fi
 
 if ! command -v accelerate >/dev/null 2>&1; then
   echo "[ERROR] 当前环境缺少 accelerate，请检查 $CONDA_ENV_NAME 依赖"
@@ -212,33 +209,34 @@ fi
 # 4) 启动指令 (16卡双机)
 accelerate launch \
   --multi_gpu \
-  --num_machines $NUM_MACHINES \
-  --machine_rank $NODE_RANK \
-  --main_process_ip $MAIN_PROCESS_IP \
-  --main_process_port $MAIN_PROCESS_PORT \
-  --num_processes $NUM_PROCESSES \
+  --num_machines "$NUM_MACHINES" \
+  --machine_rank "$NODE_RANK" \
+  --main_process_ip "$MAIN_PROCESS_IP" \
+  --main_process_port "$MAIN_PROCESS_PORT" \
+  --num_processes "$NUM_PROCESSES" \
   --mixed_precision=bf16 \
   -m lerobot.scripts.lerobot_train \
   --policy.type=pi05 \
   --policy.pretrained_path=lerobot/pi05_base \
-  --policy.repo_id=$POLICY_REPO_ID \
-  --dataset.root=$DATASET_ROOT \
-  --dataset.repo_id=$DATASET_REPO_ID \
-  --steps=$TRAIN_STEPS \
-  --policy.optimizer_lr=$OPTIMIZER_LR \
-  --policy.scheduler_decay_lr=$SCHEDULER_DECAY_LR \
-  --batch_size=$BATCH_SIZE \
-  --log_freq=$LOG_FREQ \
-  --save_freq=$SAVE_FREQ \
+  --policy.repo_id="$POLICY_REPO_ID" \
+  --dataset.root="$DATASET_ROOT" \
+  --dataset.repo_id="$DATASET_REPO_ID" \
+  --steps="$TRAIN_STEPS" \
+  --policy.optimizer_lr="$OPTIMIZER_LR" \
+  --policy.scheduler_decay_lr="$SCHEDULER_DECAY_LR" \
+  --batch_size="$BATCH_SIZE" \
+  --log_freq="$LOG_FREQ" \
+  --save_freq="$SAVE_FREQ" \
   --policy.dtype=bfloat16 \
-  --policy.gradient_checkpointing=$GRADIENT_CHECKPOINTING \
-  --policy.compile_model=$POLICY_COMPILE \
-  --policy.compile_mode=$POLICY_COMPILE_MODE \
-  --policy.push_to_hub=$POLICY_PUSH_TO_HUB \
+  --policy.gradient_checkpointing="$GRADIENT_CHECKPOINTING" \
+  --policy.compile_model="$POLICY_COMPILE" \
+  --policy.compile_mode="$POLICY_COMPILE_MODE" \
+  --policy.push_to_hub="$POLICY_PUSH_TO_HUB" \
   --policy.empty_cameras=0 \
-  --resume=$RESUME \
-  --job_name=$RUN_ID \
-  --output_dir=$RUN_OUTPUT_DIR \
-  --wandb.enable=$WANDB_ENABLE \
-  --wandb.disable_artifact=$WANDB_DISABLE_ARTIFACT
+  --weighted_bc.enable="$WEIGHTED_BC_ENABLE" \
+  --resume="$RESUME" \
+  --job_name="$RUN_ID" \
+  --output_dir="$RUN_OUTPUT_DIR" \
+  --wandb.enable="$WANDB_ENABLE" \
+  --wandb.disable_artifact="$WANDB_DISABLE_ARTIFACT"
   

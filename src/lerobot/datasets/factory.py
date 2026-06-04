@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+from pathlib import Path
 from pprint import pformat
 
 import torch
@@ -69,6 +70,62 @@ def resolve_delta_timestamps(
     return delta_timestamps
 
 
+def _split_csv(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    return parts if len(parts) > 1 else None
+
+
+def _dataset_root_for_multi(root: str | Path | None, repo_id: str) -> Path | None:
+    if root is None:
+        return None
+    return Path(root) / repo_id
+
+
+def _repo_id_from_root(root: Path) -> str:
+    return f"local/{root.name}"
+
+
+def _parse_dataset_roots(root: str | None) -> Path | list[Path] | None:
+    roots = _split_csv(root)
+    if roots is None:
+        return Path(root) if root is not None else None
+    return [Path(dataset_root) for dataset_root in roots]
+
+
+def _parse_repo_ids(repo_id: str | list[str]) -> str | list[str]:
+    if isinstance(repo_id, str):
+        parsed_repo_ids = [part.strip() for part in repo_id.split(",") if part.strip()]
+        if len(parsed_repo_ids) > 1:
+            return parsed_repo_ids
+    return repo_id
+
+
+def _resolve_multi_dataset_ids_and_roots(
+    repo_id: str | list[str],
+    root: str | None,
+) -> tuple[str | list[str], Path | list[Path] | None]:
+    """Resolve logical dataset ids and physical roots.
+
+    Comma-separated ``dataset.root`` values are treated as exact dataset roots. In that form, a single
+    ``dataset.repo_id`` is only a placeholder and stable local ids are derived from root basenames.
+    The older ``root=/parent`` + ``repo_id=ds0,ds1`` form is kept for compatibility.
+    """
+    parsed_repo_id = _parse_repo_ids(repo_id)
+    parsed_root = _parse_dataset_roots(root)
+
+    if isinstance(parsed_root, list):
+        if isinstance(parsed_repo_id, list):
+            if len(parsed_repo_id) != len(parsed_root):
+                parsed_repo_id = [_repo_id_from_root(dataset_root) for dataset_root in parsed_root]
+        else:
+            parsed_repo_id = [_repo_id_from_root(dataset_root) for dataset_root in parsed_root]
+        return parsed_repo_id, parsed_root
+
+    return parsed_repo_id, parsed_root
+
+
 def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
@@ -84,16 +141,18 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
+    repo_id, dataset_root = _resolve_multi_dataset_ids_and_roots(cfg.dataset.repo_id, cfg.dataset.root)
+    cfg.dataset.repo_id = repo_id
 
-    if isinstance(cfg.dataset.repo_id, str):
+    if isinstance(repo_id, str):
         ds_meta = LeRobotDatasetMetadata(
-            cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
+            repo_id, root=dataset_root, revision=cfg.dataset.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
         if not cfg.dataset.streaming:
             dataset = LeRobotDataset(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
+                repo_id,
+                root=dataset_root,
                 episodes=cfg.dataset.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
@@ -103,8 +162,8 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             )
         else:
             dataset = StreamingLeRobotDataset(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
+                repo_id,
+                root=dataset_root,
                 episodes=cfg.dataset.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
@@ -113,11 +172,29 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 tolerance_s=cfg.tolerance_s,
             )
     else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+        if cfg.dataset.streaming:
+            raise NotImplementedError("Multi-dataset streaming is not supported on this branch.")
+
+        dataset_roots = dataset_root if isinstance(dataset_root, list) else None
+        root_parent = None if isinstance(dataset_root, list) else dataset_root
+        metas = [
+            LeRobotDatasetMetadata(
+                dataset_repo_id,
+                root=dataset_roots[i]
+                if dataset_roots is not None
+                else _dataset_root_for_multi(root_parent, dataset_repo_id),
+                revision=cfg.dataset.revision,
+            )
+            for i, dataset_repo_id in enumerate(repo_id)
+        ]
+        delta_timestamps = resolve_delta_timestamps(cfg.policy, metas[0])
         dataset = MultiLeRobotDataset(
-            cfg.dataset.repo_id,
-            # TODO(aliberts): add proper support for multi dataset
-            # delta_timestamps=delta_timestamps,
+            repo_id,
+            root=root_parent,
+            roots=dataset_roots,
+            episodes=cfg.dataset.episodes if isinstance(cfg.dataset.episodes, dict) else None,
+            delta_timestamps=delta_timestamps,
+            tolerances_s={dataset_repo_id: cfg.tolerance_s for dataset_repo_id in repo_id},
             image_transforms=image_transforms,
             video_backend=cfg.dataset.video_backend,
         )

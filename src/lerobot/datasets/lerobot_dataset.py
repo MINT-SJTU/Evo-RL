@@ -1639,6 +1639,107 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return obj
 
 
+class MultiLeRobotDatasetMetadata:
+    """Minimal metadata view for a concatenation of local LeRobot datasets."""
+
+    def __init__(
+        self,
+        repo_ids: list[str],
+        datasets_: list[LeRobotDataset],
+        features: dict[str, dict],
+        stats: dict[str, dict[str, np.ndarray]] | None,
+        frame_offsets: list[int],
+        episode_offsets: list[int],
+    ):
+        self.repo_ids = repo_ids
+        self.repo_id = repo_ids
+        self.root = None
+        self.revision = datasets_[0].meta.revision
+        self.info = dict(datasets_[0].meta.info)
+        self.info["features"] = features
+        self.info["total_frames"] = sum(dataset.num_frames for dataset in datasets_)
+        self.info["total_episodes"] = sum(dataset.num_episodes for dataset in datasets_)
+        self.stats = stats
+        self.tasks = self._build_tasks(datasets_)
+        self.subtasks = None
+        self.episodes = self._build_episodes(datasets_, frame_offsets, episode_offsets)
+
+    @staticmethod
+    def _build_tasks(datasets_: list[LeRobotDataset]) -> pd.DataFrame:
+        task_names: list[str] = []
+        for dataset in datasets_:
+            for task_name in dataset.meta.tasks.index:
+                if task_name not in task_names:
+                    task_names.append(task_name)
+        return pd.DataFrame({"task_index": range(len(task_names))}, index=task_names)
+
+    @staticmethod
+    def _build_episodes(
+        datasets_: list[LeRobotDataset],
+        frame_offsets: list[int],
+        episode_offsets: list[int],
+    ) -> datasets.Dataset:
+        rows: list[dict] = []
+        for dataset, frame_offset, episode_offset in zip(
+            datasets_,
+            frame_offsets,
+            episode_offsets,
+            strict=True,
+        ):
+            episodes_raw = dataset.meta.episodes.with_format(None)
+            episodes_dict = episodes_raw[:]
+            selected_episodes = set(int(ep) for ep in dataset.episodes) if dataset.episodes else None
+            for i in range(len(episodes_dict["episode_index"])):
+                local_episode = int(episodes_dict["episode_index"][i])
+                if selected_episodes is not None and local_episode not in selected_episodes:
+                    continue
+                row = {key: values[i] for key, values in episodes_dict.items()}
+                row["episode_index"] = local_episode + episode_offset
+                row["dataset_from_index"] = int(row["dataset_from_index"]) + frame_offset
+                row["dataset_to_index"] = int(row["dataset_to_index"]) + frame_offset
+                rows.append(row)
+
+        if not rows:
+            raise ValueError("MultiLeRobotDataset has no selected episodes.")
+        return datasets.Dataset.from_list(rows)
+
+    @property
+    def fps(self) -> int:
+        return self.info["fps"]
+
+    @property
+    def features(self) -> dict[str, dict]:
+        return self.info["features"]
+
+    @property
+    def image_keys(self) -> list[str]:
+        return [key for key, ft in self.features.items() if ft["dtype"] == "image"]
+
+    @property
+    def video_keys(self) -> list[str]:
+        return [key for key, ft in self.features.items() if ft["dtype"] == "video"]
+
+    @property
+    def camera_keys(self) -> list[str]:
+        return [key for key, ft in self.features.items() if ft["dtype"] in ["video", "image"]]
+
+    @property
+    def names(self) -> dict[str, list | dict]:
+        return {key: ft["names"] for key, ft in self.features.items()}
+
+    @property
+    def shapes(self) -> dict:
+        return {key: tuple(ft["shape"]) for key, ft in self.features.items()}
+
+    @property
+    def total_episodes(self) -> int:
+        return self.info["total_episodes"]
+
+    @property
+    def total_frames(self) -> int:
+        return self.info["total_frames"]
+
+
 class MultiLeRobotDataset(torch.utils.data.Dataset):
     """A dataset consisting of multiple underlying `LeRobotDataset`s.
 
@@ -1650,6 +1751,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self,
         repo_ids: list[str],
         root: str | Path | None = None,
+        roots: list[str | Path] | None = None,
         episodes: dict | None = None,
         image_transforms: Callable | None = None,
         delta_timestamps: dict[str, list[float]] | None = None,
@@ -1659,14 +1761,20 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
     ):
         super().__init__()
         self.repo_ids = repo_ids
+        self.repo_id = repo_ids
         self.root = Path(root) if root else HF_LEROBOT_HOME
+        self.roots = [Path(dataset_root) for dataset_root in roots] if roots is not None else None
+        if self.roots is not None and len(self.roots) != len(repo_ids):
+            raise ValueError(
+                f"Expected one dataset root per repo_id, got {len(self.roots)} roots for {len(repo_ids)} repo_ids."
+            )
         self.tolerances_s = tolerances_s if tolerances_s else dict.fromkeys(repo_ids, 0.0001)
         # Construct the underlying datasets passing everything but `transform` and `delta_timestamps` which
         # are handled by this class.
         self._datasets = [
             LeRobotDataset(
                 repo_id,
-                root=self.root / repo_id,
+                root=self.roots[i] if self.roots is not None else self.root / repo_id,
                 episodes=episodes[repo_id] if episodes else None,
                 image_transforms=image_transforms,
                 delta_timestamps=delta_timestamps,
@@ -1674,8 +1782,27 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 download_videos=download_videos,
                 video_backend=video_backend,
             )
-            for repo_id in repo_ids
+            for i, repo_id in enumerate(repo_ids)
         ]
+        self._frame_offsets = []
+        self._episode_offsets = []
+        self._episode_index_maps: list[dict[int, int]] = []
+        frame_offset = 0
+        episode_offset = 0
+        for dataset in self._datasets:
+            self._frame_offsets.append(frame_offset)
+            self._episode_offsets.append(episode_offset)
+            selected_episodes = (
+                [int(ep) for ep in dataset.episodes]
+                if dataset.episodes is not None
+                else list(range(dataset.meta.total_episodes))
+            )
+            self._episode_index_maps.append(
+                {local_episode: local_episode + episode_offset for local_episode in selected_episodes}
+            )
+            frame_offset += dataset.num_frames
+            episode_offset += dataset.meta.total_episodes
+        self.episodes = None
 
         # Disable any data keys that are not common across all of the datasets. Note: we may relax this
         # restriction in future iterations of this class. For now, this is necessary at least for being able
@@ -1691,11 +1818,12 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             )
         for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
             extra_keys = set(ds.features).difference(intersection_features)
-            logging.warning(
-                f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
-                "other datasets."
-            )
-            self.disabled_features.update(extra_keys)
+            if extra_keys:
+                logging.warning(
+                    f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
+                    "other datasets."
+                )
+                self.disabled_features.update(extra_keys)
 
         self.image_transforms = image_transforms
         self.delta_timestamps = delta_timestamps
@@ -1703,6 +1831,16 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         # with multiple robots of different ranges. Instead we should have one normalization
         # per robot.
         self.stats = aggregate_stats([dataset.meta.stats for dataset in self._datasets])
+        common_feature_names = [key for key in self._datasets[0].features if key in intersection_features]
+        common_features = {key: self._datasets[0].meta.features[key] for key in common_feature_names}
+        self.meta = MultiLeRobotDatasetMetadata(
+            repo_ids=self.repo_ids,
+            datasets_=self._datasets,
+            features=common_features,
+            stats=self.stats,
+            frame_offsets=self._frame_offsets,
+            episode_offsets=self._episode_offsets,
+        )
 
     @property
     def repo_id_to_index(self):
@@ -1798,6 +1936,10 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             raise AssertionError("We expect the loop to break out as long as the index is within bounds.")
         item = self._datasets[dataset_idx][idx - start_idx]
         item["dataset_index"] = torch.tensor(dataset_idx)
+        if "index" in item:
+            item["index"] = item["index"] + self._frame_offsets[dataset_idx]
+        if "episode_index" in item:
+            item["episode_index"] = item["episode_index"] + self._episode_offsets[dataset_idx]
         for data_key in self.disabled_features:
             if data_key in item:
                 del item[data_key]

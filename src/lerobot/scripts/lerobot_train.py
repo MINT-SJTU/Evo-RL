@@ -59,6 +59,48 @@ from lerobot.utils.utils import (
 )
 
 
+def _dataset_root_has_local_meta(root: str | None) -> bool:
+    if root is None:
+        return False
+    roots = [part.strip() for part in root.split(",") if part.strip()]
+    if not roots:
+        return False
+    return all(
+        (Path(dataset_root).is_dir())
+        and (Path(dataset_root) / "meta" / "info.json").is_file()
+        and (Path(dataset_root) / "data").is_dir()
+        for dataset_root in roots
+    )
+
+
+def _log_dataset_debug_summary(dataset) -> None:
+    logging.info("Dataset debug summary:")
+    logging.info("  dataset_type=%s", type(dataset).__name__)
+    logging.info("  num_frames=%s", getattr(dataset, "num_frames", None))
+    logging.info("  num_episodes=%s", getattr(dataset, "num_episodes", None))
+    sub_datasets = getattr(dataset, "_datasets", None)
+    if sub_datasets is not None:
+        logging.info("  repo_ids=%s", getattr(dataset, "repo_ids", None))
+        logging.info("  repo_id_to_index=%s", getattr(dataset, "repo_id_to_index", None))
+        frame_offsets = getattr(dataset, "_frame_offsets", [None] * len(sub_datasets))
+        episode_offsets = getattr(dataset, "_episode_offsets", [None] * len(sub_datasets))
+        for i, sub_dataset in enumerate(sub_datasets):
+            logging.info(
+                "  sub_dataset[%d]: repo_id=%s root=%s num_frames=%s num_episodes=%s "
+                "frame_offset=%s episode_offset=%s",
+                i,
+                getattr(sub_dataset, "repo_id", None),
+                getattr(sub_dataset, "root", None),
+                getattr(sub_dataset, "num_frames", None),
+                getattr(sub_dataset, "num_episodes", None),
+                frame_offsets[i],
+                episode_offsets[i],
+            )
+    else:
+        logging.info("  repo_id=%s", getattr(dataset, "repo_id", None))
+        logging.info("  root=%s", getattr(dataset, "root", None))
+
+
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -68,7 +110,8 @@ def update_policy(
     accelerator: Accelerator,
     lr_scheduler=None,
     lock=None,
-    rabc_weights_provider=None,
+    sample_weights_provider=None,
+    sample_weight_log_prefix: str | None = None,
 ) -> tuple[MetricsTracker, dict]:
     """
     Performs a single training step to update the policy's weights.
@@ -85,7 +128,8 @@ def update_policy(
         accelerator: The Accelerator instance for distributed training and mixed precision.
         lr_scheduler: An optional learning rate scheduler.
         lock: An optional lock for thread-safe optimizer updates.
-        rabc_weights_provider: Optional RABCWeights instance for sample weighting.
+        sample_weights_provider: Optional provider for per-sample loss weights.
+        sample_weight_log_prefix: Prefix for provider stats in logs.
 
     Returns:
         A tuple containing:
@@ -95,27 +139,22 @@ def update_policy(
     start_time = time.perf_counter()
     policy.train()
 
-    # Get RA-BC weights if enabled
-    rabc_batch_weights = None
-    rabc_batch_stats = None
-    if rabc_weights_provider is not None:
-        rabc_batch_weights, rabc_batch_stats = rabc_weights_provider.compute_batch_weights(batch)
+    sample_weights = None
+    sample_weight_stats = None
+    if sample_weights_provider is not None:
+        sample_weights, sample_weight_stats = sample_weights_provider.compute_batch_weights(batch)
 
     # Let accelerator handle mixed precision
     with accelerator.autocast():
-        # Use per-sample loss when RA-BC is enabled for proper weighting
-        if rabc_batch_weights is not None:
-            # Get per-sample losses
+        if sample_weights is not None:
             per_sample_loss, output_dict = policy.forward(batch, reduction="none")
 
-            # Apply RA-BC weights: L_RA-BC = Σ(w_i * l_i) / (Σw_i + ε)
-            # rabc_batch_weights is already normalized to sum to batch_size
             epsilon = 1e-6
-            loss = (per_sample_loss * rabc_batch_weights).sum() / (rabc_batch_weights.sum() + epsilon)
-            # Log raw mean weight (before normalization) - this is the meaningful metric
-            output_dict["rabc_mean_weight"] = rabc_batch_stats["raw_mean_weight"]
-            output_dict["rabc_num_zero_weight"] = rabc_batch_stats["num_zero_weight"]
-            output_dict["rabc_num_full_weight"] = rabc_batch_stats["num_full_weight"]
+            loss = (per_sample_loss * sample_weights).sum() / (sample_weights.sum() + epsilon)
+            if sample_weight_stats is not None:
+                prefix = sample_weight_log_prefix or "sample_weight"
+                for key, value in sample_weight_stats.items():
+                    output_dict[f"{prefix}_{key}"] = value
         else:
             loss, output_dict = policy.forward(batch)
 
@@ -251,13 +290,7 @@ def train(
     # - For hub downloads, load on main process first then barrier, to avoid races in the shared cache.
     # - For an already-present local dataset (root contains meta/info.json), let all ranks load in parallel.
     #   This avoids a long pre-barrier wait that can exceed the default store timeout on large datasets.
-    dataset_root = Path(cfg.dataset.root) if cfg.dataset.root is not None else None
-    has_local_dataset_meta = (
-        dataset_root is not None
-        and dataset_root.is_dir()
-        and (dataset_root / "meta" / "info.json").is_file()
-        and (dataset_root / "data").is_dir()
-    )
+    has_local_dataset_meta = _dataset_root_has_local_meta(cfg.dataset.root)
 
     dataset_load_mode = os.environ.get("LEROBOT_DATASET_LOAD_MODE", "auto").strip().lower()
     dataset_main_first = dataset_load_mode in {"main_first", "rank0_first", "main-process-first"}
@@ -292,6 +325,9 @@ def train(
             if dataset_main_first and accelerator.is_local_main_process:
                 logging.info("Creating dataset (after main process barrier)")
             dataset = make_dataset(cfg)
+
+    if is_main_process:
+        _log_dataset_debug_summary(dataset)
 
     if cfg.acp.enable and is_main_process:
         indicator_stats = compute_acp_indicator_stats(dataset, cfg.acp.indicator_field)
@@ -391,10 +427,35 @@ def train(
         logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
+    sample_weights_provider = None
+    sample_weight_log_prefix = None
+
+    if cfg.weighted_bc.enable:
+        from lerobot.utils.weighted_bc import WeightedBCWeights
+
+        if is_main_process:
+            logging.info("Creating weighted BC sample weights")
+        sample_weights_provider = WeightedBCWeights(
+            dataset=dataset,
+            config=cfg.weighted_bc,
+            device=device,
+        )
+        sample_weight_log_prefix = "weighted_bc"
+        if is_main_process:
+            logging.info(
+                "Weighted BC config: model=%.4f pre_intervention=%.4f intervention=%.4f "
+                "expert=%.4f pre_intervention_s=%.3f normalize=%s",
+                cfg.weighted_bc.model_weight,
+                cfg.weighted_bc.pre_intervention_weight,
+                cfg.weighted_bc.intervention_weight,
+                cfg.weighted_bc.expert_weight,
+                cfg.weighted_bc.pre_intervention_s,
+                cfg.weighted_bc.normalize,
+            )
+
     # Load precomputed SARM progress for RA-BC if enabled
     # Generate progress using: src/lerobot/policies/sarm/compute_rabc_weights.py
-    rabc_weights = None
-    if cfg.use_rabc:
+    elif cfg.use_rabc:
         from lerobot.utils.rabc import RABCWeights
 
         # Get chunk_size from policy config
@@ -405,7 +466,7 @@ def train(
         head_mode = getattr(cfg, "rabc_head_mode", "sparse")
         logging.info(f"Loading SARM progress for RA-BC from {cfg.rabc_progress_path}")
         logging.info(f"Using chunk_size={chunk_size} from policy config, head_mode={head_mode}")
-        rabc_weights = RABCWeights(
+        sample_weights_provider = RABCWeights(
             progress_path=cfg.rabc_progress_path,
             chunk_size=chunk_size,
             head_mode=head_mode,
@@ -413,6 +474,7 @@ def train(
             epsilon=getattr(cfg, "rabc_epsilon", 1e-6),
             device=device,
         )
+        sample_weight_log_prefix = "rabc"
 
     step = 0  # number of policy updates (forward + backward + optim)
 
@@ -540,7 +602,8 @@ def train(
             cfg.optimizer.grad_clip_norm,
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
-            rabc_weights_provider=rabc_weights,
+            sample_weights_provider=sample_weights_provider,
+            sample_weight_log_prefix=sample_weight_log_prefix,
         )
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
@@ -553,13 +616,28 @@ def train(
 
         if is_log_step:
             logging.info(train_tracker)
+            if sample_weight_log_prefix == "weighted_bc" and output_dict:
+                prefix = sample_weight_log_prefix
+                logging.info(
+                    "%s batch weights: raw_mean=%.4f raw_min=%.4f raw_max=%.4f "
+                    "model=%d pre_intervention=%d intervention=%d expert=%d normalize=%s",
+                    prefix,
+                    float(output_dict.get(f"{prefix}_raw_mean_weight", 0.0)),
+                    float(output_dict.get(f"{prefix}_raw_min_weight", 0.0)),
+                    float(output_dict.get(f"{prefix}_raw_max_weight", 0.0)),
+                    int(output_dict.get(f"{prefix}_model_count", 0)),
+                    int(output_dict.get(f"{prefix}_pre_intervention_count", 0)),
+                    int(output_dict.get(f"{prefix}_intervention_count", 0)),
+                    int(output_dict.get(f"{prefix}_expert_count", 0)),
+                    getattr(getattr(sample_weights_provider, "config", None), "normalize", None),
+                )
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
                     wandb_log_dict.update(output_dict)
                 # Log RA-BC statistics if enabled
-                if rabc_weights is not None:
-                    rabc_stats = rabc_weights.get_stats()
+                if cfg.use_rabc and sample_weights_provider is not None:
+                    rabc_stats = sample_weights_provider.get_stats()
                     wandb_log_dict.update(
                         {
                             "rabc_delta_mean": rabc_stats["delta_mean"],
