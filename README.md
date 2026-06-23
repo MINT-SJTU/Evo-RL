@@ -7,7 +7,7 @@
   <a href="#community-channels"><img alt="wechat group join us" src="https://img.shields.io/badge/WeChat%20Group-Join%20Us-a855f7?logo=wechat&logoColor=white"/></a>
   <a href="#citation"><img alt="paper coming soon" src="https://img.shields.io/static/v1?label=Paper&message=Coming%20Soon&color=9ca3af"/></a>
   <a href="#model--dataset"><img alt="hugging face model coming soon" src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=Coming%20Soon&color=9ca3af"/></a>
-  <a href="#model--dataset"><img alt="hugging face dataset coming soon" src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Dataset&message=Coming%20Soon&color=9ca3af"/></a>
+  <a href="https://huggingface.co/datasets/MINT-SJTU/RW-RL-Dataset"><img alt="RW-RL dataset on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-RW--RL-ffcc4d"/></a>
   <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/License-Apache--2.0-ef4444"/></a>
 </p>
 
@@ -550,8 +550,11 @@ Iterative training loop (abstract):
 ## Model & Dataset
 
 - Hugging Face model release: coming soon
-- Hugging Face dataset release: coming soon
-- Once published, this section will pin canonical repos and exact version tags.
+- Hugging Face dataset: [MINT-SJTU/RW-RL-Dataset](https://huggingface.co/datasets/MINT-SJTU/RW-RL-Dataset)
+
+**RW-RL Dataset** is the companion real-world reinforcement learning dataset for Evo-RL. It is organized around iterative policy improvement on real robots, including teleoperation demonstrations, human-in-the-loop intervention data, policy rollout traces, episode-level success/failure labels, intervention states, and complementary signals used for value/reward modeling.
+
+The dataset is designed to support offline RL, value learning, advantage-conditioned policy training, and closed-loop rollout analysis across real robot tasks. Please refer to the Hugging Face dataset card for release notes, schema details, splits, and version tags.
 
 ## Community Channels
 
