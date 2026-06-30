@@ -27,6 +27,7 @@
 
 ## 🚀 News
 
+- **[2026-06-30]** Added a detailed Hugging Face dataset card for the RW-RL Dataset, including visual examples, release statistics, file layout, modalities, and download instructions.
 - **[2026-03-07]** Added AgileX (PiPER/PiPER-X) support for real-world RL.
 - **[2026-02-26]** First SO101 real-world RL baseline and reproducible CLI workflow are released.
 
