@@ -52,6 +52,9 @@ lerobot-teleoperate \
 """
 
 import logging
+import math
+import os
+import select
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -86,6 +89,8 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
+from lerobot.robots.bi_piper_follower import BiPiperFollowerConfig, BiPiperXFollowerConfig
+from lerobot.robots.piper_follower import PiperFollowerConfigBase
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -104,14 +109,16 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
+from lerobot.teleoperators.bi_piper_leader import BiPiperLeaderConfig, BiPiperXLeaderConfig
 from lerobot.utils.control_utils import sanity_check_bimanual_piper_pair
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.piper_sdk import get_piper_sdk, parse_piper_log_level
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
-
 LOOP_STATUS_INTERVAL_S = 0.5
+FAKE_INFERENCE_BASE_JOINT_SUFFIX = "joint_1.pos"
 
 
 @dataclass
@@ -130,6 +137,217 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to  display compressed images in Rerun
     display_compressed_images: bool = False
+    # Press this key during teleoperation to toggle a simple fake policy/debug action.
+    fake_inference_key: str = ""
+    # Total base-joint sweep around the pose captured when fake inference starts.
+    fake_inference_total_swing_deg: float = 120.0
+    # Seconds per full back-and-forth base-joint cycle.
+    fake_inference_period_s: float = 10.0
+    # Also command the leader arms as temporary followers during fake inference.
+    fake_inference_control_leaders: bool = False
+    # Speed ratio used when leader arms are temporarily controlled as followers.
+    fake_inference_leader_speed_ratio: int = 10
+
+
+class _NonBlockingKeyReader:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self._fd: int | None = None
+        self._old_term_settings = None
+        self._termios = None
+        self._msvcrt = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        if os.name == "nt":
+            import msvcrt
+
+            self._msvcrt = msvcrt
+            return self
+        if not sys.stdin.isatty():
+            self.enabled = False
+            return self
+
+        import termios
+        import tty
+
+        self._termios = termios
+        self._fd = sys.stdin.fileno()
+        self._old_term_settings = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        if self._termios is not None and self._fd is not None and self._old_term_settings is not None:
+            self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._old_term_settings)
+
+    def get_key(self) -> str | None:
+        if not self.enabled:
+            return None
+        if self._msvcrt is not None:
+            if self._msvcrt.kbhit():
+                key = self._msvcrt.getwch()
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                return key.lower()
+            return None
+        if self._fd is None:
+            return None
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if not ready:
+            return None
+        key = os.read(self._fd, 1).decode(errors="ignore")
+        if key == "\x03":
+            raise KeyboardInterrupt
+        return key.lower()
+
+
+def _is_fake_inference_base_joint_key(key: str) -> bool:
+    return key == FAKE_INFERENCE_BASE_JOINT_SUFFIX or key.endswith(f"_{FAKE_INFERENCE_BASE_JOINT_SUFFIX}")
+
+
+def _make_fake_inference_action(
+    hold_action: RobotAction,
+    *,
+    elapsed_s: float,
+    total_swing_deg: float,
+    period_s: float,
+) -> RobotAction:
+    action = dict(hold_action)
+    safe_period_s = max(period_s, 1e-6)
+    amplitude_deg = abs(total_swing_deg) / 2.0
+    offset_deg = amplitude_deg * math.sin(2.0 * math.pi * elapsed_s / safe_period_s)
+    for key, value in hold_action.items():
+        if _is_fake_inference_base_joint_key(key):
+            action[key] = value + offset_deg
+    return action
+
+
+def _fake_inference_required_hold_keys(robot: Robot) -> list[str]:
+    return [
+        key
+        for key in robot.action_features
+        if key.endswith(".pos") and "joint_" in key
+    ]
+
+
+def _piper_follower_config_from_leader_config(
+    leader_cfg,
+    *,
+    speed_ratio: int,
+) -> PiperFollowerConfigBase:
+    return PiperFollowerConfigBase(
+        port=leader_cfg.port,
+        judge_flag=leader_cfg.judge_flag,
+        can_auto_init=leader_cfg.can_auto_init,
+        log_level=leader_cfg.log_level,
+        startup_sleep_s=leader_cfg.startup_sleep_s,
+        speed_ratio=speed_ratio,
+        high_follow=leader_cfg.command_high_follow,
+        mode_refresh_interval_s=leader_cfg.mode_refresh_interval_s,
+        enable_on_connect=True,
+        enable_timeout_s=leader_cfg.enable_timeout_s,
+        calibration_scale=leader_cfg.calibration_scale,
+        require_calibration=False,
+        sync_gripper=leader_cfg.sync_gripper,
+        gripper_effort_default=leader_cfg.gripper_effort_default,
+        gripper_status_code=leader_cfg.gripper_status_code,
+        cameras={},
+        disable_on_disconnect=False,
+    )
+
+
+def _make_fake_inference_leader_follower_config(
+    teleop_cfg: TeleoperatorConfig,
+    *,
+    speed_ratio: int,
+) -> RobotConfig | None:
+    if isinstance(teleop_cfg, BiPiperXLeaderConfig):
+        robot_config_cls = BiPiperXFollowerConfig
+    elif isinstance(teleop_cfg, BiPiperLeaderConfig):
+        robot_config_cls = BiPiperFollowerConfig
+    else:
+        return None
+
+    return robot_config_cls(
+        id=f"{teleop_cfg.id}_fake_inference_followers" if teleop_cfg.id else None,
+        calibration_dir=teleop_cfg.calibration_dir,
+        left_arm_config=_piper_follower_config_from_leader_config(
+            teleop_cfg.left_arm_config,
+            speed_ratio=speed_ratio,
+        ),
+        right_arm_config=_piper_follower_config_from_leader_config(
+            teleop_cfg.right_arm_config,
+            speed_ratio=speed_ratio,
+        ),
+    )
+
+
+def _switch_piper_role(port_cfg, role: int, *, settle_s: float = 0.2) -> None:
+    interface_cls, _ = get_piper_sdk()
+    arm = interface_cls(
+        can_name=port_cfg.port,
+        judge_flag=port_cfg.judge_flag,
+        can_auto_init=port_cfg.can_auto_init,
+        logger_level=parse_piper_log_level(port_cfg.log_level),
+    )
+    arm.ConnectPort(can_init=False, piper_init=False, start_thread=True)
+    try:
+        time.sleep(0.05)
+        arm.MasterSlaveConfig(role, 0x00, 0x00, 0x00)
+        if settle_s > 0:
+            time.sleep(settle_s)
+    finally:
+        arm.DisconnectPort()
+
+
+class _FakeInferenceLeaderFollowerController:
+    def __init__(self, teleop_cfg: TeleoperatorConfig, robot_cfg: RobotConfig):
+        self.teleop_cfg = teleop_cfg
+        self.robot = make_robot_from_config(robot_cfg)
+        self.robot.set_teleop_send_only_mode(True)
+        self._connected = False
+
+    def _switch_role(self, role: int) -> None:
+        _switch_piper_role(self.teleop_cfg.left_arm_config, role)
+        _switch_piper_role(self.teleop_cfg.right_arm_config, role)
+
+    def connect(self) -> None:
+        if self._connected:
+            return
+        self._switch_role(0xFC)
+        self.robot.connect(calibrate=False)
+        self._connected = True
+
+    def send_action(self, action: RobotAction) -> RobotAction:
+        if not self._connected:
+            return {}
+        return self.robot.send_action(action)
+
+    def disconnect(self) -> None:
+        if not self._connected:
+            return
+        try:
+            self.robot.disconnect()
+        finally:
+            self._connected = False
+            self._switch_role(0xFA)
+
+
+def _make_fake_inference_leader_follower_controller(
+    teleop_cfg: TeleoperatorConfig,
+    *,
+    enabled: bool,
+    speed_ratio: int,
+) -> _FakeInferenceLeaderFollowerController | None:
+    if not enabled:
+        return None
+    robot_cfg = _make_fake_inference_leader_follower_config(teleop_cfg, speed_ratio=speed_ratio)
+    if robot_cfg is None:
+        return None
+    return _FakeInferenceLeaderFollowerController(teleop_cfg, robot_cfg)
 
 
 def _processor_pipeline_needs_observation(
@@ -169,6 +387,10 @@ def teleop_loop(
     display_data: bool = False,
     duration: float | None = None,
     display_compressed_images: bool = False,
+    fake_inference_key: str = "",
+    fake_inference_total_swing_deg: float = 120.0,
+    fake_inference_period_s: float = 10.0,
+    fake_inference_leader_follower_controller: _FakeInferenceLeaderFollowerController | None = None,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -190,60 +412,139 @@ def teleop_loop(
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
     last_loop_status_t = 0.0
+    fake_key = fake_inference_key.strip().lower()[:1]
+    fake_inference_active = False
+    fake_inference_pending = False
+    fake_inference_start_t = 0.0
+    fake_inference_hold_action: RobotAction | None = None
+    last_sent_action: RobotAction = {}
+    required_fake_hold_keys = _fake_inference_required_hold_keys(robot)
     should_fetch_obs = _teleop_needs_robot_observation(
         display_data, teleop_action_processor, robot_action_processor
     )
 
-    while True:
-        loop_start = time.perf_counter()
+    def _missing_fake_hold_keys() -> list[str]:
+        return [hold_key for hold_key in required_fake_hold_keys if hold_key not in last_sent_action]
 
-        # Get robot observation
-        # Not really needed for now other than for visualization
-        # teleop_action_processor can take None as an observation
-        # given that it is the identity processor as default
-        obs = robot.get_observation() if should_fetch_obs else {}
+    def _start_fake_inference_if_ready() -> bool:
+        nonlocal fake_inference_active, fake_inference_pending, fake_inference_hold_action, fake_inference_start_t
 
-        # Get teleop action
-        raw_action = teleop.get_action()
+        missing_hold_keys = _missing_fake_hold_keys()
+        if missing_hold_keys:
+            return False
 
-        # Process teleop action through pipeline
-        teleop_action = teleop_action_processor((raw_action, obs))
+        if fake_inference_leader_follower_controller is not None:
+            fake_inference_leader_follower_controller.connect()
+        fake_inference_hold_action = dict(last_sent_action)
+        fake_inference_start_t = time.perf_counter()
+        fake_inference_active = True
+        fake_inference_pending = False
+        leader_mode = (
+            "leaders also controlled as followers"
+            if fake_inference_leader_follower_controller is not None
+            else "followers only"
+        )
+        print(
+            "\nFake inference ON: holding all joints except base sweep "
+            f"(total {fake_inference_total_swing_deg:.0f} deg, {leader_mode}). "
+            f"Press {fake_key} again to resume."
+        )
+        return True
 
-        # Process action for robot through pipeline
-        robot_action_to_send = robot_action_processor((teleop_action, obs))
+    def _stop_fake_inference() -> None:
+        nonlocal fake_inference_active, fake_inference_pending
 
-        # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
-        _ = robot.send_action(robot_action_to_send)
+        fake_inference_pending = False
+        if fake_inference_active and fake_inference_leader_follower_controller is not None:
+            fake_inference_leader_follower_controller.disconnect()
+        fake_inference_active = False
 
-        if display_data:
-            # Process robot observation through pipeline
-            obs_transition = robot_observation_processor(obs)
+    with _NonBlockingKeyReader(enabled=bool(fake_key)) as key_reader:
+        try:
+            while True:
+                loop_start = time.perf_counter()
 
-            log_rerun_data(
-                observation=obs_transition,
-                action=teleop_action,
-                compress_images=display_compressed_images,
-            )
+                # Get robot observation
+                # Not really needed for now other than for visualization
+                # teleop_action_processor can take None as an observation
+                # given that it is the identity processor as default
+                obs = robot.get_observation() if should_fetch_obs else {}
 
-            print("\n" + "-" * (display_len + 10))
-            print(f"{'NAME':<{display_len}} | {'NORM':>7}")
-            for motor, value in robot_action_to_send.items():
-                print(f"{motor:<{display_len}} | {value:>7.2f}")
-            if sys.stdout.isatty():
-                move_cursor_up(len(robot_action_to_send) + 3)
+                key = key_reader.get_key()
+                if key == fake_key:
+                    if fake_inference_active:
+                        _stop_fake_inference()
+                        print("\nFake inference OFF: leaders restored to drag mode; resumed leader teleoperation.")
+                    elif fake_inference_pending:
+                        fake_inference_pending = False
+                        print("\nFake inference request canceled; resumed leader teleoperation.")
+                    else:
+                        if not _start_fake_inference_if_ready():
+                            fake_inference_pending = True
+                            missing_hold_keys = _missing_fake_hold_keys()
+                            print(
+                                "\nFake inference is waiting for "
+                                f"{', '.join(missing_hold_keys)}. Move the missing leader arm(s) once; "
+                                f"it will start automatically. Press {fake_key} again to cancel."
+                            )
 
-        dt_s = time.perf_counter() - loop_start
-        precise_sleep(max(1 / fps - dt_s, 0.0))
-        loop_s = time.perf_counter() - loop_start
-        now = time.monotonic()
-        if now - last_loop_status_t >= LOOP_STATUS_INTERVAL_S:
-            print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
-            if sys.stdout.isatty():
-                move_cursor_up(1)
-            last_loop_status_t = now
+                if fake_inference_active and fake_inference_hold_action is not None:
+                    robot_action_to_send = _make_fake_inference_action(
+                        fake_inference_hold_action,
+                        elapsed_s=time.perf_counter() - fake_inference_start_t,
+                        total_swing_deg=fake_inference_total_swing_deg,
+                        period_s=fake_inference_period_s,
+                    )
+                    teleop_action = robot_action_to_send
+                else:
+                    # Get teleop action
+                    raw_action = teleop.get_action()
 
-        if duration is not None and time.perf_counter() - start >= duration:
-            return
+                    # Process teleop action through pipeline
+                    teleop_action = teleop_action_processor((raw_action, obs))
+
+                    # Process action for robot through pipeline
+                    robot_action_to_send = robot_action_processor((teleop_action, obs))
+
+                # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
+                sent_action = robot.send_action(robot_action_to_send)
+                last_sent_action.update(sent_action)
+                if fake_inference_pending and not fake_inference_active:
+                    _start_fake_inference_if_ready()
+                if fake_inference_active and fake_inference_leader_follower_controller is not None:
+                    fake_inference_leader_follower_controller.send_action(robot_action_to_send)
+
+                if display_data:
+                    # Process robot observation through pipeline
+                    obs_transition = robot_observation_processor(obs)
+
+                    log_rerun_data(
+                        observation=obs_transition,
+                        action=teleop_action,
+                        compress_images=display_compressed_images,
+                    )
+
+                    print("\n" + "-" * (display_len + 10))
+                    print(f"{'NAME':<{display_len}} | {'NORM':>7}")
+                    for motor, value in robot_action_to_send.items():
+                        print(f"{motor:<{display_len}} | {value:>7.2f}")
+                    if sys.stdout.isatty():
+                        move_cursor_up(len(robot_action_to_send) + 3)
+
+                dt_s = time.perf_counter() - loop_start
+                precise_sleep(max(1 / fps - dt_s, 0.0))
+                loop_s = time.perf_counter() - loop_start
+                now = time.monotonic()
+                if now - last_loop_status_t >= LOOP_STATUS_INTERVAL_S:
+                    print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+                    if sys.stdout.isatty():
+                        move_cursor_up(1)
+                    last_loop_status_t = now
+
+                if duration is not None and time.perf_counter() - start >= duration:
+                    return
+        finally:
+            _stop_fake_inference()
 
 
 @parser.wrap()
@@ -266,6 +567,11 @@ def teleoperate(cfg: TeleoperateConfig):
         cfg.display_data, teleop_action_processor, robot_action_processor
     )
     _configure_robot_for_lightweight_teleop(robot, should_fetch_obs)
+    fake_inference_leader_follower_controller = _make_fake_inference_leader_follower_controller(
+        cfg.teleop,
+        enabled=cfg.fake_inference_control_leaders,
+        speed_ratio=cfg.fake_inference_leader_speed_ratio,
+    )
 
     teleop.connect()
     robot.connect()
@@ -281,6 +587,10 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            fake_inference_key=cfg.fake_inference_key,
+            fake_inference_total_swing_deg=cfg.fake_inference_total_swing_deg,
+            fake_inference_period_s=cfg.fake_inference_period_s,
+            fake_inference_leader_follower_controller=fake_inference_leader_follower_controller,
         )
     except KeyboardInterrupt:
         pass

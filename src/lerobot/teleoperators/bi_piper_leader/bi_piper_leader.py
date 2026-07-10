@@ -17,6 +17,7 @@
 import logging
 import multiprocessing as mp
 import traceback
+from contextlib import suppress
 from functools import cached_property
 from typing import Any
 
@@ -27,8 +28,8 @@ from lerobot.teleoperators.piper_leader import (
     PiperXLeader,
     PiperXLeaderConfig,
 )
-from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 
 from ..teleoperator import Teleoperator
 from .config_bi_piper_leader import BiPiperLeaderConfig, BiPiperXLeaderConfig
@@ -146,6 +147,9 @@ class _PiperLeaderProcessProxy:
     def get_action(self) -> RobotAction:
         return self._call("get_action")
 
+    def try_get_action(self) -> RobotAction | None:
+        return self._call("try_get_action")
+
     def send_feedback(self, feedback: dict[str, Any]) -> None:
         self._call("send_feedback", feedback)
 
@@ -160,14 +164,10 @@ class _PiperLeaderProcessProxy:
                     self._call("disconnect")
             except Exception:
                 pass
-            try:
+            with suppress(Exception):
                 self._parent_conn.send({"command": "__close__"})
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 self._parent_conn.close()
-            except Exception:
-                pass
 
         if self._process.is_alive():
             self._process.join(timeout=2.0)
@@ -192,6 +192,10 @@ class BiPiperLeader(Teleoperator):
         "log_level",
         "startup_sleep_s",
         "manual_control",
+        "read_only",
+        "allow_teaching_mode",
+        "teaching_mode_read_timeout_s",
+        "read_only_action_timeout_s",
         "prefer_ctrl_messages",
         "fallback_to_feedback",
         "sync_gripper",
@@ -286,10 +290,12 @@ class BiPiperLeader(Teleoperator):
     @check_if_not_connected
     def get_action(self) -> RobotAction:
         action_dict: RobotAction = {}
-        left_action = self.left_arm.get_action()
-        action_dict.update({f"left_{key}": value for key, value in left_action.items()})
-        right_action = self.right_arm.get_action()
-        action_dict.update({f"right_{key}": value for key, value in right_action.items()})
+        left_action = self.left_arm.try_get_action()
+        if left_action is not None:
+            action_dict.update({f"left_{key}": value for key, value in left_action.items()})
+        right_action = self.right_arm.try_get_action()
+        if right_action is not None:
+            action_dict.update({f"right_{key}": value for key, value in right_action.items()})
         return action_dict
 
     @check_if_not_connected

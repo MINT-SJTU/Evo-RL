@@ -37,6 +37,12 @@ class PiperLeaderConfigBase:
 
     # Manual backdrivable mode for human teleop
     manual_control: bool = True
+    # Read leader input only, without sending enable/mode/MIT commands to the leader arm.
+    read_only: bool = False
+    # Allow PiPER's built-in teaching/drag mode when using the leader as a passive input device.
+    allow_teaching_mode: bool = False
+    teaching_mode_read_timeout_s: float = 2.0
+    read_only_action_timeout_s: float = 5.0
 
     # Read control messages from leader first, fallback to feedback state if missing
     prefer_ctrl_messages: bool = True
@@ -92,6 +98,14 @@ def _validate_piper_leader_config(config: PiperLeaderConfigBase) -> None:
         raise ValueError("require_calibration must be true or false.")
     if config.startup_sleep_s < 0:
         raise ValueError("`startup_sleep_s` must be >= 0.")
+    if not isinstance(config.read_only, bool):
+        raise ValueError("read_only must be true or false.")
+    if not isinstance(config.allow_teaching_mode, bool):
+        raise ValueError("allow_teaching_mode must be true or false.")
+    if config.teaching_mode_read_timeout_s <= 0:
+        raise ValueError("`teaching_mode_read_timeout_s` must be > 0.")
+    if config.read_only_action_timeout_s < 0:
+        raise ValueError("`read_only_action_timeout_s` must be >= 0.")
     if not (0 <= config.gripper_effort_default <= 5000):
         raise ValueError("`gripper_effort_default` must be between 0 and 5000.")
     if config.gripper_status_code not in {0x00, 0x01, 0x02, 0x03}:

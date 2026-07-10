@@ -31,6 +31,7 @@ from lerobot.utils.piper_sdk import (
     guard_piper_ctrl_mode_on_connect,
     milli_to_unit,
     parse_piper_log_level,
+    read_piper_ctrl_mode,
     unit_to_milli,
     wait_enable_piper,
 )
@@ -80,6 +81,8 @@ class PiperLeader(Teleoperator):
         self._gravity_comp_loop: PiperGravityCompensationLoop | None = None
         self._last_feedback_joint_timestamp = 0.0
         self._last_feedback_gripper_timestamp = 0.0
+        self._last_read_only_joint_action: dict[str, float] | None = None
+        self._last_read_only_gripper_pos: float | None = None
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
@@ -103,10 +106,22 @@ class PiperLeader(Teleoperator):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self.arm.ConnectPort()
+        if self.config.read_only:
+            self.arm.ConnectPort(piper_init=False)
+        else:
+            self.arm.ConnectPort()
         if self.config.startup_sleep_s > 0:
             time.sleep(self.config.startup_sleep_s)
-        guard_piper_ctrl_mode_on_connect(arm=self.arm, interface_name=self.config.port)
+        if self.config.allow_teaching_mode:
+            mode = read_piper_ctrl_mode(self.arm, timeout_s=self.config.teaching_mode_read_timeout_s)
+            if mode is None:
+                logger.info(
+                    "[%s] ctrl_mode unavailable in teaching/read-only mode; continuing because "
+                    "official leader mode may publish only leader joint control frames.",
+                    self.config.port,
+                )
+        else:
+            guard_piper_ctrl_mode_on_connect(arm=self.arm, interface_name=self.config.port)
 
         self._is_connected = True
         # Recompute control mode on every fresh connection.
@@ -262,6 +277,10 @@ class PiperLeader(Teleoperator):
             self._gravity_comp_loop.stop()
 
     def configure(self) -> None:
+        if self.config.read_only:
+            self._stop_gravity_comp_loop_if_needed()
+            self._manual_control_enabled = False
+            return
         self.set_manual_control(self.config.manual_control)
 
     def _read_joint_from_ctrl(self) -> dict[str, float] | None:
@@ -269,6 +288,8 @@ class PiperLeader(Teleoperator):
         if getattr(joint_ctrl_msg, "time_stamp", 0.0) <= 0:
             return None
         joint_ctrl = getattr(joint_ctrl_msg, "joint_ctrl", None)
+        if joint_ctrl is None:
+            return None
         return {
             f"{joint_name}.pos": milli_to_unit(getattr(joint_ctrl, joint_name, 0))
             for joint_name in PIPER_JOINT_NAMES
@@ -289,6 +310,8 @@ class PiperLeader(Teleoperator):
         if getattr(gripper_ctrl_msg, "time_stamp", 0.0) <= 0:
             return None
         gripper_ctrl = getattr(gripper_ctrl_msg, "gripper_ctrl", None)
+        if gripper_ctrl is None:
+            return None
         return abs(milli_to_unit(getattr(gripper_ctrl, "grippers_angle", 0)))
 
     def _read_gripper_from_feedback(self) -> float | None:
@@ -319,7 +342,7 @@ class PiperLeader(Teleoperator):
                 return
             time.sleep(MANUAL_CONTROL_FRESH_FEEDBACK_POLL_S)
 
-    def _read_raw_action(self) -> RobotAction:
+    def _read_raw_action(self, *, wait_for_first: bool = True) -> RobotAction | None:
         used_feedback_for_joints = False
         action: dict[str, float] | None = None
 
@@ -327,7 +350,9 @@ class PiperLeader(Teleoperator):
         # background gravity-compensation thread emits MIT commands. In that mode, `GetArmJointCtrl`
         # reflects transmitted control targets rather than the operator's live pose, which can lag
         # or jump under dual-arm load. Prefer direct joint feedback so teleop follows the real arm.
-        prefer_feedback = self._manual_control_enabled is True
+        prefer_feedback = self._manual_control_enabled is True or (
+            self.config.read_only and not self.config.prefer_ctrl_messages
+        )
         if prefer_feedback:
             self._wait_for_fresh_feedback_if_needed()
             action = self._read_joint_from_feedback()
@@ -343,8 +368,62 @@ class PiperLeader(Teleoperator):
             action = self._read_joint_from_feedback()
             used_feedback_for_joints = action is not None
 
+        if (
+            action is None
+            and wait_for_first
+            and self.config.read_only
+            and self.config.read_only_action_timeout_s > 0
+        ):
+            deadline = time.monotonic() + self.config.read_only_action_timeout_s
+            while action is None and time.monotonic() < deadline:
+                if self.config.prefer_ctrl_messages:
+                    action = self._read_joint_from_ctrl()
+                if action is None and self.config.fallback_to_feedback and not used_feedback_for_joints:
+                    action = self._read_joint_from_feedback()
+                    used_feedback_for_joints = action is not None
+                if action is None:
+                    time.sleep(0.01)
+
+        if action is None and self.config.read_only and self._last_read_only_joint_action is not None:
+            action = dict(self._last_read_only_joint_action)
+
+        if (
+            action is None
+            and self.config.read_only
+            and self._last_read_only_joint_action is None
+            and wait_for_first
+            and self.config.read_only_action_timeout_s == 0
+        ):
+            next_log_t = 0.0
+            while action is None:
+                now = time.monotonic()
+                if now >= next_log_t:
+                    logger.info(
+                        "[%s] waiting for first leader joint control frame; move this leader gently.",
+                        self.config.port,
+                    )
+                    next_log_t = now + 5.0
+                if self.config.prefer_ctrl_messages:
+                    action = self._read_joint_from_ctrl()
+                if action is None and self.config.fallback_to_feedback and not used_feedback_for_joints:
+                    action = self._read_joint_from_feedback()
+                    used_feedback_for_joints = action is not None
+                if action is None:
+                    time.sleep(0.01)
+
+        if action is None and self.config.read_only and not wait_for_first:
+            return None
+
+        if action is None and self.config.read_only:
+            raise RuntimeError(
+                f"[{self.config.port}] no leader joint control frames received. "
+                "Check this arm is in 0xFA leader mode, move the leader gently, and retry."
+            )
+
         if action is None:
             action = {f"{joint_name}.pos": 0.0 for joint_name in PIPER_JOINT_NAMES}
+        elif self.config.read_only:
+            self._last_read_only_joint_action = dict(action)
 
         use_ctrl_for_gripper = (
             self.config.prefer_ctrl_messages and not prefer_feedback and not used_feedback_for_joints
@@ -355,7 +434,25 @@ class PiperLeader(Teleoperator):
             self._last_feedback_gripper_timestamp = float(
                 getattr(self.arm.GetArmGripperMsgs(), "time_stamp", 0.0) or 0.0
             )
+        if gripper_pos is None and self.config.read_only:
+            gripper_pos = self._last_read_only_gripper_pos
+        elif gripper_pos is not None and self.config.read_only:
+            self._last_read_only_gripper_pos = gripper_pos
         action["gripper.pos"] = 0.0 if gripper_pos is None else gripper_pos
+        return action
+
+    def _convert_raw_action(self, raw_action: RobotAction) -> RobotAction:
+        if self._use_uncalibrated_passthrough():
+            action: RobotAction = dict(raw_action)
+            if not self.config.sync_gripper:
+                action["gripper.pos"] = 0.0
+            return action
+
+        action: RobotAction = {
+            key: self._calibrated_to_offset(key, raw_action[key]) for key in PIPER_CALIB_KEYS
+        }
+        if not self.config.sync_gripper:
+            action["gripper.pos"] = 0.0
         return action
 
     def _to_calibration_units(self, angle_deg: float) -> int:
@@ -411,21 +508,25 @@ class PiperLeader(Teleoperator):
             )
 
         raw_action = self._read_raw_action()
-        if self._use_uncalibrated_passthrough():
-            action: RobotAction = dict(raw_action)
-            if not self.config.sync_gripper:
-                action["gripper.pos"] = 0.0
-            return action
+        assert raw_action is not None
+        return self._convert_raw_action(raw_action)
 
-        action: RobotAction = {
-            key: self._calibrated_to_offset(key, raw_action[key]) for key in PIPER_CALIB_KEYS
-        }
-        if not self.config.sync_gripper:
-            action["gripper.pos"] = 0.0
-        return action
+    @check_if_not_connected
+    def try_get_action(self) -> RobotAction | None:
+        if not self.is_calibrated and not self._use_uncalibrated_passthrough():
+            raise RuntimeError(
+                f"{self} is not calibrated. Run `lerobot-calibrate --teleop.type={self.config.type} --teleop.id={self.id}` first."
+            )
+
+        raw_action = self._read_raw_action(wait_for_first=False)
+        if raw_action is None:
+            return None
+        return self._convert_raw_action(raw_action)
 
     @check_if_not_connected
     def send_feedback(self, feedback: dict[str, Any]) -> None:
+        if self.config.read_only:
+            return
         if not self.is_calibrated and not self._use_uncalibrated_passthrough():
             raise RuntimeError(
                 f"{self} is not calibrated. Run `lerobot-calibrate --teleop.type={self.config.type} --teleop.id={self.id}` first."
