@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from ..config import TeleoperatorConfig
 
-DEFAULT_PIPER_GRAVITY_COMP_TX_RATIO = (0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+DEFAULT_PIPER_GRAVITY_COMP_TX_RATIO = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 DEFAULT_PIPERX_GRAVITY_COMP_TX_RATIO = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 
 
