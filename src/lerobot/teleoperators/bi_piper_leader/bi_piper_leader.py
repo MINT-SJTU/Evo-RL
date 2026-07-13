@@ -147,9 +147,6 @@ class _PiperLeaderProcessProxy:
     def get_action(self) -> RobotAction:
         return self._call("get_action")
 
-    def try_get_action(self) -> RobotAction | None:
-        return self._call("try_get_action")
-
     def send_feedback(self, feedback: dict[str, Any]) -> None:
         self._call("send_feedback", feedback)
 
@@ -158,12 +155,13 @@ class _PiperLeaderProcessProxy:
             self._is_connected = False
             return
 
+        disconnect_error: Exception | None = None
         if self._parent_conn is not None:
             try:
                 if self._is_connected:
                     self._call("disconnect")
-            except Exception:
-                pass
+            except Exception as exc:
+                disconnect_error = exc
             with suppress(Exception):
                 self._parent_conn.send({"command": "__close__"})
             with suppress(Exception):
@@ -178,6 +176,8 @@ class _PiperLeaderProcessProxy:
         self._parent_conn = None
         self._process = None
         self._is_connected = False
+        if disconnect_error is not None:
+            raise disconnect_error
 
 
 class BiPiperLeader(Teleoperator):
@@ -192,12 +192,6 @@ class BiPiperLeader(Teleoperator):
         "log_level",
         "startup_sleep_s",
         "manual_control",
-        "read_only",
-        "allow_teaching_mode",
-        "teaching_mode_read_timeout_s",
-        "read_only_action_timeout_s",
-        "prefer_ctrl_messages",
-        "fallback_to_feedback",
         "sync_gripper",
         "gripper_effort_default",
         "gripper_status_code",
@@ -205,12 +199,6 @@ class BiPiperLeader(Teleoperator):
         "command_high_follow",
         "mode_refresh_interval_s",
         "enable_timeout_s",
-        "gravity_comp_control_hz",
-        "gravity_comp_tx_ratio",
-        "gravity_comp_torque_limit",
-        "gravity_comp_mit_kp",
-        "gravity_comp_mit_kd",
-        "gravity_comp_base_rpy_deg",
         "calibration_scale",
         "require_calibration",
         "disable_on_disconnect",
@@ -264,7 +252,14 @@ class BiPiperLeader(Teleoperator):
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         self.left_arm.connect(calibrate)
-        self.right_arm.connect(calibrate)
+        try:
+            self.right_arm.connect(calibrate)
+        except Exception:
+            try:
+                self.left_arm.disconnect()
+            except Exception:
+                logger.exception("Failed to disconnect left PiPER leader after right connect error.")
+            raise
 
     @property
     def is_calibrated(self) -> bool:
@@ -284,18 +279,24 @@ class BiPiperLeader(Teleoperator):
 
     @check_if_not_connected
     def set_manual_control(self, enabled: bool) -> None:
-        self.left_arm.set_manual_control(enabled)
-        self.right_arm.set_manual_control(enabled)
+        try:
+            self.left_arm.set_manual_control(enabled)
+            self.right_arm.set_manual_control(enabled)
+        except Exception:
+            for arm in (self.left_arm, self.right_arm):
+                try:
+                    arm.set_manual_control(True)
+                except Exception:
+                    logger.exception("Failed to restore a PiPER leader arm after role-switch error.")
+            raise
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
         action_dict: RobotAction = {}
-        left_action = self.left_arm.try_get_action()
-        if left_action is not None:
-            action_dict.update({f"left_{key}": value for key, value in left_action.items()})
-        right_action = self.right_arm.try_get_action()
-        if right_action is not None:
-            action_dict.update({f"right_{key}": value for key, value in right_action.items()})
+        left_action = self.left_arm.get_action()
+        action_dict.update({f"left_{key}": value for key, value in left_action.items()})
+        right_action = self.right_arm.get_action()
+        action_dict.update({f"right_{key}": value for key, value in right_action.items()})
         return action_dict
 
     @check_if_not_connected
@@ -307,13 +308,23 @@ class BiPiperLeader(Teleoperator):
                 left_feedback[key.removeprefix("left_")] = value
             elif key.startswith("right_"):
                 right_feedback[key.removeprefix("right_")] = value
-        self.left_arm.send_feedback(left_feedback)
-        self.right_arm.send_feedback(right_feedback)
+        try:
+            self.left_arm.send_feedback(left_feedback)
+            self.right_arm.send_feedback(right_feedback)
+        except Exception:
+            for arm in (self.left_arm, self.right_arm):
+                try:
+                    arm.set_manual_control(True)
+                except Exception:
+                    logger.exception("Failed to restore a PiPER leader arm after feedback error.")
+            raise
 
     @check_if_not_connected
     def disconnect(self) -> None:
-        self.left_arm.disconnect()
-        self.right_arm.disconnect()
+        try:
+            self.left_arm.disconnect()
+        finally:
+            self.right_arm.disconnect()
 
 
 class BiPiperXLeader(BiPiperLeader):

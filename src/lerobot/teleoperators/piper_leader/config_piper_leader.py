@@ -18,9 +18,6 @@ from dataclasses import dataclass
 
 from ..config import TeleoperatorConfig
 
-DEFAULT_PIPER_GRAVITY_COMP_TX_RATIO = (0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
-DEFAULT_PIPERX_GRAVITY_COMP_TX_RATIO = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
-
 
 @dataclass
 class PiperLeaderConfigBase:
@@ -35,18 +32,8 @@ class PiperLeaderConfigBase:
     log_level: str = "WARNING"
     startup_sleep_s: float = 0.1
 
-    # Manual backdrivable mode for human teleop
+    # Initial role: True uses hardware leader drag (0xFA); False accepts policy commands (0xFC).
     manual_control: bool = True
-    # Read leader input only, without sending enable/mode/MIT commands to the leader arm.
-    read_only: bool = False
-    # Allow PiPER's built-in teaching/drag mode when using the leader as a passive input device.
-    allow_teaching_mode: bool = False
-    teaching_mode_read_timeout_s: float = 2.0
-    read_only_action_timeout_s: float = 5.0
-
-    # Read control messages from leader first, fallback to feedback state if missing
-    prefer_ctrl_messages: bool = True
-    fallback_to_feedback: bool = True
 
     # Gripper handling
     sync_gripper: bool = True
@@ -58,14 +45,6 @@ class PiperLeaderConfigBase:
     command_high_follow: bool = True
     mode_refresh_interval_s: float = 1.0
     enable_timeout_s: float = 3.0
-
-    # Gravity compensation settings (used when manual_control=true)
-    gravity_comp_control_hz: float = 200.0
-    gravity_comp_tx_ratio: tuple[float, float, float, float, float, float] = DEFAULT_PIPER_GRAVITY_COMP_TX_RATIO
-    gravity_comp_torque_limit: float = 8.0
-    gravity_comp_mit_kp: float = 0.0
-    gravity_comp_mit_kd: float = 0.0
-    gravity_comp_base_rpy_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Calibration precision:
     # homing_offset/range_min/range_max are stored as "degree * calibration_scale".
@@ -84,28 +63,12 @@ def _validate_piper_leader_config(config: PiperLeaderConfigBase) -> None:
         raise ValueError("`mode_refresh_interval_s` must be >= 0.")
     if config.enable_timeout_s < 0:
         raise ValueError("`enable_timeout_s` must be >= 0.")
-    if config.gravity_comp_control_hz <= 0:
-        raise ValueError("`gravity_comp_control_hz` must be > 0.")
-    if len(config.gravity_comp_tx_ratio) != 6:
-        raise ValueError("`gravity_comp_tx_ratio` must contain exactly 6 values.")
-    if config.gravity_comp_torque_limit <= 0:
-        raise ValueError("`gravity_comp_torque_limit` must be > 0.")
-    if len(config.gravity_comp_base_rpy_deg) != 3:
-        raise ValueError("`gravity_comp_base_rpy_deg` must contain exactly 3 values.")
     if config.calibration_scale <= 0:
         raise ValueError("`calibration_scale` must be > 0.")
     if not isinstance(config.require_calibration, bool):
         raise ValueError("require_calibration must be true or false.")
     if config.startup_sleep_s < 0:
         raise ValueError("`startup_sleep_s` must be >= 0.")
-    if not isinstance(config.read_only, bool):
-        raise ValueError("read_only must be true or false.")
-    if not isinstance(config.allow_teaching_mode, bool):
-        raise ValueError("allow_teaching_mode must be true or false.")
-    if config.teaching_mode_read_timeout_s <= 0:
-        raise ValueError("`teaching_mode_read_timeout_s` must be > 0.")
-    if config.read_only_action_timeout_s < 0:
-        raise ValueError("`read_only_action_timeout_s` must be >= 0.")
     if not (0 <= config.gripper_effort_default <= 5000):
         raise ValueError("`gripper_effort_default` must be between 0 and 5000.")
     if config.gripper_status_code not in {0x00, 0x01, 0x02, 0x03}:
@@ -121,7 +84,7 @@ class PiperLeaderConfig(TeleoperatorConfig, PiperLeaderConfigBase):
 
 @dataclass
 class PiperXLeaderConfigBase(PiperLeaderConfigBase):
-    gravity_comp_tx_ratio: tuple[float, float, float, float, float, float] = DEFAULT_PIPERX_GRAVITY_COMP_TX_RATIO
+    pass
 
 
 @TeleoperatorConfig.register_subclass("piperx_leader")

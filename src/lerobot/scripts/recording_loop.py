@@ -173,10 +173,7 @@ def record_loop(
             return
         if not hasattr(teleop_arm_for_mode_switch, "set_manual_control"):
             return
-        try:
-            teleop_arm_for_mode_switch.set_manual_control(enabled)
-        except Exception:
-            logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
+        teleop_arm_for_mode_switch.set_manual_control(enabled)
 
     if policy is None:
         # During reset/teleop-only loops keep leader backdrivable for manual dragging.
@@ -251,12 +248,12 @@ def record_loop(
             events["toggle_intervention"] = False
             if intervention_enabled:
                 if intervention_state == INTERVENTION_STATE_POLICY:
-                    intervention_state = INTERVENTION_STATE_ACTIVE
                     set_teleop_manual_control(True)
+                    intervention_state = INTERVENTION_STATE_ACTIVE
                     logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
                 else:
-                    intervention_state = INTERVENTION_STATE_RELEASE
                     set_teleop_manual_control(False)
+                    intervention_state = INTERVENTION_STATE_RELEASE
                     if policy is not None and preprocessor is not None and postprocessor is not None:
                         policy.reset()
                         preprocessor.reset()
