@@ -19,7 +19,6 @@ import time
 from functools import cached_property
 from typing import Any
 
-from lerobot.motors import MotorCalibration
 from lerobot.processor import RobotAction
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.utils.piper_sdk import (
@@ -32,14 +31,11 @@ from lerobot.utils.piper_sdk import (
     unit_to_milli,
     wait_enable_piper,
 )
-from lerobot.utils.utils import enter_pressed, move_cursor_up
 
 from ..teleoperator import Teleoperator
 from .config_piper_leader import PiperLeaderConfig, PiperXLeaderConfig
 
 logger = logging.getLogger(__name__)
-PIPER_CALIB_KEYS = list(PIPER_ACTION_KEYS)
-PIPER_CALIB_IDS = {key: idx for idx, key in enumerate(PIPER_CALIB_KEYS)}
 PIPER_ROLE_LEADER = 0xFA
 PIPER_ROLE_FOLLOWER = 0xFC
 PIPER_ROLE_SWITCH_SETTLE_S = 0.2
@@ -54,7 +50,7 @@ class PiperLeader(Teleoperator):
     name = "piper_leader"
 
     def __init__(self, config: PiperLeaderConfig | PiperXLeaderConfig):
-        super().__init__(config)
+        self.id = config.id
         self.config = config
         self._is_connected = False
         self._manual_control_enabled: bool | None = None
@@ -85,6 +81,7 @@ class PiperLeader(Teleoperator):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
+        del calibrate
         self.arm.ConnectPort(piper_init=False)
         if self.config.startup_sleep_s > 0:
             time.sleep(self.config.startup_sleep_s)
@@ -93,13 +90,6 @@ class PiperLeader(Teleoperator):
         self._manual_control_enabled = None
         self._leader_frames_ready = False
         try:
-            if not self.is_calibrated and calibrate and self.config.require_calibration:
-                self.set_manual_control(True)
-                logger.info(
-                    "No piper-leader calibration file found for '%s'. Running lerobot-calibrate flow.",
-                    self.id,
-                )
-                self.calibrate()
             self.configure()
         except Exception:
             try:
@@ -115,53 +105,12 @@ class PiperLeader(Teleoperator):
 
         logger.info("%s connected.", self)
 
-    def _use_uncalibrated_passthrough(self) -> bool:
-        return not self.is_calibrated and not self.config.require_calibration
-
     @property
     def is_calibrated(self) -> bool:
-        if not all(key in self.calibration for key in PIPER_CALIB_KEYS):
-            return False
-        for key in PIPER_CALIB_KEYS:
-            cal = self.calibration[key]
-            if cal.range_max <= cal.range_min:
-                return False
         return True
 
     def calibrate(self) -> None:
-        self.set_manual_control(True)
-        if self.calibration and self.is_calibrated:
-            user_input = input(
-                f"Press ENTER to use existing calibration file for id '{self.id}', "
-                "or type 'c' and press ENTER to run a new calibration: "
-            )
-            if user_input.strip().lower() != "c":
-                return
-
-        logger.info("Running calibration for %s", self)
-        input("Move piper-leader to your desired neutral/center pose, then press ENTER...")
-        neutral = self._read_raw_action()
-        print("Move all piper-leader joints through full range. Press ENTER to stop recording...")
-        range_mins, range_maxes = self._record_ranges_of_motion()
-
-        self.calibration = {}
-        for key in PIPER_CALIB_KEYS:
-            min_deg = range_mins[key]
-            max_deg = range_maxes[key]
-            if max_deg <= min_deg:
-                raise ValueError(f"Invalid range for {key}: min={min_deg:.3f}, max={max_deg:.3f}")
-
-            neutral_deg = min(max_deg, max(min_deg, neutral[key]))
-            self.calibration[key] = MotorCalibration(
-                id=PIPER_CALIB_IDS[key],
-                drive_mode=0,
-                homing_offset=self._to_calibration_units(neutral_deg),
-                range_min=self._to_calibration_units(min_deg),
-                range_max=self._to_calibration_units(max_deg),
-            )
-
-        self._save_calibration()
-        print(f"Calibration saved to {self.calibration_fpath}")
+        pass
 
     def _send_command_mode(self) -> None:
         mit_mode = 0xAD if self.config.command_high_follow else 0x00
@@ -353,93 +302,24 @@ class PiperLeader(Teleoperator):
                 )
             time.sleep(PIPER_ACTION_READ_POLL_S)
 
-    def _to_calibration_units(self, angle_deg: float) -> int:
-        return int(round(angle_deg * self.config.calibration_scale))
-
-    def _from_calibration_units(self, value: int) -> float:
-        return float(value) / float(self.config.calibration_scale)
-
-    def _calibrated_to_offset(self, key: str, raw_deg: float) -> float:
-        cal = self.calibration[key]
-        min_deg = self._from_calibration_units(cal.range_min)
-        max_deg = self._from_calibration_units(cal.range_max)
-        home_deg = self._from_calibration_units(cal.homing_offset)
-        bounded = min(max_deg, max(min_deg, raw_deg))
-        centered = bounded - home_deg
-        return -centered if cal.drive_mode else centered
-
-    def _offset_to_calibrated(self, key: str, offset_deg: float) -> float:
-        cal = self.calibration[key]
-        min_deg = self._from_calibration_units(cal.range_min)
-        max_deg = self._from_calibration_units(cal.range_max)
-        home_deg = self._from_calibration_units(cal.homing_offset)
-        centered = -offset_deg if cal.drive_mode else offset_deg
-        target = home_deg + centered
-        return min(max_deg, max(min_deg, target))
-
-    def _record_ranges_of_motion(self) -> tuple[dict[str, float], dict[str, float]]:
-        current = self._read_raw_action()
-        mins = current.copy()
-        maxes = current.copy()
-
-        while True:
-            current = self._read_raw_action()
-            mins = {key: min(mins[key], current[key]) for key in PIPER_CALIB_KEYS}
-            maxes = {key: max(maxes[key], current[key]) for key in PIPER_CALIB_KEYS}
-
-            print("\n-----------------------------")
-            print("JOINT       |    MIN |    POS |    MAX")
-            for key in PIPER_CALIB_KEYS:
-                print(f"{key:<11} | {mins[key]:>6.2f} | {current[key]:>6.2f} | {maxes[key]:>6.2f}")
-
-            if enter_pressed():
-                break
-            move_cursor_up(len(PIPER_CALIB_KEYS) + 3)
-
-        return mins, maxes
-
     @check_if_not_connected
     def get_action(self) -> RobotAction:
-        if not self.is_calibrated and not self._use_uncalibrated_passthrough():
-            raise RuntimeError(
-                f"{self} is not calibrated. Run `lerobot-calibrate --teleop.type={self.config.type} --teleop.id={self.id}` first."
-            )
-
-        raw_action = self._read_raw_action()
-        if self._use_uncalibrated_passthrough():
-            return raw_action
-
-        action = {key: self._calibrated_to_offset(key, raw_action[key]) for key in PIPER_CALIB_KEYS}
-        if not self.config.sync_gripper:
-            action["gripper.pos"] = 0.0
-        return action
+        return self._read_raw_action()
 
     @check_if_not_connected
     def send_feedback(self, feedback: dict[str, Any]) -> None:
-        if not self.is_calibrated and not self._use_uncalibrated_passthrough():
-            raise RuntimeError(
-                f"{self} is not calibrated. Run `lerobot-calibrate --teleop.type={self.config.type} --teleop.id={self.id}` first."
-            )
-
         self.set_manual_control(False)
         self._refresh_command_mode_if_needed()
 
         joint_keys = PIPER_JOINT_ACTION_KEYS
         has_all_joints = all(key in feedback for key in joint_keys)
         if has_all_joints:
-            if self._use_uncalibrated_passthrough():
-                joint_targets = [feedback[key] for key in joint_keys]
-            else:
-                joint_targets = [self._offset_to_calibrated(key, feedback[key]) for key in joint_keys]
+            joint_targets = [feedback[key] for key in joint_keys]
             joint_commands = [unit_to_milli(value) for value in joint_targets]
             self.arm.JointCtrl(*joint_commands)
 
         if self.config.sync_gripper and "gripper.pos" in feedback:
-            if self._use_uncalibrated_passthrough():
-                gripper_target = feedback["gripper.pos"]
-            else:
-                gripper_target = self._offset_to_calibrated("gripper.pos", feedback["gripper.pos"])
-            gripper_pos_raw = unit_to_milli(gripper_target)
+            gripper_pos_raw = unit_to_milli(feedback["gripper.pos"])
             self._send_gripper_ctrl(gripper_pos_raw, enabled=True)
 
     @check_if_not_connected

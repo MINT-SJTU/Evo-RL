@@ -43,12 +43,6 @@ class PiperFollowerConfigBase:
     enable_on_connect: bool = True
     enable_timeout_s: float = 3.0
 
-    # Calibration precision:
-    # homing_offset/range_min/range_max are stored as "degree * calibration_scale".
-    calibration_scale: int = 1000
-    # Whether calibration is required on connect when no calibration file exists
-    require_calibration: bool = True
-
     # Gripper forwarding behavior
     sync_gripper: bool = True
     gripper_effort_default: int = 1000
@@ -68,10 +62,6 @@ def _validate_piper_follower_config(config: PiperFollowerConfigBase) -> None:
         raise ValueError("`mode_refresh_interval_s` must be >= 0.")
     if config.enable_timeout_s < 0:
         raise ValueError("`enable_timeout_s` must be >= 0.")
-    if config.calibration_scale <= 0:
-        raise ValueError("`calibration_scale` must be > 0.")
-    if not isinstance(config.require_calibration, bool):
-        raise ValueError("require_calibration must be true or false.")
     if config.startup_sleep_s < 0:
         raise ValueError("`startup_sleep_s` must be >= 0.")
     if not (0 <= config.gripper_effort_default <= 5000):

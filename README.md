@@ -206,14 +206,7 @@ If needed, you can also use temporary device paths (for example `/dev/ttyACM*` a
 
 #### AgileX (PiPER/PiPER-X)
 
-PiPER arms in master/teaching mode cannot receive external control commands, so all arms must be configured to follower/motion-output mode (0xFC), and firmware must be version 1.8.5 or above.
-
-For PiPER-series robots, make sure Git LFS assets are pulled before running teleoperation:
-
-```bash
-git lfs pull --include="src/lerobot/assets/piper_description/**,src/lerobot/assets/piper_x_description/**" --exclude="*"
-git lfs checkout src/lerobot/assets/piper_description src/lerobot/assets/piper_x_description
-```
+PiPER leader arms require firmware S-V1.8-9 or newer for runtime role switching. Manual control uses the hardware leader role (0xFA), while policy control switches the same arm to follower mode (0xFC).
 
 For PiPER setup, PiPER uses CAN interfaces instead of serial ports.
 So first run `lerobot-setup-can` to confirm CAN interfaces are available:
@@ -229,11 +222,9 @@ lerobot-teleoperate \
   --robot.type=piperx_follower \
   --robot.port=<FOLLOWER_CAN_PORT> \
   --robot.id=my_piperx_follower \
-  --robot.require_calibration=false \
   --teleop.type=piperx_leader \
   --teleop.port=<LEADER_CAN_PORT> \
-  --teleop.id=my_piperx_leader \
-  --teleop.require_calibration=false
+  --teleop.id=my_piperx_leader
 ```
 
 For bimanual users, run this command to verify dual-arm teleoperation:
@@ -244,14 +235,10 @@ lerobot-teleoperate \
   --robot.id=my_bi_piperx_follower \
   --robot.left_arm_config.port=<LEFT_FOLLOWER_CAN_PORT> \
   --robot.right_arm_config.port=<RIGHT_FOLLOWER_CAN_PORT> \
-  --robot.left_arm_config.require_calibration=false \
-  --robot.right_arm_config.require_calibration=false \
   --teleop.type=bi_piperx_leader \
   --teleop.id=my_bi_piperx_leader \
   --teleop.left_arm_config.port=<LEFT_LEADER_CAN_PORT> \
-  --teleop.right_arm_config.port=<RIGHT_LEADER_CAN_PORT> \
-  --teleop.left_arm_config.require_calibration=false \
-  --teleop.right_arm_config.require_calibration=false
+  --teleop.right_arm_config.port=<RIGHT_LEADER_CAN_PORT>
 ```
 
 For PiPER (non-X), replace `bi_piperx_follower`/`bi_piperx_leader` with `bi_piper_follower`/`bi_piper_leader`.
@@ -299,14 +286,10 @@ lerobot-human-inloop-record \
   --robot.id=my_bi_piperx_follower \
   --robot.left_arm_config.port=<LEFT_FOLLOWER_CAN_PORT> \
   --robot.right_arm_config.port=<RIGHT_FOLLOWER_CAN_PORT> \
-  --robot.left_arm_config.require_calibration=false \
-  --robot.right_arm_config.require_calibration=false \
   --teleop.type=bi_piperx_leader \
   --teleop.id=my_bi_piperx_leader \
   --teleop.left_arm_config.port=<LEFT_LEADER_CAN_PORT> \
   --teleop.right_arm_config.port=<RIGHT_LEADER_CAN_PORT> \
-  --teleop.left_arm_config.require_calibration=false \
-  --teleop.right_arm_config.require_calibration=false \
   --dataset.repo_id=<HF_USERNAME_OR_ORG>/<DATASET_NAME> \
   --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
   --dataset.num_episodes=<NUM_EPISODES> \

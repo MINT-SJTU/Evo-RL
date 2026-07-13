@@ -47,12 +47,9 @@ def _bi_piper_leader_worker(conn, arm_cls, arm_config) -> None:
                 break
 
             try:
-                if command == "__get_is_calibrated__":
-                    result = arm.is_calibrated
-                else:
-                    args = request.get("args", ())
-                    kwargs = request.get("kwargs", {})
-                    result = getattr(arm, command)(*args, **kwargs)
+                args = request.get("args", ())
+                kwargs = request.get("kwargs", {})
+                result = getattr(arm, command)(*args, **kwargs)
                 conn.send({"ok": True, "result": result})
             except Exception as exc:  # noqa: BLE001
                 conn.send(
@@ -92,12 +89,6 @@ class _PiperLeaderProcessProxy:
     def is_connected(self) -> bool:
         return self._is_connected
 
-    @property
-    def is_calibrated(self) -> bool:
-        if self._process is None:
-            return False
-        return bool(self._call("__get_is_calibrated__"))
-
     def _ensure_process(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
@@ -124,16 +115,13 @@ class _PiperLeaderProcessProxy:
             f"{response['traceback']}"
         )
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self) -> None:
         try:
-            self._call("connect", calibrate)
+            self._call("connect")
             self._is_connected = True
         except Exception:
             self.disconnect()
             raise
-
-    def calibrate(self) -> None:
-        self._call("calibrate")
 
     def configure(self) -> None:
         self._call("configure")
@@ -199,19 +187,16 @@ class BiPiperLeader(Teleoperator):
         "command_high_follow",
         "mode_refresh_interval_s",
         "enable_timeout_s",
-        "calibration_scale",
-        "require_calibration",
         "disable_on_disconnect",
     )
 
     def _build_arm_config(self, arm_config_cls, side_cfg, side: str):
         kwargs = {name: getattr(side_cfg, name) for name in self._side_field_names}
         kwargs["id"] = f"{self.config.id}_{side}" if self.config.id else None
-        kwargs["calibration_dir"] = self.config.calibration_dir
         return arm_config_cls(**kwargs)
 
     def __init__(self, config: BiPiperLeaderConfig | BiPiperXLeaderConfig):
-        super().__init__(config)
+        self.id = config.id
         self.config = config
         self._use_process_isolation = config.process_isolation
 
@@ -251,9 +236,10 @@ class BiPiperLeader(Teleoperator):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self.left_arm.connect(calibrate)
+        del calibrate
+        self.left_arm.connect()
         try:
-            self.right_arm.connect(calibrate)
+            self.right_arm.connect()
         except Exception:
             try:
                 self.left_arm.disconnect()
@@ -263,11 +249,10 @@ class BiPiperLeader(Teleoperator):
 
     @property
     def is_calibrated(self) -> bool:
-        return self.left_arm.is_calibrated and self.right_arm.is_calibrated
+        return True
 
     def calibrate(self) -> None:
-        self.left_arm.calibrate()
-        self.right_arm.calibrate()
+        pass
 
     def configure(self) -> None:
         self.left_arm.configure()
