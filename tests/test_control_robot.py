@@ -32,10 +32,7 @@ from lerobot.scripts.lerobot_human_inloop_record import (
     _slow_reset_all_arms_to_pose,
     human_inloop_record,
 )
-from lerobot.scripts.lerobot_patch_hil_dataset_schema import (
-    PatchHilDatasetSchemaConfig,
-    patch_hil_dataset_schema,
-)
+from lerobot.scripts.lerobot_patch_hil_dataset_schema import PatchHilDatasetSchemaConfig, patch_hil_dataset_schema
 from lerobot.scripts.lerobot_record import (
     ACPInferenceConfig,
     DatasetRecordConfig,
@@ -286,46 +283,6 @@ def test_record_loop_sets_leader_manual_control_during_reset():
             robot.disconnect()
 
     assert teleop.manual_control_calls == [True]
-
-
-def test_record_loop_propagates_manual_control_switch_failure():
-    class FailingTeleop(MockTeleop):
-        def set_manual_control(self, enabled: bool) -> None:
-            if not enabled:
-                raise RuntimeError("role switch failed")
-
-    robot = MockRobot(MockRobotConfig())
-    teleop = FailingTeleop(MockTeleopConfig())
-    dataset = MagicMock(fps=30, features={"action": {"names": ["motor_1.pos"]}})
-    robot.connect()
-    teleop.connect()
-    try:
-        with pytest.raises(RuntimeError, match="role switch failed"):
-            record_loop(
-                robot=robot,
-                events={
-                    "exit_early": False,
-                    "rerecord_episode": False,
-                    "stop_recording": False,
-                    "toggle_intervention": False,
-                    "episode_outcome": None,
-                },
-                fps=30,
-                teleop_action_processor=lambda x: x[0],
-                robot_action_processor=lambda x: x[0],
-                robot_observation_processor=lambda x: x,
-                dataset=dataset,
-                teleop=teleop,
-                policy=MagicMock(),
-                preprocessor=MagicMock(),
-                postprocessor=MagicMock(),
-                control_time_s=0.1,
-            )
-    finally:
-        if teleop.is_connected:
-            teleop.disconnect()
-        if robot.is_connected:
-            robot.disconnect()
 
 
 def test_save_and_load_failure_reset_pose(tmp_path):

@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import multiprocessing as mp
 import traceback
 from contextlib import suppress
@@ -33,8 +32,6 @@ from lerobot.utils.piper_sdk import PIPER_ACTION_KEYS
 
 from ..teleoperator import Teleoperator
 from .config_bi_piper_leader import BiPiperLeaderConfig, BiPiperXLeaderConfig
-
-logger = logging.getLogger(__name__)
 
 
 def _bi_piper_leader_worker(conn, arm_cls, arm_config) -> None:
@@ -143,13 +140,10 @@ class _PiperLeaderProcessProxy:
             self._is_connected = False
             return
 
-        disconnect_error: Exception | None = None
         if self._parent_conn is not None:
-            try:
+            with suppress(Exception):
                 if self._is_connected:
                     self._call("disconnect")
-            except Exception as exc:
-                disconnect_error = exc
             with suppress(Exception):
                 self._parent_conn.send({"command": "__close__"})
             with suppress(Exception):
@@ -164,8 +158,6 @@ class _PiperLeaderProcessProxy:
         self._parent_conn = None
         self._process = None
         self._is_connected = False
-        if disconnect_error is not None:
-            raise disconnect_error
 
 
 class BiPiperLeader(Teleoperator):
@@ -238,14 +230,7 @@ class BiPiperLeader(Teleoperator):
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
         self.left_arm.connect()
-        try:
-            self.right_arm.connect()
-        except Exception:
-            try:
-                self.left_arm.disconnect()
-            except Exception:
-                logger.exception("Failed to disconnect left PiPER leader after right connect error.")
-            raise
+        self.right_arm.connect()
 
     @property
     def is_calibrated(self) -> bool:
@@ -264,16 +249,8 @@ class BiPiperLeader(Teleoperator):
 
     @check_if_not_connected
     def set_manual_control(self, enabled: bool) -> None:
-        try:
-            self.left_arm.set_manual_control(enabled)
-            self.right_arm.set_manual_control(enabled)
-        except Exception:
-            for arm in (self.left_arm, self.right_arm):
-                try:
-                    arm.set_manual_control(True)
-                except Exception:
-                    logger.exception("Failed to restore a PiPER leader arm after role-switch error.")
-            raise
+        self.left_arm.set_manual_control(enabled)
+        self.right_arm.set_manual_control(enabled)
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
@@ -293,23 +270,13 @@ class BiPiperLeader(Teleoperator):
                 left_feedback[key.removeprefix("left_")] = value
             elif key.startswith("right_"):
                 right_feedback[key.removeprefix("right_")] = value
-        try:
-            self.left_arm.send_feedback(left_feedback)
-            self.right_arm.send_feedback(right_feedback)
-        except Exception:
-            for arm in (self.left_arm, self.right_arm):
-                try:
-                    arm.set_manual_control(True)
-                except Exception:
-                    logger.exception("Failed to restore a PiPER leader arm after feedback error.")
-            raise
+        self.left_arm.send_feedback(left_feedback)
+        self.right_arm.send_feedback(right_feedback)
 
     @check_if_not_connected
     def disconnect(self) -> None:
-        try:
-            self.left_arm.disconnect()
-        finally:
-            self.right_arm.disconnect()
+        self.left_arm.disconnect()
+        self.right_arm.disconnect()
 
 
 class BiPiperXLeader(BiPiperLeader):

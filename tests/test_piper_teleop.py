@@ -633,34 +633,6 @@ def test_bimanual_piper_get_action_requires_both_sides(monkeypatch):
         teleop.disconnect()
 
 
-def test_bimanual_piper_failed_policy_switch_restores_both_leaders(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-    teleop = make_teleoperator_from_config(
-        BiPiperLeaderConfig(
-            left_arm_config=PiperLeaderConfigBase(port="can2"),
-            right_arm_config=PiperLeaderConfigBase(port="can3"),
-            process_isolation=False,
-        )
-    )
-    original_right_switch = teleop.right_arm.set_manual_control
-
-    def fail_policy_switch(enabled: bool):
-        if not enabled:
-            raise RuntimeError("right role switch failed")
-        return original_right_switch(enabled)
-
-    monkeypatch.setattr(teleop.right_arm, "set_manual_control", fail_policy_switch)
-
-    teleop.connect()
-    try:
-        with pytest.raises(RuntimeError, match="right role switch failed"):
-            teleop.set_manual_control(False)
-        assert teleop.left_arm.arm.role_commands[-1][0] == 0xFA
-        assert teleop.right_arm.arm.role_commands[-1][0] == 0xFA
-    finally:
-        teleop.disconnect()
-
-
 def test_bimanual_piper_follower_action_features_are_available_without_connect(monkeypatch):
     patch_fake_sdk(monkeypatch)
 
@@ -766,41 +738,6 @@ def test_bimanual_piper_leader_uses_process_proxy_by_default(monkeypatch):
 
     assert isinstance(teleop.left_arm, DummyProxy)
     assert isinstance(teleop.right_arm, DummyProxy)
-
-
-def test_bimanual_piper_process_proxy_reports_disconnect_error_after_cleanup(monkeypatch):
-    class DummyConnection:
-        def __init__(self):
-            self.closed = False
-
-        def send(self, request):
-            del request
-
-        def close(self):
-            self.closed = True
-
-    class DummyProcess:
-        @staticmethod
-        def is_alive():
-            return False
-
-    proxy = object.__new__(bi_piper_leader_module._PiperLeaderProcessProxy)
-    proxy._parent_conn = DummyConnection()
-    proxy._process = DummyProcess()
-    proxy._is_connected = True
-    monkeypatch.setattr(
-        proxy,
-        "_call",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("remote disconnect failed")),
-    )
-
-    connection = proxy._parent_conn
-    with pytest.raises(RuntimeError, match="remote disconnect failed"):
-        proxy.disconnect()
-    assert connection.closed
-    assert proxy._parent_conn is None
-    assert proxy._process is None
-    assert not proxy._is_connected
 
 
 def test_piper_follower_send_only_mode_skips_sdk_reader_threads(monkeypatch):
