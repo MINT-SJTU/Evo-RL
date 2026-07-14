@@ -179,6 +179,7 @@ class BiPiperLeader(Teleoperator):
         "command_high_follow",
         "mode_refresh_interval_s",
         "enable_timeout_s",
+        "seed_manual_action_from_feedback",
         "disable_on_disconnect",
     )
 

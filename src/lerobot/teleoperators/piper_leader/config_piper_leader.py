@@ -45,6 +45,7 @@ class PiperLeaderConfigBase:
     command_high_follow: bool = True
     mode_refresh_interval_s: float = 1.0
     enable_timeout_s: float = 3.0
+    seed_manual_action_from_feedback: bool = False
 
     # Safety behavior on disconnect
     disable_on_disconnect: bool = False
