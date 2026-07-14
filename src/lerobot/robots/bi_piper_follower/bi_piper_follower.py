@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from functools import cached_property
 
 from lerobot.processor import RobotAction, RobotObservation
@@ -28,8 +27,6 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 
 from ..robot import Robot
 from .config_bi_piper_follower import BiPiperFollowerConfig, BiPiperXFollowerConfig
-
-logger = logging.getLogger(__name__)
 
 
 class BiPiperFollower(Robot):
@@ -115,14 +112,7 @@ class BiPiperFollower(Robot):
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
         self.left_arm.connect()
-        try:
-            self.right_arm.connect()
-        except Exception:
-            try:
-                self.left_arm.disconnect()
-            except Exception:
-                logger.exception("Failed to disconnect left PiPER follower after right connect error.")
-            raise
+        self.right_arm.connect()
 
     def set_teleop_send_only_mode(self, enabled: bool) -> None:
         self.left_arm.set_teleop_send_only_mode(enabled)
@@ -171,10 +161,8 @@ class BiPiperFollower(Robot):
 
     @check_if_not_connected
     def disconnect(self):
-        try:
-            self.left_arm.disconnect()
-        finally:
-            self.right_arm.disconnect()
+        self.left_arm.disconnect()
+        self.right_arm.disconnect()
 
 
 class BiPiperXFollower(BiPiperFollower):

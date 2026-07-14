@@ -498,27 +498,6 @@ def test_piper_follower_connect_fails_and_writes_follower_role_when_in_teach_mod
     assert not device.arm.connected
 
 
-def test_bimanual_piper_follower_rolls_back_left_connect(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-    robot = BiPiperFollower(
-        BiPiperFollowerConfig(
-            left_arm_config=PiperFollowerConfigBase(port="can0"),
-            right_arm_config=PiperFollowerConfigBase(port="can2"),
-        )
-    )
-    monkeypatch.setattr(
-        robot.right_arm,
-        "connect",
-        lambda: (_ for _ in ()).throw(RuntimeError("right connect failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="right connect failed"):
-        robot.connect()
-
-    assert not robot.left_arm.is_connected
-    assert not robot.left_arm.arm.connected
-
-
 @pytest.mark.parametrize(
     (
         "teleop_cfg",
