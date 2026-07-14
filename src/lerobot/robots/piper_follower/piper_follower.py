@@ -25,10 +25,11 @@ from lerobot.utils.piper_sdk import (
     PIPER_ACTION_KEYS,
     PIPER_JOINT_ACTION_KEYS,
     PIPER_JOINT_NAMES,
+    PIPER_ROLE_FOLLOWER,
     get_piper_sdk,
-    guard_piper_ctrl_mode_on_connect,
     milli_to_unit,
     parse_piper_log_level,
+    set_piper_role,
     unit_to_milli,
     wait_enable_piper,
 )
@@ -94,13 +95,14 @@ class PiperFollower(Robot):
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
-        self.arm.ConnectPort(start_thread=not self._teleop_send_only_mode)
+        self.arm.ConnectPort(
+            piper_init=not self._teleop_send_only_mode,
+            start_thread=not self._teleop_send_only_mode,
+        )
         connected_cameras = []
         try:
             if self.config.startup_sleep_s > 0:
                 time.sleep(self.config.startup_sleep_s)
-            if not self._teleop_send_only_mode:
-                guard_piper_ctrl_mode_on_connect(arm=self.arm, interface_name=self.config.port)
 
             self._is_connected = True
             self.configure()
@@ -131,6 +133,7 @@ class PiperFollower(Robot):
         pass
 
     def configure(self) -> None:
+        set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
         self._send_motion_mode()
 
     def _send_motion_mode(self) -> None:

@@ -192,7 +192,7 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_sdk_utils, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
-    monkeypatch.setattr(piper_leader_module, "PIPER_ROLE_SWITCH_SETTLE_S", 0.0)
+    monkeypatch.setattr(piper_sdk_utils, "PIPER_ROLE_SWITCH_SETTLE_S", 0.0)
     monkeypatch.setattr(piper_leader_module, "PIPER_ACTION_READ_TIMEOUT_S", 0.03)
 
 
@@ -226,6 +226,7 @@ def test_piper_leader_follower_teleop_roundtrip(monkeypatch, teleop_cfg, robot_c
     robot.connect()
     try:
         assert teleop.arm.role_commands[-1] == (0xFA, 0x00, 0x00, 0x00)
+        assert robot.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
         action = teleop.get_action()
         sent = robot.send_action(action)
         obs = robot.get_observation()
@@ -486,16 +487,17 @@ def test_piper_follower_connect_enables_arm(monkeypatch):
         robot.disconnect()
 
 
-def test_piper_follower_connect_fails_and_writes_follower_role_when_in_teach_mode(monkeypatch):
+def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
     patch_fake_sdk(monkeypatch)
-    device = PiperFollower(PiperFollowerConfig(port="can0", id="piper_role_guard"))
+    device = PiperFollower(PiperFollowerConfig(port="can0"))
     device.arm._arm_status.arm_status.ctrl_mode = 0x06
 
-    with pytest.raises(RuntimeError, match="Follower role command .* sent.*Power-cycle"):
-        device.connect()
-
-    assert device.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
-    assert not device.arm.connected
+    device.connect()
+    try:
+        assert device.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
+        assert [name for name, _ in device.arm.command_log[:3]] == ["role", "motion_mode", "enable"]
+    finally:
+        device.disconnect()
 
 
 @pytest.mark.parametrize(
@@ -748,7 +750,9 @@ def test_piper_follower_send_only_mode_skips_sdk_reader_threads(monkeypatch):
 
     robot.connect()
     try:
+        assert robot.arm.connect_calls[-1]["piper_init"] is False
         assert robot.arm.connect_calls[-1]["start_thread"] is False
+        assert robot.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
         with pytest.raises(RuntimeError, match="send-only mode"):
             robot.get_observation()
     finally:
@@ -804,5 +808,7 @@ def test_bimanual_piper_send_only_mode_propagates_to_both_followers(monkeypatch)
     try:
         assert robot.left_arm.arm.connect_calls[-1]["start_thread"] is False
         assert robot.right_arm.arm.connect_calls[-1]["start_thread"] is False
+        assert robot.left_arm.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
+        assert robot.right_arm.arm.role_commands == [(0xFC, 0x00, 0x00, 0x00)]
     finally:
         robot.disconnect()
