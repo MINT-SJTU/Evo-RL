@@ -39,6 +39,9 @@ class PiperLeaderConfigBase:
     sync_gripper: bool = True
     gripper_effort_default: int = 1000
     gripper_status_code: int = 0x01
+    gripper_teaching_range_per: int = 100
+    gripper_max_range_config: int = 100
+    gripper_teaching_friction: int = 10
 
     # Command mode for send_feedback
     command_speed_ratio: int = 100
@@ -64,6 +67,12 @@ def _validate_piper_leader_config(config: PiperLeaderConfigBase) -> None:
         raise ValueError("`gripper_effort_default` must be between 0 and 5000.")
     if config.gripper_status_code not in {0x00, 0x01, 0x02, 0x03}:
         raise ValueError("`gripper_status_code` must be one of 0x00, 0x01, 0x02, 0x03.")
+    if not (100 <= config.gripper_teaching_range_per <= 200):
+        raise ValueError("`gripper_teaching_range_per` must be between 100 and 200.")
+    if config.gripper_max_range_config not in {0, 70, 100}:
+        raise ValueError("`gripper_max_range_config` must be one of 0, 70, or 100.")
+    if not (1 <= config.gripper_teaching_friction <= 10):
+        raise ValueError("`gripper_teaching_friction` must be between 1 and 10.")
 
 
 @TeleoperatorConfig.register_subclass("piper_leader")

@@ -62,6 +62,7 @@ class FakePiperInterface:
         self.last_joint = None
         self.last_gripper = None
         self.gripper_calls = []
+        self.gripper_teaching_param_calls = []
         self.joint_mit_calls = []
         self.enable_calls = 0
         self.disable_calls = 0
@@ -165,6 +166,10 @@ class FakePiperInterface:
         self.last_gripper = args
         self.gripper_calls.append(args)
         self.command_log.append(("gripper", args))
+
+    def GripperTeachingPendantParamConfig(self, *args):
+        self.gripper_teaching_param_calls.append(args)
+        self.command_log.append(("gripper_teaching_param", args))
 
     def GetArmJointCtrl(self):
         return self._joint_ctrl
@@ -399,6 +404,7 @@ def test_piper_leader_default_uses_hardware_leader_role(monkeypatch):
     try:
         assert teleop.arm.connect_calls[-1]["piper_init"] is False
         assert teleop.arm.role_commands == [(0xFA, 0x00, 0x00, 0x00)]
+        assert teleop.arm.gripper_teaching_param_calls == [(100, 100, 10)]
         assert teleop.arm.enable_calls == 0
         assert teleop.arm.mode_commands == []
         assert teleop.arm.gripper_calls == []

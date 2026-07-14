@@ -174,10 +174,20 @@ class PiperLeader(Teleoperator):
         except Exception:
             logger.exception("Failed to disable %s after leader-role restore failure.", self)
 
+    def _configure_gripper_teaching_pendant(self) -> None:
+        if not self.config.sync_gripper:
+            return
+        self.arm.GripperTeachingPendantParamConfig(
+            self.config.gripper_teaching_range_per,
+            self.config.gripper_max_range_config,
+            self.config.gripper_teaching_friction,
+        )
+
     def _enter_manual_role(self) -> None:
         self._reset_raw_leader_action()
         if self.config.seed_manual_action_from_feedback:
             self._seed_raw_leader_action_from_feedback()
+        self._configure_gripper_teaching_pendant()
         self._leader_joint_timestamp_before_switch = self._safe_message_timestamp(self.arm.GetArmJointCtrl)
         self._leader_gripper_timestamp_before_switch = (
             self._safe_message_timestamp(self.arm.GetArmGripperCtrl) if self.config.sync_gripper else 0.0
