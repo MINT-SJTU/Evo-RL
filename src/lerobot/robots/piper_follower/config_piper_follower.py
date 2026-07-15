@@ -37,7 +37,6 @@ class PiperFollowerConfigBase:
     # Motion mode for follower arm
     speed_ratio: int = 100
     high_follow: bool = True
-    mode_refresh_interval_s: float = 1.0
 
     # Arm enable behavior
     enable_on_connect: bool = True
@@ -58,8 +57,6 @@ class PiperFollowerConfigBase:
 def _validate_piper_follower_config(config: PiperFollowerConfigBase) -> None:
     if not (0 <= config.speed_ratio <= 100):
         raise ValueError("`speed_ratio` must be between 0 and 100.")
-    if config.mode_refresh_interval_s < 0:
-        raise ValueError("`mode_refresh_interval_s` must be >= 0.")
     if config.enable_timeout_s < 0:
         raise ValueError("`enable_timeout_s` must be >= 0.")
     if config.startup_sleep_s < 0:

@@ -51,7 +51,6 @@ class PiperFollower(Robot):
         self.id = config.id
         self.config = config
         self._is_connected = False
-        self._last_mode_refresh_t = 0.0
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
@@ -95,7 +94,9 @@ class PiperFollower(Robot):
 
             self._is_connected = True
             self.configure()
-            if self.config.enable_on_connect and not self._wait_enable(self.config.enable_timeout_s):
+            if self.config.enable_on_connect and not wait_enable_piper(
+                self.arm, self.config.enable_timeout_s
+            ):
                 logger.warning("Piper follower did not report enabled state before timeout.")
 
             for cam in self.cameras.values():
@@ -119,25 +120,11 @@ class PiperFollower(Robot):
 
     def configure(self) -> None:
         set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-        self._send_motion_mode()
-
-    def _send_motion_mode(self) -> None:
         mit_mode = 0xAD if self.config.high_follow else 0x00
         self.arm.MotionCtrl_2(0x01, 0x01, self.config.speed_ratio, mit_mode)
-        self._last_mode_refresh_t = time.monotonic()
 
-    def _refresh_motion_mode_if_needed(self) -> None:
-        interval_s = self.config.mode_refresh_interval_s
-        if interval_s <= 0:
-            return
-        now = time.monotonic()
-        if now - self._last_mode_refresh_t >= interval_s:
-            self._send_motion_mode()
-
-    def _wait_enable(self, timeout_s: float) -> bool:
-        return wait_enable_piper(self.arm, timeout_s)
-
-    def _read_raw_observation(self) -> RobotObservation:
+    @check_if_not_connected
+    def get_observation(self) -> RobotObservation:
         joint_msg = self.arm.GetArmJointMsgs()
         joint_state = getattr(joint_msg, "joint_state", None)
 
@@ -149,11 +136,6 @@ class PiperFollower(Robot):
         gripper_msg = self.arm.GetArmGripperMsgs()
         gripper_state = getattr(gripper_msg, "gripper_state", None)
         obs["gripper.pos"] = abs(milli_to_unit(getattr(gripper_state, "grippers_angle", 0)))
-        return obs
-
-    @check_if_not_connected
-    def get_observation(self) -> RobotObservation:
-        obs: dict[str, float] = self._read_raw_observation()
 
         for cam_key, cam in self.cameras.items():
             obs[cam_key] = cam.async_read()
@@ -161,8 +143,6 @@ class PiperFollower(Robot):
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        self._refresh_motion_mode_if_needed()
-
         sent_action: dict[str, float] = {}
 
         joint_keys = PIPER_JOINT_ACTION_KEYS
