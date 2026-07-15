@@ -132,10 +132,6 @@ class PiperLeader(Teleoperator):
             logger.debug("Could not read current gripper angle before setting enable=%s.", enabled)
         self._send_gripper_ctrl(gripper_pos_raw, enabled)
 
-    @staticmethod
-    def _message_timestamp(message: Any) -> float:
-        return float(getattr(message, "time_stamp", 0.0) or 0.0)
-
     def set_manual_control(self, enabled: bool) -> None:
         if not self._is_connected:
             raise RuntimeError(f"{self} is not connected.")
@@ -161,48 +157,36 @@ class PiperLeader(Teleoperator):
         self.set_manual_control(self.config.manual_control)
 
     def _read_joint_from_ctrl(self) -> dict[str, float] | None:
-        joint_ctrl_msg = self.arm.GetArmJointCtrl()
-        if getattr(joint_ctrl_msg, "time_stamp", 0.0) <= 0:
-            return None
-        joint_ctrl = getattr(joint_ctrl_msg, "joint_ctrl", None)
-        if joint_ctrl is None:
+        message = self.arm.GetArmJointCtrl()
+        if message.time_stamp <= 0:
             return None
         return {
-            f"{joint_name}.pos": milli_to_unit(getattr(joint_ctrl, joint_name, 0))
+            f"{joint_name}.pos": milli_to_unit(getattr(message.joint_ctrl, joint_name))
             for joint_name in PIPER_JOINT_NAMES
         }
 
     def _read_joint_from_feedback(self) -> dict[str, float] | None:
-        joint_msg = self.arm.GetArmJointMsgs()
-        if self._message_timestamp(joint_msg) <= 0:
-            return None
-        joint_state = getattr(joint_msg, "joint_state", None)
-        if joint_state is None:
+        message = self.arm.GetArmJointMsgs()
+        if message.time_stamp <= 0:
             return None
         return {
-            f"{joint_name}.pos": milli_to_unit(getattr(joint_state, joint_name, 0))
+            f"{joint_name}.pos": milli_to_unit(getattr(message.joint_state, joint_name))
             for joint_name in PIPER_JOINT_NAMES
         }
 
     def _read_gripper_from_ctrl(self) -> float | None:
-        gripper_ctrl_msg = self.arm.GetArmGripperCtrl()
-        if getattr(gripper_ctrl_msg, "time_stamp", 0.0) <= 0:
+        message = self.arm.GetArmGripperCtrl()
+        if message.time_stamp <= 0:
             return None
-        gripper_ctrl = getattr(gripper_ctrl_msg, "gripper_ctrl", None)
-        if gripper_ctrl is None:
-            return None
-        return abs(milli_to_unit(getattr(gripper_ctrl, "grippers_angle", 0)))
+        return abs(milli_to_unit(message.gripper_ctrl.grippers_angle))
 
     def _read_gripper_from_feedback(self) -> float | None:
-        gripper_msg = self.arm.GetArmGripperMsgs()
-        if self._message_timestamp(gripper_msg) <= 0:
+        message = self.arm.GetArmGripperMsgs()
+        if message.time_stamp <= 0:
             return None
-        gripper_state = getattr(gripper_msg, "gripper_state", None)
-        if gripper_state is None:
-            return None
-        return abs(milli_to_unit(getattr(gripper_state, "grippers_angle", 0)))
+        return abs(milli_to_unit(message.gripper_state.grippers_angle))
 
-    def _try_read_raw_action(self) -> RobotAction | None:
+    def _read_raw_action(self) -> RobotAction:
         if self._manual_control_enabled is True:
             action = self._read_joint_from_ctrl()
             gripper_pos = self._read_gripper_from_ctrl() if self.config.sync_gripper else None
@@ -213,18 +197,14 @@ class PiperLeader(Teleoperator):
             raise RuntimeError(f"[{self.config.port}] Piper leader control mode is unknown.")
 
         if action is None:
-            return None
+            return {}
         if self.config.sync_gripper:
             if gripper_pos is None:
-                return None
+                return {}
             action["gripper.pos"] = gripper_pos
         else:
             action["gripper.pos"] = 0.0
         return action
-
-    def _read_raw_action(self) -> RobotAction:
-        action = self._try_read_raw_action()
-        return action if action is not None else {}
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
