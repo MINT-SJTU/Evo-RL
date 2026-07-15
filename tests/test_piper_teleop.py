@@ -190,6 +190,8 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_sdk_utils, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
+    monkeypatch.setattr(piper_follower_module, "resolve_piper_can_interface", lambda serial: serial)
+    monkeypatch.setattr(piper_leader_module, "resolve_piper_can_interface", lambda serial: serial)
 
 
 @pytest.mark.parametrize(

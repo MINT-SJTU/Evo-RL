@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 PIPER_JOINT_NAMES = (
@@ -32,6 +34,31 @@ PIPER_JOINT_ACTION_KEYS = tuple(f"{joint}.pos" for joint in PIPER_JOINT_NAMES)
 PIPER_ACTION_KEYS = PIPER_JOINT_ACTION_KEYS + ("gripper.pos",)
 PIPER_ROLE_LEADER = 0xFA
 PIPER_ROLE_FOLLOWER = 0xFC
+_SYS_CLASS_NET = Path("/sys/class/net")
+
+
+def resolve_piper_can_interface(serial_number: str) -> str:
+    """Return the SocketCAN interface for a USB-CAN adapter serial number."""
+    for interface_path in _SYS_CLASS_NET.iterdir():
+        try:
+            if (interface_path / "type").read_text().strip() != "280":
+                continue
+        except OSError:
+            continue
+
+        try:
+            result = subprocess.run(  # nosec B607
+                ["udevadm", "info", "--query=property", f"--path={interface_path}"],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("`udevadm` is required to find the PiPER USB-CAN adapter.") from exc
+
+        if f"ID_SERIAL_SHORT={serial_number}" in result.stdout.splitlines():
+            return interface_path.name
+
+    raise RuntimeError(f"No PiPER USB-CAN adapter found with serial '{serial_number}'.")
 
 
 def milli_to_unit(value: float | int) -> float:

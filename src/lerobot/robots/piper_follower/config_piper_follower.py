@@ -25,7 +25,7 @@ from ..config import RobotConfig
 class PiperFollowerConfigBase:
     """Configuration for a Piper follower arm controlled over CAN."""
 
-    # CAN interface name (e.g. "can0")
+    # USB-CAN adapter ID_SERIAL_SHORT
     port: str
 
     # Piper SDK connection options

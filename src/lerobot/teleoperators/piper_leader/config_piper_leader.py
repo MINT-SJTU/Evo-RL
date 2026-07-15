@@ -23,7 +23,7 @@ from ..config import TeleoperatorConfig
 class PiperLeaderConfigBase:
     """Configuration for a Piper leader arm used as teleoperator."""
 
-    # CAN interface name (e.g. "can1")
+    # USB-CAN adapter ID_SERIAL_SHORT
     port: str
 
     # Piper SDK connection options

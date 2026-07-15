@@ -13,13 +13,18 @@
 # limitations under the License.
 
 """
-Setup and debug CAN interfaces for Damiao motors (e.g., OpenArms).
+Setup SocketCAN interfaces and debug Damiao motors (e.g., OpenArms).
 
 Examples:
 
 Setup CAN interfaces with CAN FD:
 ```shell
 lerobot-setup-can --mode=setup --interfaces=can0,can1,can2,can3
+```
+
+Setup PiPER interfaces by USB-CAN serial number:
+```shell
+lerobot-setup-can --mode=setup --usb_can_serials=<SERIAL_1>,<SERIAL_2>
 ```
 
 Test motors on a single interface:
@@ -46,6 +51,7 @@ from dataclasses import dataclass, field
 import draccus
 
 from lerobot.utils.import_utils import _can_available
+from lerobot.utils.piper_sdk import resolve_piper_can_interface
 
 MOTOR_NAMES = {
     0x01: "joint_1",
@@ -63,6 +69,7 @@ MOTOR_NAMES = {
 class CANSetupConfig:
     mode: str = "test"
     interfaces: str = "can0"  # Comma-separated, e.g. "can0,can1,can2,can3"
+    usb_can_serials: str | None = None
     bitrate: int = 1000000
     data_bitrate: int = 5000000
     use_fd: bool = True
@@ -71,6 +78,13 @@ class CANSetupConfig:
     speed_iterations: int = 100
 
     def get_interfaces(self) -> list[str]:
+        if self.usb_can_serials is not None:
+            if self.mode != "setup":
+                raise ValueError("`usb_can_serials` is only supported with `mode=setup`.")
+            serials = [value.strip() for value in self.usb_can_serials.split(",") if value.strip()]
+            if not serials:
+                raise ValueError("`usb_can_serials` must contain at least one serial number.")
+            return [resolve_piper_can_interface(serial) for serial in serials]
         return [i.strip() for i in self.interfaces.split(",") if i.strip()]
 
 
@@ -121,13 +135,15 @@ def setup_interface(interface: str, bitrate: int, data_bitrate: int, use_fd: boo
 
 def setup_interface_with_fallback(interface: str, cfg: CANSetupConfig) -> tuple[bool, bool | None, str]:
     """Try primary mode first, then fallback mode. Returns (success, used_fd, summary)."""
-    attempts = [cfg.use_fd, not cfg.use_fd]
+    is_piper = cfg.usb_can_serials is not None
+    attempts = [False] if is_piper else [cfg.use_fd, not cfg.use_fd]
+    bitrate = 1000000 if is_piper else cfg.bitrate
     labels = {True: "CAN FD", False: "CAN 2.0"}
     attempt_msgs: list[str] = []
 
     for idx, use_fd in enumerate(attempts, start=1):
         print(f"  Attempt {idx}/{len(attempts)}: {labels[use_fd]}")
-        ok, err = setup_interface(interface, cfg.bitrate, cfg.data_bitrate, use_fd)
+        ok, err = setup_interface(interface, bitrate, cfg.data_bitrate, use_fd)
         if ok:
             is_up, status, is_fd_iface = check_interface_status(interface)
             if is_up:
@@ -305,13 +321,16 @@ def speed_test(cfg: CANSetupConfig, interface: str):
 
 def run_setup(cfg: CANSetupConfig) -> bool:
     """Setup CAN interfaces."""
+    use_fd = False if cfg.usb_can_serials is not None else cfg.use_fd
+    bitrate = 1000000 if cfg.usb_can_serials is not None else cfg.bitrate
     print("=" * 50)
     print("CAN Interface Setup")
     print("=" * 50)
-    print(f"Primary mode: {'CAN FD' if cfg.use_fd else 'CAN 2.0'}")
-    print(f"Fallback mode: {'CAN 2.0' if cfg.use_fd else 'CAN FD'}")
-    print(f"Bitrate: {cfg.bitrate / 1_000_000:.1f} Mbps")
-    if cfg.use_fd:
+    print(f"Primary mode: {'CAN FD' if use_fd else 'CAN 2.0'}")
+    if cfg.usb_can_serials is None:
+        print(f"Fallback mode: {'CAN 2.0' if use_fd else 'CAN FD'}")
+    print(f"Bitrate: {bitrate / 1_000_000:.1f} Mbps")
+    if use_fd:
         print(f"Data bitrate: {cfg.data_bitrate / 1_000_000:.1f} Mbps")
     print()
 
@@ -351,9 +370,10 @@ def run_setup(cfg: CANSetupConfig) -> bool:
 
     print()
     print("✓ Setup succeeded")
-    print()
-    print("Next: Test motors with:")
-    print(f"  lerobot-setup-can --mode=test --interfaces {','.join(interfaces)}")
+    if cfg.usb_can_serials is None:
+        print()
+        print("Next: Test motors with:")
+        print(f"  lerobot-setup-can --mode=test --interfaces {','.join(interfaces)}")
     return True
 
 

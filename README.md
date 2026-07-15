@@ -206,11 +206,22 @@ If needed, you can also use temporary device paths (for example `/dev/ttyACM*` a
 
 #### AgileX (PiPER/PiPER-X)
 
-For PiPER setup, PiPER uses CAN interfaces instead of serial ports.
-So first run `lerobot-setup-can` to confirm CAN interfaces are available:
+PiPER commands use the USB-CAN adapter's stable `ID_SERIAL_SHORT` instead of a temporary Linux
+`canN` name. List the connected adapters with:
 
 ```bash
-lerobot-setup-can --mode=setup --interfaces=<LEFT_FOLLOWER_CAN_PORT>,<LEFT_LEADER_CAN_PORT>,<RIGHT_FOLLOWER_CAN_PORT>,<RIGHT_LEADER_CAN_PORT>
+for device in /sys/class/net/*; do
+  [ "$(cat "$device/type" 2>/dev/null)" = "280" ] || continue
+  serial=$(udevadm info --query=property --path="$device" | sed -n 's/^ID_SERIAL_SHORT=//p')
+  echo "$(basename "$device"): $serial"
+done
+```
+
+Then configure the adapters needed for the run:
+
+```bash
+lerobot-setup-can --mode=setup \
+  --usb_can_serials=<USB_CAN_SERIAL_1>,<USB_CAN_SERIAL_2>,<USB_CAN_SERIAL_3>,<USB_CAN_SERIAL_4>
 ```
 
 For single-arm users, run the command below to verify the system is ready:
@@ -218,10 +229,10 @@ For single-arm users, run the command below to verify the system is ready:
 ```bash
 lerobot-teleoperate \
   --robot.type=piperx_follower \
-  --robot.port=<FOLLOWER_CAN_PORT> \
+  --robot.port=<FOLLOWER_USB_CAN_SERIAL> \
   --robot.id=my_piperx_follower \
   --teleop.type=piperx_leader \
-  --teleop.port=<LEADER_CAN_PORT> \
+  --teleop.port=<LEADER_USB_CAN_SERIAL> \
   --teleop.id=my_piperx_leader
 ```
 
@@ -231,12 +242,12 @@ For bimanual users, run this command to verify dual-arm teleoperation:
 lerobot-teleoperate \
   --robot.type=bi_piperx_follower \
   --robot.id=my_bi_piperx_follower \
-  --robot.left_arm_config.port=<LEFT_FOLLOWER_CAN_PORT> \
-  --robot.right_arm_config.port=<RIGHT_FOLLOWER_CAN_PORT> \
+  --robot.left_arm_config.port=<LEFT_FOLLOWER_USB_CAN_SERIAL> \
+  --robot.right_arm_config.port=<RIGHT_FOLLOWER_USB_CAN_SERIAL> \
   --teleop.type=bi_piperx_leader \
   --teleop.id=my_bi_piperx_leader \
-  --teleop.left_arm_config.port=<LEFT_LEADER_CAN_PORT> \
-  --teleop.right_arm_config.port=<RIGHT_LEADER_CAN_PORT>
+  --teleop.left_arm_config.port=<LEFT_LEADER_USB_CAN_SERIAL> \
+  --teleop.right_arm_config.port=<RIGHT_LEADER_USB_CAN_SERIAL>
 ```
 
 For PiPER (non-X), replace `bi_piperx_follower`/`bi_piperx_leader` with `bi_piper_follower`/`bi_piper_leader`.
@@ -282,12 +293,12 @@ Bimanual template (left/right, PiPER-X example):
 lerobot-human-inloop-record \
   --robot.type=bi_piperx_follower \
   --robot.id=my_bi_piperx_follower \
-  --robot.left_arm_config.port=<LEFT_FOLLOWER_CAN_PORT> \
-  --robot.right_arm_config.port=<RIGHT_FOLLOWER_CAN_PORT> \
+  --robot.left_arm_config.port=<LEFT_FOLLOWER_USB_CAN_SERIAL> \
+  --robot.right_arm_config.port=<RIGHT_FOLLOWER_USB_CAN_SERIAL> \
   --teleop.type=bi_piperx_leader \
   --teleop.id=my_bi_piperx_leader \
-  --teleop.left_arm_config.port=<LEFT_LEADER_CAN_PORT> \
-  --teleop.right_arm_config.port=<RIGHT_LEADER_CAN_PORT> \
+  --teleop.left_arm_config.port=<LEFT_LEADER_USB_CAN_SERIAL> \
+  --teleop.right_arm_config.port=<RIGHT_LEADER_USB_CAN_SERIAL> \
   --dataset.repo_id=<HF_USERNAME_OR_ORG>/<DATASET_NAME> \
   --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
   --dataset.num_episodes=<NUM_EPISODES> \
