@@ -62,7 +62,6 @@ class FakePiperInterface:
         self.last_joint = None
         self.last_gripper = None
         self.gripper_calls = []
-        self.gripper_teaching_param_calls = []
         self.joint_mit_calls = []
         self.enable_calls = 0
         self.disable_calls = 0
@@ -167,10 +166,6 @@ class FakePiperInterface:
         self.gripper_calls.append(args)
         self.command_log.append(("gripper", args))
 
-    def GripperTeachingPendantParamConfig(self, *args):
-        self.gripper_teaching_param_calls.append(args)
-        self.command_log.append(("gripper_teaching_param", args))
-
     def GetArmJointCtrl(self):
         return self._joint_ctrl
 
@@ -190,27 +185,6 @@ class FakePiperInterface:
         return self._arm_status
 
 
-class FakeCanMessage:
-    def __init__(self, arbitration_id: int, values: tuple[int, ...]):
-        self.arbitration_id = arbitration_id
-        self.data = b"".join(value.to_bytes(4, "big", signed=True) for value in values)
-
-
-class FakeCanBus:
-    def __init__(self, messages: list[FakeCanMessage] | None = None):
-        self.messages = messages or []
-        self.shutdown_calls = 0
-
-    def recv(self, timeout=0.0):
-        del timeout
-        if self.messages:
-            return self.messages.pop(0)
-        return None
-
-    def shutdown(self):
-        self.shutdown_calls += 1
-
-
 def patch_fake_sdk(monkeypatch):
     def fake_loader():
         return (FakePiperInterface, FakeLogLevel)
@@ -220,34 +194,6 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_sdk_utils, "PIPER_ROLE_SWITCH_SETTLE_S", 0.0)
     monkeypatch.setattr(piper_leader_module, "PIPER_ACTION_READ_TIMEOUT_S", 0.03)
-
-
-@pytest.mark.parametrize(
-    ("port", "expected"),
-    [
-        ("0040002C4148570C20343133", "can2"),
-        ("bytewerk_candleLight_USB_to_CAN_adapter_0040002C4148570C20343133", "can2"),
-        ("can3", "can3"),
-    ],
-)
-def test_piper_can_port_resolves_interface_or_usb_serial(monkeypatch, port, expected):
-    monkeypatch.setattr(
-        piper_sdk_utils,
-        "list_piper_can_interfaces",
-        lambda: {
-            "0040002C4148570C20343133": "can2",
-            "bytewerk_candleLight_USB_to_CAN_adapter_0040002C4148570C20343133": "can2",
-        },
-    )
-
-    assert piper_sdk_utils.resolve_piper_can_port(port) == expected
-
-
-def test_piper_can_port_reports_available_serials(monkeypatch):
-    monkeypatch.setattr(piper_sdk_utils, "list_piper_can_interfaces", lambda: {"ABC": "can0"})
-
-    with pytest.raises(ValueError, match="ABC->can0"):
-        piper_sdk_utils.resolve_piper_can_port("missing")
 
 
 @pytest.mark.parametrize(
@@ -404,7 +350,6 @@ def test_piper_leader_default_uses_hardware_leader_role(monkeypatch):
     try:
         assert teleop.arm.connect_calls[-1]["piper_init"] is False
         assert teleop.arm.role_commands == [(0xFA, 0x00, 0x00, 0x00)]
-        assert teleop.arm.gripper_teaching_param_calls == [(100, 100, 10)]
         assert teleop.arm.enable_calls == 0
         assert teleop.arm.mode_commands == []
         assert teleop.arm.gripper_calls == []
@@ -415,60 +360,6 @@ def test_piper_leader_default_uses_hardware_leader_role(monkeypatch):
         assert action["gripper.pos"] == 42.0
     finally:
         teleop.disconnect()
-
-
-def test_piper_leader_falls_back_to_raw_leader_can_frames(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-
-    fake_bus = FakeCanBus(
-        [
-            FakeCanMessage(0x155, (1000, -2000)),
-            FakeCanMessage(0x156, (3000, -4000)),
-            FakeCanMessage(0x157, (5000, -6000)),
-            FakeCanMessage(0x159, (7000,)),
-        ]
-    )
-    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
-    teleop.connect()
-    teleop._leader_bus = fake_bus
-    teleop.arm._joint_ctrl.time_stamp = 0.0
-    teleop.arm._joint_ctrl.Hz = 0.0
-    teleop.arm._gripper_ctrl.time_stamp = 0.0
-
-    try:
-        action = teleop.get_action()
-        assert action["joint_1.pos"] == 1.0
-        assert action["joint_2.pos"] == -2.0
-        assert action["joint_6.pos"] == -6.0
-        assert action["gripper.pos"] == 7.0
-    finally:
-        teleop.disconnect()
-
-    assert fake_bus.shutdown_calls == 1
-
-
-def test_piper_leader_can_seed_manual_action_from_feedback(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-
-    fake_bus = FakeCanBus()
-    teleop = PiperLeader(PiperLeaderConfig(port="can1", seed_manual_action_from_feedback=True))
-
-    teleop.connect()
-    teleop._leader_bus = fake_bus
-    teleop.arm._joint_ctrl.time_stamp = 0.0
-    teleop.arm._joint_ctrl.Hz = 0.0
-    teleop.arm._gripper_ctrl.time_stamp = 0.0
-
-    try:
-        assert [command[0] for command in teleop.arm.role_commands[:2]] == [0xFC, 0xFA]
-        action = teleop.get_action()
-        assert action["joint_1.pos"] == 11.0
-        assert action["joint_6.pos"] == 61.0
-        assert action["gripper.pos"] == 43.0
-    finally:
-        teleop.disconnect()
-
-    assert fake_bus.shutdown_calls == 1
 
 
 def test_piper_leader_switches_between_manual_and_policy_control(monkeypatch):
@@ -623,22 +514,8 @@ def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
     [
         (
             BiPiperLeaderConfig(
-                left_arm_config=PiperLeaderConfigBase(
-                    port="can1",
-                    manual_control=True,
-                    sync_gripper=True,
-                    gripper_teaching_range_per=120,
-                    gripper_max_range_config=70,
-                    gripper_teaching_friction=8,
-                ),
-                right_arm_config=PiperLeaderConfigBase(
-                    port="can3",
-                    manual_control=True,
-                    sync_gripper=True,
-                    gripper_teaching_range_per=130,
-                    gripper_max_range_config=100,
-                    gripper_teaching_friction=9,
-                ),
+                left_arm_config=PiperLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
+                right_arm_config=PiperLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
                 process_isolation=False,
             ),
             BiPiperFollowerConfig(
@@ -654,22 +531,8 @@ def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
         ),
         (
             BiPiperXLeaderConfig(
-                left_arm_config=PiperXLeaderConfigBase(
-                    port="can1",
-                    manual_control=True,
-                    sync_gripper=True,
-                    gripper_teaching_range_per=120,
-                    gripper_max_range_config=70,
-                    gripper_teaching_friction=8,
-                ),
-                right_arm_config=PiperXLeaderConfigBase(
-                    port="can3",
-                    manual_control=True,
-                    sync_gripper=True,
-                    gripper_teaching_range_per=130,
-                    gripper_max_range_config=100,
-                    gripper_teaching_friction=9,
-                ),
+                left_arm_config=PiperXLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
+                right_arm_config=PiperXLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
                 process_isolation=False,
             ),
             BiPiperXFollowerConfig(
@@ -707,12 +570,6 @@ def test_bimanual_piper_leader_follower_roundtrip(
     assert isinstance(teleop.right_arm, right_teleop_cls)
     assert isinstance(robot.left_arm, left_robot_cls)
     assert isinstance(robot.right_arm, right_robot_cls)
-    assert teleop.left_arm.config.gripper_teaching_range_per == 120
-    assert teleop.left_arm.config.gripper_max_range_config == 70
-    assert teleop.left_arm.config.gripper_teaching_friction == 8
-    assert teleop.right_arm.config.gripper_teaching_range_per == 130
-    assert teleop.right_arm.config.gripper_max_range_config == 100
-    assert teleop.right_arm.config.gripper_teaching_friction == 9
 
     teleop.connect()
     robot.connect()

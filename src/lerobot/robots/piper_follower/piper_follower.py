@@ -29,7 +29,6 @@ from lerobot.utils.piper_sdk import (
     get_piper_sdk,
     milli_to_unit,
     parse_piper_log_level,
-    resolve_piper_can_port,
     set_piper_role,
     unit_to_milli,
     wait_enable_piper,
@@ -54,11 +53,10 @@ class PiperFollower(Robot):
         self._is_connected = False
         self._last_mode_refresh_t = 0.0
         self._teleop_send_only_mode = False
-        self.port = resolve_piper_can_port(self.config.port)
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
-            can_name=self.port,
+            can_name=self.config.port,
             judge_flag=self.config.judge_flag,
             can_auto_init=self.config.can_auto_init,
             logger_level=parse_piper_log_level(self.config.log_level),

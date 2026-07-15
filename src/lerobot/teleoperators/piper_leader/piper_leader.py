@@ -30,7 +30,6 @@ from lerobot.utils.piper_sdk import (
     get_piper_sdk,
     milli_to_unit,
     parse_piper_log_level,
-    resolve_piper_can_port,
     set_piper_role,
     unit_to_milli,
     wait_enable_piper,
@@ -42,10 +41,6 @@ from .config_piper_leader import PiperLeaderConfig, PiperXLeaderConfig
 logger = logging.getLogger(__name__)
 PIPER_ACTION_READ_TIMEOUT_S = 5.0
 PIPER_ACTION_READ_POLL_S = 0.01
-PIPER_FEEDBACK_SEED_TIMEOUT_S = 1.0
-PIPER_LEADER_JOINT_FRAME_IDS = (0x155, 0x156, 0x157)
-PIPER_LEADER_GRIPPER_FRAME_ID = 0x159
-PIPER_LEADER_CAN_DRAIN_LIMIT = 64
 
 
 class PiperLeader(Teleoperator):
@@ -63,15 +58,10 @@ class PiperLeader(Teleoperator):
         self._leader_joint_timestamp_before_switch = 0.0
         self._leader_gripper_timestamp_before_switch = 0.0
         self._leader_frames_ready = False
-        self._leader_bus: Any | None = None
-        self._raw_leader_action: RobotAction = {}
-        self._raw_leader_joint_frames_seen: set[int] = set()
-        self._raw_leader_gripper_seen = False
-        self.port = resolve_piper_can_port(self.config.port)
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
-            can_name=self.port,
+            can_name=self.config.port,
             judge_flag=self.config.judge_flag,
             can_auto_init=self.config.can_auto_init,
             logger_level=parse_piper_log_level(self.config.log_level),
@@ -174,26 +164,12 @@ class PiperLeader(Teleoperator):
         except Exception:
             logger.exception("Failed to disable %s after leader-role restore failure.", self)
 
-    def _configure_gripper_teaching_pendant(self) -> None:
-        if not self.config.sync_gripper:
-            return
-        self.arm.GripperTeachingPendantParamConfig(
-            self.config.gripper_teaching_range_per,
-            self.config.gripper_max_range_config,
-            self.config.gripper_teaching_friction,
-        )
-
     def _enter_manual_role(self) -> None:
-        self._reset_raw_leader_action()
-        if self.config.seed_manual_action_from_feedback:
-            self._seed_raw_leader_action_from_feedback()
-        self._configure_gripper_teaching_pendant()
         self._leader_joint_timestamp_before_switch = self._safe_message_timestamp(self.arm.GetArmJointCtrl)
         self._leader_gripper_timestamp_before_switch = (
             self._safe_message_timestamp(self.arm.GetArmGripperCtrl) if self.config.sync_gripper else 0.0
         )
         self._leader_frames_ready = False
-        self._drain_leader_bus()
         set_piper_role(self.arm, PIPER_ROLE_LEADER)
         self._manual_control_enabled = True
 
@@ -212,7 +188,7 @@ class PiperLeader(Teleoperator):
                 self._send_command_mode()
                 if not self._wait_enable(self.config.enable_timeout_s):
                     raise RuntimeError(
-                        f"[{self.port}] Piper leader did not enable after switching to follower role."
+                        f"[{self.config.port}] Piper leader did not enable after switching to follower role."
                     )
                 if self.config.sync_gripper:
                     self._set_gripper_enabled(True)
@@ -272,73 +248,6 @@ class PiperLeader(Teleoperator):
             return None
         return abs(milli_to_unit(getattr(gripper_state, "grippers_angle", 0)))
 
-    def _reset_raw_leader_action(self) -> None:
-        self._raw_leader_action = {}
-        self._raw_leader_joint_frames_seen = set()
-        self._raw_leader_gripper_seen = False
-
-    def _set_raw_leader_action(self, action: RobotAction) -> None:
-        self._raw_leader_action = dict(action)
-        self._raw_leader_joint_frames_seen = set(PIPER_LEADER_JOINT_FRAME_IDS)
-        self._raw_leader_gripper_seen = "gripper.pos" in action
-
-    def _ensure_leader_bus(self) -> Any:
-        if self._leader_bus is None:
-            import can
-
-            self._leader_bus = can.interface.Bus(channel=self.port, interface="socketcan", bitrate=1000000)
-        return self._leader_bus
-
-    def _drain_leader_bus(self) -> None:
-        if self._leader_bus is None:
-            return
-        for _ in range(PIPER_LEADER_CAN_DRAIN_LIMIT):
-            if self._leader_bus.recv(timeout=0.0) is None:
-                break
-
-    @staticmethod
-    def _decode_int32(data: bytes | bytearray | memoryview, offset: int) -> int:
-        return int.from_bytes(data[offset : offset + 4], byteorder="big", signed=True)
-
-    def _update_raw_leader_action(self, arbitration_id: int, data: bytes | bytearray | memoryview) -> None:
-        if arbitration_id in PIPER_LEADER_JOINT_FRAME_IDS and len(data) >= 8:
-            start_joint_idx = (arbitration_id - PIPER_LEADER_JOINT_FRAME_IDS[0]) * 2
-            for offset, joint_name in zip((0, 4), PIPER_JOINT_NAMES[start_joint_idx : start_joint_idx + 2], strict=True):
-                self._raw_leader_action[f"{joint_name}.pos"] = milli_to_unit(self._decode_int32(data, offset))
-            self._raw_leader_joint_frames_seen.add(arbitration_id)
-        elif arbitration_id == PIPER_LEADER_GRIPPER_FRAME_ID and len(data) >= 4:
-            self._raw_leader_action["gripper.pos"] = abs(milli_to_unit(self._decode_int32(data, 0)))
-            self._raw_leader_gripper_seen = True
-
-    def _try_read_raw_leader_can_action(self) -> RobotAction | None:
-        bus = self._ensure_leader_bus()
-        for _ in range(PIPER_LEADER_CAN_DRAIN_LIMIT):
-            msg = bus.recv(timeout=0.0)
-            if msg is None:
-                break
-            self._update_raw_leader_action(msg.arbitration_id, msg.data)
-
-        has_joints = self._raw_leader_joint_frames_seen.issuperset(PIPER_LEADER_JOINT_FRAME_IDS)
-        has_gripper = not self.config.sync_gripper or self._raw_leader_gripper_seen
-        if not (has_joints and has_gripper):
-            return None
-        if not self.config.sync_gripper:
-            self._raw_leader_action["gripper.pos"] = 0.0
-        return dict(self._raw_leader_action)
-
-    def _seed_raw_leader_action_from_feedback(self) -> None:
-        set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-        deadline = time.monotonic() + PIPER_FEEDBACK_SEED_TIMEOUT_S
-        while time.monotonic() < deadline:
-            action = self._read_joint_from_feedback()
-            gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else None
-            if action is not None and (not self.config.sync_gripper or gripper_pos is not None):
-                action["gripper.pos"] = gripper_pos if gripper_pos is not None else 0.0
-                self._set_raw_leader_action(action)
-                return
-            time.sleep(PIPER_ACTION_READ_POLL_S)
-        logger.debug("Could not seed %s manual action from feedback before entering leader role.", self)
-
     def _try_read_raw_action(self) -> RobotAction | None:
         if self._manual_control_enabled is True:
             joint_msg = self.arm.GetArmJointCtrl()
@@ -355,12 +264,10 @@ class PiperLeader(Teleoperator):
                     or gripper_timestamp > self._leader_gripper_timestamp_before_switch
                 )
                 if not (has_fresh_joints and has_fresh_gripper):
-                    return self._try_read_raw_leader_can_action()
+                    return None
                 self._leader_frames_ready = True
             action = self._read_joint_from_ctrl(joint_msg)
             gripper_pos = self._read_gripper_from_ctrl(gripper_msg) if gripper_msg is not None else None
-            if action is None or (self.config.sync_gripper and gripper_pos is None):
-                return self._try_read_raw_leader_can_action()
         elif self._manual_control_enabled is False:
             action = self._read_joint_from_feedback()
             gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else None
@@ -386,7 +293,7 @@ class PiperLeader(Teleoperator):
             if time.monotonic() >= deadline:
                 source = "leader control" if self._manual_control_enabled else "feedback"
                 raise RuntimeError(
-                    f"[{self.port}] no complete Piper {source} frame received within "
+                    f"[{self.config.port}] no complete Piper {source} frame received within "
                     f"{PIPER_ACTION_READ_TIMEOUT_S:.1f}s."
                 )
             time.sleep(PIPER_ACTION_READ_POLL_S)
@@ -423,9 +330,6 @@ class PiperLeader(Teleoperator):
                 if self.config.disable_on_disconnect:
                     self.arm.DisableArm(7)
         finally:
-            if self._leader_bus is not None:
-                self._leader_bus.shutdown()
-                self._leader_bus = None
             self.arm.DisconnectPort()
             self._is_connected = False
             self._manual_control_enabled = None

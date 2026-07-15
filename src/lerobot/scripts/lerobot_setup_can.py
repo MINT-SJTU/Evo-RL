@@ -46,7 +46,6 @@ from dataclasses import dataclass, field
 import draccus
 
 from lerobot.utils.import_utils import _can_available
-from lerobot.utils.piper_sdk import resolve_piper_can_port
 
 MOTOR_NAMES = {
     0x01: "joint_1",
@@ -72,7 +71,7 @@ class CANSetupConfig:
     speed_iterations: int = 100
 
     def get_interfaces(self) -> list[str]:
-        return [resolve_piper_can_port(i.strip()) for i in self.interfaces.split(",") if i.strip()]
+        return [i.strip() for i in self.interfaces.split(",") if i.strip()]
 
 
 def check_interface_status(interface: str) -> tuple[bool, str, bool]:

@@ -16,10 +16,8 @@
 
 from __future__ import annotations
 
-import subprocess
 import time
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 PIPER_JOINT_NAMES = (
@@ -35,7 +33,6 @@ PIPER_ACTION_KEYS = PIPER_JOINT_ACTION_KEYS + ("gripper.pos",)
 PIPER_ROLE_LEADER = 0xFA
 PIPER_ROLE_FOLLOWER = 0xFC
 PIPER_ROLE_SWITCH_SETTLE_S = 0.2
-SYS_CLASS_NET = Path("/sys/class/net")
 
 
 def milli_to_unit(value: float | int) -> float:
@@ -44,75 +41,6 @@ def milli_to_unit(value: float | int) -> float:
 
 def unit_to_milli(value: float | int) -> int:
     return int(round(float(value) * 1e3))
-
-
-def _read_udev_properties(interface: str) -> dict[str, str]:
-    interface_path = SYS_CLASS_NET / interface
-    try:
-        result = subprocess.run(
-            ["udevadm", "info", "-q", "property", "-p", str(interface_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return {}
-
-    if result.returncode != 0:
-        return {}
-
-    properties = {}
-    for line in result.stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            properties[key] = value
-    return properties
-
-
-def list_piper_can_interfaces() -> dict[str, str]:
-    """Return available socketcan interfaces keyed by stable USB-CAN identifiers."""
-    if not SYS_CLASS_NET.exists():
-        return {}
-
-    interfaces: dict[str, str] = {}
-    for interface_path in sorted(SYS_CLASS_NET.glob("can*")):
-        interface = interface_path.name
-        properties = _read_udev_properties(interface)
-        for key in ("ID_SERIAL_SHORT", "ID_SERIAL"):
-            value = properties.get(key)
-            if value:
-                interfaces[value] = interface
-    return interfaces
-
-
-def resolve_piper_can_port(port: str) -> str:
-    """Resolve a socketcan interface name or USB-CAN serial into the current canN name."""
-    port = port.strip()
-    if not port:
-        raise ValueError("Piper CAN port must not be empty.")
-
-    if (SYS_CLASS_NET / port).exists():
-        return port
-
-    interfaces_by_serial = list_piper_can_interfaces()
-    if port in interfaces_by_serial:
-        return interfaces_by_serial[port]
-
-    suffix_matches = {
-        interface for serial, interface in interfaces_by_serial.items() if serial.endswith(port)
-    }
-    if len(suffix_matches) == 1:
-        return suffix_matches.pop()
-
-    if not interfaces_by_serial or port.startswith("can"):
-        return port
-
-    available = ", ".join(
-        f"{serial}->{interface}" for serial, interface in sorted(interfaces_by_serial.items())
-    )
-    raise ValueError(
-        f"Could not resolve Piper CAN port or USB-CAN serial '{port}'. Available CAN serials: {available}"
-    )
 
 
 @lru_cache(maxsize=1)

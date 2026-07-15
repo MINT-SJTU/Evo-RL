@@ -175,14 +175,10 @@ class BiPiperLeader(Teleoperator):
         "sync_gripper",
         "gripper_effort_default",
         "gripper_status_code",
-        "gripper_teaching_range_per",
-        "gripper_max_range_config",
-        "gripper_teaching_friction",
         "command_speed_ratio",
         "command_high_follow",
         "mode_refresh_interval_s",
         "enable_timeout_s",
-        "seed_manual_action_from_feedback",
         "disable_on_disconnect",
     )
 
