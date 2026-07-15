@@ -623,8 +623,22 @@ def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
     [
         (
             BiPiperLeaderConfig(
-                left_arm_config=PiperLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
-                right_arm_config=PiperLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
+                left_arm_config=PiperLeaderConfigBase(
+                    port="can1",
+                    manual_control=True,
+                    sync_gripper=True,
+                    gripper_teaching_range_per=120,
+                    gripper_max_range_config=70,
+                    gripper_teaching_friction=8,
+                ),
+                right_arm_config=PiperLeaderConfigBase(
+                    port="can3",
+                    manual_control=True,
+                    sync_gripper=True,
+                    gripper_teaching_range_per=130,
+                    gripper_max_range_config=100,
+                    gripper_teaching_friction=9,
+                ),
                 process_isolation=False,
             ),
             BiPiperFollowerConfig(
@@ -640,8 +654,22 @@ def test_piper_follower_connect_sets_follower_role_without_restart(monkeypatch):
         ),
         (
             BiPiperXLeaderConfig(
-                left_arm_config=PiperXLeaderConfigBase(port="can1", manual_control=True, sync_gripper=True),
-                right_arm_config=PiperXLeaderConfigBase(port="can3", manual_control=True, sync_gripper=True),
+                left_arm_config=PiperXLeaderConfigBase(
+                    port="can1",
+                    manual_control=True,
+                    sync_gripper=True,
+                    gripper_teaching_range_per=120,
+                    gripper_max_range_config=70,
+                    gripper_teaching_friction=8,
+                ),
+                right_arm_config=PiperXLeaderConfigBase(
+                    port="can3",
+                    manual_control=True,
+                    sync_gripper=True,
+                    gripper_teaching_range_per=130,
+                    gripper_max_range_config=100,
+                    gripper_teaching_friction=9,
+                ),
                 process_isolation=False,
             ),
             BiPiperXFollowerConfig(
@@ -679,6 +707,12 @@ def test_bimanual_piper_leader_follower_roundtrip(
     assert isinstance(teleop.right_arm, right_teleop_cls)
     assert isinstance(robot.left_arm, left_robot_cls)
     assert isinstance(robot.right_arm, right_robot_cls)
+    assert teleop.left_arm.config.gripper_teaching_range_per == 120
+    assert teleop.left_arm.config.gripper_max_range_config == 70
+    assert teleop.left_arm.config.gripper_teaching_friction == 8
+    assert teleop.right_arm.config.gripper_teaching_range_per == 130
+    assert teleop.right_arm.config.gripper_max_range_config == 100
+    assert teleop.right_arm.config.gripper_teaching_friction == 9
 
     teleop.connect()
     robot.connect()
