@@ -53,6 +53,9 @@ class PiperLeader(Teleoperator):
         self.config = config
         self._is_connected = False
         self._manual_control_enabled: bool | None = None
+        self._manual_action: RobotAction | None = None
+        self._last_control_joint_timestamp = 0.0
+        self._last_control_gripper_timestamp = 0.0
         self._last_mode_refresh_t = 0.0
 
         interface_cls, _ = get_piper_sdk()
@@ -84,12 +87,14 @@ class PiperLeader(Teleoperator):
 
         self._is_connected = True
         self._manual_control_enabled = None
+        self._manual_action = None
         try:
             self.configure()
         except Exception:
             self.arm.DisconnectPort()
             self._is_connected = False
             self._manual_control_enabled = None
+            self._manual_action = None
             raise
 
         logger.info("%s connected.", self)
@@ -141,8 +146,27 @@ class PiperLeader(Teleoperator):
 
         self._manual_control_enabled = None
         if enabled:
-            set_piper_role(self.arm, PIPER_ROLE_LEADER)
+            self._manual_action = None
+            seed_action = None
+            try:
+                set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
+                seed_action = self._wait_for_feedback_action()
+            finally:
+                set_piper_role(self.arm, PIPER_ROLE_LEADER)
+
+            if seed_action is None:
+                raise RuntimeError(
+                    f"[{self.config.port}] no complete Piper feedback received while initializing "
+                    "manual control."
+                )
+
+            self._manual_action = seed_action
+            self._last_control_joint_timestamp = self.arm.GetArmJointCtrl().time_stamp
+            self._last_control_gripper_timestamp = (
+                self.arm.GetArmGripperCtrl().time_stamp if self.config.sync_gripper else 0.0
+            )
         else:
+            self._manual_action = None
             set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
             self._send_command_mode()
             if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
@@ -157,15 +181,6 @@ class PiperLeader(Teleoperator):
     def configure(self) -> None:
         self.set_manual_control(self.config.manual_control)
 
-    def _read_joint_from_ctrl(self) -> dict[str, float] | None:
-        message = self.arm.GetArmJointCtrl()
-        if message.time_stamp <= 0:
-            return None
-        return {
-            f"{joint_name}.pos": milli_to_unit(getattr(message.joint_ctrl, joint_name))
-            for joint_name in PIPER_JOINT_NAMES
-        }
-
     def _read_joint_from_feedback(self) -> dict[str, float] | None:
         message = self.arm.GetArmJointMsgs()
         if message.time_stamp <= 0:
@@ -175,22 +190,54 @@ class PiperLeader(Teleoperator):
             for joint_name in PIPER_JOINT_NAMES
         }
 
-    def _read_gripper_from_ctrl(self) -> float | None:
-        message = self.arm.GetArmGripperCtrl()
-        if message.time_stamp <= 0:
-            return None
-        return abs(milli_to_unit(message.gripper_ctrl.grippers_angle))
-
     def _read_gripper_from_feedback(self) -> float | None:
         message = self.arm.GetArmGripperMsgs()
         if message.time_stamp <= 0:
             return None
         return abs(milli_to_unit(message.gripper_state.grippers_angle))
 
+    def _wait_for_feedback_action(self) -> RobotAction | None:
+        deadline = time.monotonic() + self.config.enable_timeout_s
+        while True:
+            action = self._read_joint_from_feedback()
+            gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else 0.0
+            if action is not None and gripper_pos is not None:
+                action["gripper.pos"] = gripper_pos
+                return action
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+
+    def _read_manual_action(self) -> RobotAction:
+        if self._manual_action is None:
+            return {}
+
+        joint_message = self.arm.GetArmJointCtrl()
+        if joint_message.time_stamp > 0 and joint_message.time_stamp != self._last_control_joint_timestamp:
+            self._manual_action.update(
+                {
+                    f"{joint_name}.pos": milli_to_unit(getattr(joint_message.joint_ctrl, joint_name))
+                    for joint_name in PIPER_JOINT_NAMES
+                }
+            )
+            self._last_control_joint_timestamp = joint_message.time_stamp
+
+        if self.config.sync_gripper:
+            gripper_message = self.arm.GetArmGripperCtrl()
+            if (
+                gripper_message.time_stamp > 0
+                and gripper_message.time_stamp != self._last_control_gripper_timestamp
+            ):
+                self._manual_action["gripper.pos"] = abs(
+                    milli_to_unit(gripper_message.gripper_ctrl.grippers_angle)
+                )
+                self._last_control_gripper_timestamp = gripper_message.time_stamp
+
+        return dict(self._manual_action)
+
     def _read_raw_action(self) -> RobotAction:
         if self._manual_control_enabled is True:
-            action = self._read_joint_from_ctrl()
-            gripper_pos = self._read_gripper_from_ctrl() if self.config.sync_gripper else None
+            return self._read_manual_action()
         elif self._manual_control_enabled is False:
             action = self._read_joint_from_feedback()
             gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else None
@@ -237,6 +284,7 @@ class PiperLeader(Teleoperator):
             self.arm.DisconnectPort()
             self._is_connected = False
             self._manual_control_enabled = None
+            self._manual_action = None
             logger.info("%s disconnected.", self)
 
 

@@ -229,23 +229,23 @@ def test_piper_leader_follower_teleop_roundtrip(monkeypatch, teleop_cfg, robot_c
         sent = robot.send_action(action)
         obs = robot.get_observation()
 
-        assert robot.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
+        assert robot.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
         assert robot.arm.last_gripper == (
-            42000,
+            43000,
             robot_cfg.gripper_effort_default,
             robot_cfg.gripper_status_code,
             0x00,
         )
-        assert sent["joint_1.pos"] == 10.0
-        assert sent["gripper.pos"] == 42.0
+        assert sent["joint_1.pos"] == 11.0
+        assert sent["gripper.pos"] == 43.0
         assert obs["joint_1.pos"] == 11.0
         assert obs["gripper.pos"] == 43.0
 
         teleop.send_feedback(action)
         assert teleop.arm.role_commands[-1] == (0xFC, 0x00, 0x00, 0x00)
-        assert teleop.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
+        assert teleop.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
         assert teleop.arm.last_gripper == (
-            42000,
+            43000,
             teleop_cfg.gripper_effort_default,
             teleop_cfg.gripper_status_code,
             0x00,
@@ -346,16 +346,18 @@ def test_piper_leader_default_uses_hardware_leader_role(monkeypatch):
 
     teleop.connect()
     try:
-        assert teleop.arm.connect_calls[-1]["piper_init"] is False
-        assert teleop.arm.role_commands == [(0xFA, 0x00, 0x00, 0x00)]
+        assert teleop.arm.role_commands == [
+            (0xFC, 0x00, 0x00, 0x00),
+            (0xFA, 0x00, 0x00, 0x00),
+        ]
         assert teleop.arm.enable_calls == 0
         assert teleop.arm.mode_commands == []
         assert teleop.arm.gripper_calls == []
         assert teleop.arm.joint_mit_calls == []
         action = teleop.get_action()
-        assert action["joint_1.pos"] == 10.0
-        assert action["joint_2.pos"] == 20.0
-        assert action["gripper.pos"] == 42.0
+        assert action["joint_1.pos"] == 11.0
+        assert action["joint_2.pos"] == 21.0
+        assert action["gripper.pos"] == 43.0
     finally:
         teleop.disconnect()
 
@@ -408,31 +410,35 @@ def test_piper_leader_policy_mode_reads_feedback(monkeypatch):
         teleop.disconnect()
 
 
-def test_piper_leader_returns_empty_action_without_manual_frames(monkeypatch):
+def test_piper_leader_uses_feedback_seed_without_manual_frames(monkeypatch):
     patch_fake_sdk(monkeypatch)
     teleop = PiperLeader(PiperLeaderConfig(port="can1"))
+    teleop.arm._joint_ctrl.time_stamp = 0.0
+    teleop.arm._gripper_ctrl.time_stamp = 0.0
     teleop.connect()
     try:
-        teleop.arm._joint_ctrl.time_stamp = 0.0
-        assert teleop.get_action() == {}
+        action = teleop.get_action()
+        assert action["joint_1.pos"] == 11.0
+        assert action["joint_2.pos"] == 21.0
+        assert action["gripper.pos"] == 43.0
     finally:
         teleop.disconnect()
 
 
-def test_piper_leader_failed_policy_switch_restores_manual_role(monkeypatch):
+def test_piper_leader_failed_policy_switch_leaves_mode_unknown(monkeypatch):
     patch_fake_sdk(monkeypatch)
     teleop = PiperLeader(PiperLeaderConfig(port="can1", enable_timeout_s=0.0))
     teleop.connect()
     try:
         with pytest.raises(RuntimeError, match="did not enable"):
             teleop.set_manual_control(False)
-        assert teleop._manual_control_enabled is True
-        assert teleop.arm.role_commands[-1][0] == 0xFA
+        assert teleop._manual_control_enabled is None
+        assert teleop.arm.role_commands[-1][0] == 0xFC
     finally:
         teleop.disconnect()
 
 
-def test_piper_leader_disconnect_disables_if_role_restore_fails(monkeypatch):
+def test_piper_leader_disconnect_cleans_up_if_role_restore_fails(monkeypatch):
     patch_fake_sdk(monkeypatch)
     teleop = PiperLeader(PiperLeaderConfig(port="can1", manual_control=False))
     teleop.connect()
@@ -444,7 +450,7 @@ def test_piper_leader_disconnect_disables_if_role_restore_fails(monkeypatch):
 
     with pytest.raises(RuntimeError, match="leader role restore failed"):
         teleop.disconnect()
-    assert teleop.arm.disable_calls == 1
+    assert teleop.arm.disable_calls == 0
     assert not teleop.arm.connected
 
 
@@ -557,15 +563,15 @@ def test_bimanual_piper_leader_follower_roundtrip(
         sent = robot.send_action(action)
         obs = robot.get_observation()
 
-        assert robot.left_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-        assert robot.right_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-        assert robot.left_arm.arm.last_gripper[0] == 42000
-        assert robot.right_arm.arm.last_gripper[0] == 42000
+        assert robot.left_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+        assert robot.right_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+        assert robot.left_arm.arm.last_gripper[0] == 43000
+        assert robot.right_arm.arm.last_gripper[0] == 43000
 
-        assert sent["left_joint_1.pos"] == 10.0
-        assert sent["right_joint_1.pos"] == 10.0
-        assert sent["left_gripper.pos"] == 42.0
-        assert sent["right_gripper.pos"] == 42.0
+        assert sent["left_joint_1.pos"] == 11.0
+        assert sent["right_joint_1.pos"] == 11.0
+        assert sent["left_gripper.pos"] == 43.0
+        assert sent["right_gripper.pos"] == 43.0
         assert obs["left_joint_1.pos"] == 11.0
         assert obs["right_joint_1.pos"] == 11.0
         assert obs["left_gripper.pos"] == 43.0
@@ -574,10 +580,10 @@ def test_bimanual_piper_leader_follower_roundtrip(
         teleop.send_feedback(action)
         assert teleop.left_arm.arm.role_commands[-1][0] == 0xFC
         assert teleop.right_arm.arm.role_commands[-1][0] == 0xFC
-        assert teleop.left_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-        assert teleop.right_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-        assert teleop.left_arm.arm.last_gripper[0] == 42000
-        assert teleop.right_arm.arm.last_gripper[0] == 42000
+        assert teleop.left_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+        assert teleop.right_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+        assert teleop.left_arm.arm.last_gripper[0] == 43000
+        assert teleop.right_arm.arm.last_gripper[0] == 43000
     finally:
         teleop.disconnect()
         robot.disconnect()
@@ -585,7 +591,7 @@ def test_bimanual_piper_leader_follower_roundtrip(
     assert teleop.right_arm.arm.role_commands[-1][0] == 0xFA
 
 
-def test_bimanual_piper_get_action_returns_available_side(monkeypatch):
+def test_bimanual_piper_get_action_uses_feedback_seed_for_silent_side(monkeypatch):
     patch_fake_sdk(monkeypatch)
 
     teleop = make_teleoperator_from_config(
@@ -601,7 +607,7 @@ def test_bimanual_piper_get_action_returns_available_side(monkeypatch):
         teleop.right_arm.arm._joint_ctrl.time_stamp = 0.0
         action = teleop.get_action()
         assert "left_joint_1.pos" in action
-        assert "right_joint_1.pos" not in action
+        assert "right_joint_1.pos" in action
     finally:
         teleop.disconnect()
 
@@ -663,10 +669,10 @@ def test_bimanual_piper_teleop_loop_smoke(monkeypatch):
         teleop.disconnect()
         robot.disconnect()
 
-    assert robot.left_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-    assert robot.right_arm.arm.last_joint == (10000, 20000, 30000, 40000, 50000, 60000)
-    assert robot.left_arm.arm.last_gripper[0] == 42000
-    assert robot.right_arm.arm.last_gripper[0] == 42000
+    assert robot.left_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+    assert robot.right_arm.arm.last_joint == (11000, 21000, 31000, 41000, 51000, 61000)
+    assert robot.left_arm.arm.last_gripper[0] == 43000
+    assert robot.right_arm.arm.last_gripper[0] == 43000
 
 
 def test_bimanual_piper_leader_uses_process_proxy_by_default(monkeypatch):
