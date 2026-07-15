@@ -190,7 +190,6 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_sdk_utils, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
-    monkeypatch.setattr(piper_sdk_utils, "PIPER_ROLE_SWITCH_SETTLE_S", 0.0)
 
 
 @pytest.mark.parametrize(

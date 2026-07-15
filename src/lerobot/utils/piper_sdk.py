@@ -32,7 +32,6 @@ PIPER_JOINT_ACTION_KEYS = tuple(f"{joint}.pos" for joint in PIPER_JOINT_NAMES)
 PIPER_ACTION_KEYS = PIPER_JOINT_ACTION_KEYS + ("gripper.pos",)
 PIPER_ROLE_LEADER = 0xFA
 PIPER_ROLE_FOLLOWER = 0xFC
-PIPER_ROLE_SWITCH_SETTLE_S = 0.2
 
 
 def milli_to_unit(value: float | int) -> float:
@@ -82,5 +81,3 @@ def wait_enable_piper(arm: Any, timeout_s: float, retry_interval_s: float = 0.2)
 
 def set_piper_role(arm: Any, role: int) -> None:
     arm.MasterSlaveConfig(role, 0x00, 0x00, 0x00)
-    if PIPER_ROLE_SWITCH_SETTLE_S > 0:
-        time.sleep(PIPER_ROLE_SWITCH_SETTLE_S)
