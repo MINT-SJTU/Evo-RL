@@ -52,7 +52,6 @@ class PiperFollower(Robot):
         self.config = config
         self._is_connected = False
         self._last_mode_refresh_t = 0.0
-        self._teleop_send_only_mode = False
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
@@ -83,22 +82,12 @@ class PiperFollower(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self._is_connected and (
-            self._teleop_send_only_mode or all(cam.is_connected for cam in self.cameras.values())
-        )
-
-    def set_teleop_send_only_mode(self, enabled: bool) -> None:
-        if self._is_connected:
-            raise RuntimeError("teleop send-only mode must be configured before connecting the robot.")
-        self._teleop_send_only_mode = enabled
+        return self._is_connected and all(cam.is_connected for cam in self.cameras.values())
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
-        self.arm.ConnectPort(
-            piper_init=not self._teleop_send_only_mode,
-            start_thread=not self._teleop_send_only_mode,
-        )
+        self.arm.ConnectPort()
         connected_cameras = []
         try:
             if self.config.startup_sleep_s > 0:
@@ -106,16 +95,12 @@ class PiperFollower(Robot):
 
             self._is_connected = True
             self.configure()
-            if self.config.enable_on_connect:
-                if self._teleop_send_only_mode:
-                    self.arm.EnablePiper()
-                elif not self._wait_enable(self.config.enable_timeout_s):
-                    logger.warning("Piper follower did not report enabled state before timeout.")
+            if self.config.enable_on_connect and not self._wait_enable(self.config.enable_timeout_s):
+                logger.warning("Piper follower did not report enabled state before timeout.")
 
-            if not self._teleop_send_only_mode:
-                for cam in self.cameras.values():
-                    cam.connect()
-                    connected_cameras.append(cam)
+            for cam in self.cameras.values():
+                cam.connect()
+                connected_cameras.append(cam)
         except Exception:
             self.arm.DisconnectPort()
             for cam in connected_cameras:
@@ -168,10 +153,6 @@ class PiperFollower(Robot):
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
-        if self._teleop_send_only_mode:
-            raise RuntimeError(
-                f"{self} was connected in teleop send-only mode, so follower observations are unavailable."
-            )
         obs: dict[str, float] = self._read_raw_observation()
 
         for cam_key, cam in self.cameras.items():
@@ -216,8 +197,7 @@ class PiperFollower(Robot):
         finally:
             self.arm.DisconnectPort()
             for cam in self.cameras.values():
-                if cam.is_connected:
-                    cam.disconnect()
+                cam.disconnect()
             self._is_connected = False
             logger.info("%s disconnected.", self)
 
