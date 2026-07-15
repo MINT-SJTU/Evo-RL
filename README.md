@@ -206,8 +206,6 @@ If needed, you can also use temporary device paths (for example `/dev/ttyACM*` a
 
 #### AgileX (PiPER/PiPER-X)
 
-PiPER leader arms require firmware S-V1.8-9 or newer for runtime role switching. Manual control uses the hardware leader role (0xFA), while policy control switches the same arm to follower mode (0xFC). A PiPER follower is set directly to follower mode (0xFC) when it connects; no power cycle is required.
-
 For PiPER setup, PiPER uses CAN interfaces instead of serial ports.
 So first run `lerobot-setup-can` to confirm CAN interfaces are available:
 
