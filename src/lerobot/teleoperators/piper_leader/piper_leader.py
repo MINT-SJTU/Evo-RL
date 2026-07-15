@@ -86,15 +86,9 @@ class PiperLeader(Teleoperator):
         try:
             self.configure()
         except Exception:
-            try:
-                self.set_manual_control(True)
-            except Exception:
-                logger.exception("Failed to restore %s to leader role after connect error.", self)
-                self._disable_after_role_restore_failure()
-            finally:
-                self.arm.DisconnectPort()
-                self._is_connected = False
-                self._manual_control_enabled = None
+            self.arm.DisconnectPort()
+            self._is_connected = False
+            self._manual_control_enabled = None
             raise
 
         logger.info("%s connected.", self)
@@ -119,9 +113,6 @@ class PiperLeader(Teleoperator):
         if now - self._last_mode_refresh_t >= interval_s:
             self._send_command_mode()
 
-    def _wait_enable(self, timeout_s: float) -> bool:
-        return wait_enable_piper(self.arm, timeout_s)
-
     def _send_gripper_ctrl(self, gripper_pos_raw: int, enabled: bool) -> None:
         self.arm.GripperCtrl(
             gripper_pos_raw,
@@ -145,16 +136,6 @@ class PiperLeader(Teleoperator):
     def _message_timestamp(message: Any) -> float:
         return float(getattr(message, "time_stamp", 0.0) or 0.0)
 
-    def _disable_after_role_restore_failure(self) -> None:
-        try:
-            self.arm.DisableArm(7)
-        except Exception:
-            logger.exception("Failed to disable %s after leader-role restore failure.", self)
-
-    def _enter_manual_role(self) -> None:
-        set_piper_role(self.arm, PIPER_ROLE_LEADER)
-        self._manual_control_enabled = True
-
     def set_manual_control(self, enabled: bool) -> None:
         if not self._is_connected:
             raise RuntimeError(f"{self} is not connected.")
@@ -163,25 +144,18 @@ class PiperLeader(Teleoperator):
 
         self._manual_control_enabled = None
         if enabled:
-            self._enter_manual_role()
+            set_piper_role(self.arm, PIPER_ROLE_LEADER)
         else:
-            try:
-                set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-                self._send_command_mode()
-                if not self._wait_enable(self.config.enable_timeout_s):
-                    raise RuntimeError(
-                        f"[{self.config.port}] Piper leader did not enable after switching to follower role."
-                    )
-                if self.config.sync_gripper:
-                    self._set_gripper_enabled(True)
-                self._manual_control_enabled = False
-            except Exception:
-                try:
-                    self._enter_manual_role()
-                except Exception:
-                    self._manual_control_enabled = None
-                    logger.exception("Failed to restore %s to leader role after policy-switch error.", self)
-                raise
+            set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
+            self._send_command_mode()
+            if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
+                raise RuntimeError(
+                    f"[{self.config.port}] Piper leader did not enable after switching to follower role."
+                )
+            if self.config.sync_gripper:
+                self._set_gripper_enabled(True)
+
+        self._manual_control_enabled = enabled
 
     def configure(self) -> None:
         self.set_manual_control(self.config.manual_control)
@@ -275,14 +249,9 @@ class PiperLeader(Teleoperator):
     @check_if_not_connected
     def disconnect(self) -> None:
         try:
-            try:
-                self.set_manual_control(True)
-            except Exception:
-                self._disable_after_role_restore_failure()
-                raise
-            else:
-                if self.config.disable_on_disconnect:
-                    self.arm.DisableArm(7)
+            self.set_manual_control(True)
+            if self.config.disable_on_disconnect:
+                self.arm.DisableArm(7)
         finally:
             self.arm.DisconnectPort()
             self._is_connected = False
