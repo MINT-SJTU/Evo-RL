@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class PiperLeader(Teleoperator):
-    """PiPER teleoperator with runtime role switching for S-V1.8-9 or newer firmware."""
+    """Piper leader arm used as a teleoperator through Piper SDK CAN messages."""
 
     config_class = PiperLeaderConfig
     name = "piper_leader"
@@ -77,7 +77,7 @@ class PiperLeader(Teleoperator):
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
-        self.arm.ConnectPort(piper_init=False)
+        self.arm.ConnectPort()
         if self.config.startup_sleep_s > 0:
             time.sleep(self.config.startup_sleep_s)
 
