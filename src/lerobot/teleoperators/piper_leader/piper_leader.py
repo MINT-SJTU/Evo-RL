@@ -39,8 +39,6 @@ from ..teleoperator import Teleoperator
 from .config_piper_leader import PiperLeaderConfig, PiperXLeaderConfig
 
 logger = logging.getLogger(__name__)
-PIPER_ACTION_READ_TIMEOUT_S = 5.0
-PIPER_ACTION_READ_POLL_S = 0.01
 
 
 class PiperLeader(Teleoperator):
@@ -55,9 +53,6 @@ class PiperLeader(Teleoperator):
         self._is_connected = False
         self._manual_control_enabled: bool | None = None
         self._last_mode_refresh_t = 0.0
-        self._leader_joint_timestamp_before_switch = 0.0
-        self._leader_gripper_timestamp_before_switch = 0.0
-        self._leader_frames_ready = False
 
         interface_cls, _ = get_piper_sdk()
         self.arm = interface_cls(
@@ -88,7 +83,6 @@ class PiperLeader(Teleoperator):
 
         self._is_connected = True
         self._manual_control_enabled = None
-        self._leader_frames_ready = False
         try:
             self.configure()
         except Exception:
@@ -151,13 +145,6 @@ class PiperLeader(Teleoperator):
     def _message_timestamp(message: Any) -> float:
         return float(getattr(message, "time_stamp", 0.0) or 0.0)
 
-    def _safe_message_timestamp(self, getter: Any) -> float:
-        try:
-            return self._message_timestamp(getter())
-        except Exception:
-            logger.debug("Could not read PiPER control-frame timestamp before role switch.", exc_info=True)
-            return 0.0
-
     def _disable_after_role_restore_failure(self) -> None:
         try:
             self.arm.DisableArm(7)
@@ -165,11 +152,6 @@ class PiperLeader(Teleoperator):
             logger.exception("Failed to disable %s after leader-role restore failure.", self)
 
     def _enter_manual_role(self) -> None:
-        self._leader_joint_timestamp_before_switch = self._safe_message_timestamp(self.arm.GetArmJointCtrl)
-        self._leader_gripper_timestamp_before_switch = (
-            self._safe_message_timestamp(self.arm.GetArmGripperCtrl) if self.config.sync_gripper else 0.0
-        )
-        self._leader_frames_ready = False
         set_piper_role(self.arm, PIPER_ROLE_LEADER)
         self._manual_control_enabled = True
 
@@ -204,9 +186,8 @@ class PiperLeader(Teleoperator):
     def configure(self) -> None:
         self.set_manual_control(self.config.manual_control)
 
-    def _read_joint_from_ctrl(self, joint_ctrl_msg: Any | None = None) -> dict[str, float] | None:
-        if joint_ctrl_msg is None:
-            joint_ctrl_msg = self.arm.GetArmJointCtrl()
+    def _read_joint_from_ctrl(self) -> dict[str, float] | None:
+        joint_ctrl_msg = self.arm.GetArmJointCtrl()
         if getattr(joint_ctrl_msg, "time_stamp", 0.0) <= 0:
             return None
         joint_ctrl = getattr(joint_ctrl_msg, "joint_ctrl", None)
@@ -229,9 +210,8 @@ class PiperLeader(Teleoperator):
             for joint_name in PIPER_JOINT_NAMES
         }
 
-    def _read_gripper_from_ctrl(self, gripper_ctrl_msg: Any | None = None) -> float | None:
-        if gripper_ctrl_msg is None:
-            gripper_ctrl_msg = self.arm.GetArmGripperCtrl()
+    def _read_gripper_from_ctrl(self) -> float | None:
+        gripper_ctrl_msg = self.arm.GetArmGripperCtrl()
         if getattr(gripper_ctrl_msg, "time_stamp", 0.0) <= 0:
             return None
         gripper_ctrl = getattr(gripper_ctrl_msg, "gripper_ctrl", None)
@@ -250,24 +230,8 @@ class PiperLeader(Teleoperator):
 
     def _try_read_raw_action(self) -> RobotAction | None:
         if self._manual_control_enabled is True:
-            joint_msg = self.arm.GetArmJointCtrl()
-            joint_timestamp = self._message_timestamp(joint_msg)
-            gripper_msg = self.arm.GetArmGripperCtrl() if self.config.sync_gripper else None
-            gripper_timestamp = self._message_timestamp(gripper_msg) if gripper_msg is not None else 0.0
-            if not self._leader_frames_ready:
-                joint_hz = float(getattr(joint_msg, "Hz", 0.0) or 0.0)
-                has_fresh_joints = (
-                    joint_timestamp > self._leader_joint_timestamp_before_switch and joint_hz > 0.0
-                )
-                has_fresh_gripper = (
-                    not self.config.sync_gripper
-                    or gripper_timestamp > self._leader_gripper_timestamp_before_switch
-                )
-                if not (has_fresh_joints and has_fresh_gripper):
-                    return None
-                self._leader_frames_ready = True
-            action = self._read_joint_from_ctrl(joint_msg)
-            gripper_pos = self._read_gripper_from_ctrl(gripper_msg) if gripper_msg is not None else None
+            action = self._read_joint_from_ctrl()
+            gripper_pos = self._read_gripper_from_ctrl() if self.config.sync_gripper else None
         elif self._manual_control_enabled is False:
             action = self._read_joint_from_feedback()
             gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else None
@@ -285,18 +249,8 @@ class PiperLeader(Teleoperator):
         return action
 
     def _read_raw_action(self) -> RobotAction:
-        deadline = time.monotonic() + PIPER_ACTION_READ_TIMEOUT_S
-        while True:
-            action = self._try_read_raw_action()
-            if action is not None:
-                return action
-            if time.monotonic() >= deadline:
-                source = "leader control" if self._manual_control_enabled else "feedback"
-                raise RuntimeError(
-                    f"[{self.config.port}] no complete Piper {source} frame received within "
-                    f"{PIPER_ACTION_READ_TIMEOUT_S:.1f}s."
-                )
-            time.sleep(PIPER_ACTION_READ_POLL_S)
+        action = self._try_read_raw_action()
+        return action if action is not None else {}
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:

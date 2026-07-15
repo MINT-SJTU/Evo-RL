@@ -140,8 +140,6 @@ class FakePiperInterface:
             self._arm_status.arm_status.ctrl_mode = 0x01
         elif args and args[0] == 0xFA:
             self._arm_status.arm_status.ctrl_mode = 0x06
-            self._joint_ctrl.time_stamp += 1.0
-            self._gripper_ctrl.time_stamp += 1.0
 
     def EnablePiper(self):
         self.enable_calls += 1
@@ -193,7 +191,6 @@ def patch_fake_sdk(monkeypatch):
     monkeypatch.setattr(piper_follower_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_leader_module, "get_piper_sdk", fake_loader)
     monkeypatch.setattr(piper_sdk_utils, "PIPER_ROLE_SWITCH_SETTLE_S", 0.0)
-    monkeypatch.setattr(piper_leader_module, "PIPER_ACTION_READ_TIMEOUT_S", 0.03)
 
 
 @pytest.mark.parametrize(
@@ -410,19 +407,13 @@ def test_piper_leader_policy_mode_reads_feedback(monkeypatch):
         teleop.disconnect()
 
 
-def test_piper_leader_requires_fresh_complete_manual_frame(monkeypatch):
+def test_piper_leader_returns_empty_action_without_manual_frames(monkeypatch):
     patch_fake_sdk(monkeypatch)
     teleop = PiperLeader(PiperLeaderConfig(port="can1"))
     teleop.connect()
     try:
-        teleop._leader_frames_ready = False
-        teleop._leader_joint_timestamp_before_switch = teleop.arm._joint_ctrl.time_stamp
-        teleop._leader_gripper_timestamp_before_switch = teleop.arm._gripper_ctrl.time_stamp
-        teleop.arm._joint_ctrl.time_stamp += 1.0
-        teleop.arm._joint_ctrl.Hz = 0.0
-        teleop.arm._gripper_ctrl.time_stamp += 1.0
-        with pytest.raises(RuntimeError, match="no complete Piper leader control frame"):
-            teleop.get_action()
+        teleop.arm._joint_ctrl.time_stamp = 0.0
+        assert teleop.get_action() == {}
     finally:
         teleop.disconnect()
 
@@ -436,24 +427,6 @@ def test_piper_leader_failed_policy_switch_restores_manual_role(monkeypatch):
             teleop.set_manual_control(False)
         assert teleop._manual_control_enabled is True
         assert teleop.arm.role_commands[-1][0] == 0xFA
-    finally:
-        teleop.disconnect()
-
-
-def test_piper_leader_role_restore_ignores_timestamp_read_errors(monkeypatch):
-    patch_fake_sdk(monkeypatch)
-    teleop = PiperLeader(PiperLeaderConfig(port="can1"))
-
-    def fail_timestamp_read():
-        raise RuntimeError("timestamp unavailable")
-
-    monkeypatch.setattr(teleop.arm, "GetArmJointCtrl", fail_timestamp_read)
-    monkeypatch.setattr(teleop.arm, "GetArmGripperCtrl", fail_timestamp_read)
-
-    teleop.connect()
-    try:
-        assert teleop.arm.role_commands[-1][0] == 0xFA
-        assert teleop._manual_control_enabled is True
     finally:
         teleop.disconnect()
 
@@ -611,7 +584,7 @@ def test_bimanual_piper_leader_follower_roundtrip(
     assert teleop.right_arm.arm.role_commands[-1][0] == 0xFA
 
 
-def test_bimanual_piper_get_action_requires_both_sides(monkeypatch):
+def test_bimanual_piper_get_action_returns_available_side(monkeypatch):
     patch_fake_sdk(monkeypatch)
 
     teleop = make_teleoperator_from_config(
@@ -624,13 +597,10 @@ def test_bimanual_piper_get_action_requires_both_sides(monkeypatch):
 
     teleop.connect()
     try:
-        teleop.right_arm._leader_frames_ready = False
-        teleop.right_arm._leader_joint_timestamp_before_switch = teleop.right_arm.arm._joint_ctrl.time_stamp
-        teleop.right_arm._leader_gripper_timestamp_before_switch = (
-            teleop.right_arm.arm._gripper_ctrl.time_stamp
-        )
-        with pytest.raises(RuntimeError, match=r"\[can3\].*leader control frame"):
-            teleop.get_action()
+        teleop.right_arm.arm._joint_ctrl.time_stamp = 0.0
+        action = teleop.get_action()
+        assert "left_joint_1.pos" in action
+        assert "right_joint_1.pos" not in action
     finally:
         teleop.disconnect()
 
