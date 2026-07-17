@@ -46,6 +46,7 @@ from pathlib import Path
 from pprint import pformat
 
 from lerobot.configs import parser
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import (
     make_default_robot_action_processor,
@@ -53,6 +54,8 @@ from lerobot.processor import (
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
+    bi_s1_direct,
+    bi_s1_follower,
     bi_openarm_follower,
     bi_piper_follower,
     bi_so_follower,

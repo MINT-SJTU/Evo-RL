@@ -74,6 +74,8 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_openarm_follower,
     bi_piper_follower,
+    bi_s1_direct,
+    bi_s1_follower,
     bi_so_follower,
     earthrover_mini_plus,
     hope_jr,
@@ -82,6 +84,8 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     piper_follower,
+    s1_direct,
+    s1_follower,
     reachy2,
     so_follower,
     unitree_g1 as unitree_g1_robot,
@@ -91,6 +95,8 @@ from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_piper_leader,
+    bi_s1_direct_teleop,
+    bi_s1_leader,
     bi_so_leader,
     gamepad,
     homunculus,
@@ -100,6 +106,8 @@ from lerobot.teleoperators import (  # noqa: F401
     omx_leader,
     openarm_leader,
     piper_leader,
+    s1_direct_teleop,
+    s1_leader,
     reachy2_teleoperator,
     so_leader,
     unitree_g1,
@@ -267,8 +275,9 @@ def teleoperate(cfg: TeleoperateConfig):
     )
     _configure_robot_for_lightweight_teleop(robot, should_fetch_obs)
 
-    teleop.connect()
+    # bi_s1_direct: robot 必须先连接以注册共享 arm 实例
     robot.connect()
+    teleop.connect()
 
     try:
         teleop_loop(

@@ -188,8 +188,8 @@ class RealSenseCamera(Camera):
         self._configure_capture_settings()
         self._start_read_thread()
 
-        # NOTE(Steven/Caroline): Enforcing at least one second of warmup as RS cameras need a bit of time before the first read. If we don't wait, the first read from the warmup will raise.
-        self.warmup_s = max(self.warmup_s, 1)
+        # NOTE(Steven/Caroline): Enforcing at least three seconds of warmup as RS cameras need a bit of time before the first read. If we don't wait, the first read from the warmup will raise.
+        self.warmup_s = max(self.warmup_s, 3)
 
         start_time = time.time()
         while time.time() - start_time < self.warmup_s:
