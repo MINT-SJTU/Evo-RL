@@ -591,4 +591,4 @@ Apache-2.0. See [LICENSE](./LICENSE).
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/image?repos=MINT-SJTU/Evo-RL&type=date&legend=top-left)](https://www.star-history.com/?repos=MINT-SJTU%2FEvo-RL&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=MINT-SJTU/Evo-RL&type=date&legend=top-left)](https://star-history.dera.page/#MINT-SJTU/Evo-RL&type=date&legend=top-left)
