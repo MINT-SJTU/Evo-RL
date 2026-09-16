@@ -19,6 +19,7 @@ class ValueInferenceDatasetConfig:
     episodes: list[int] | None = None
     revision: str | None = None
     download_videos: bool = True
+    video_backend: str | None = None
     success_field: str = "episode_success"
     default_success: str = "failure"
 

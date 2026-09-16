@@ -1,0 +1,1490 @@
+# EVO-RL Adaptation for Theseus S1 Robotic Arm Operation Guide
+
+Based on the existing **EVO-RL** framework, the adaptation for the **Theseus S1 robotic arm** has been completed.
+
+Through this adaptation, Theseus S1 users (whether operating a single arm or dual arms) can now seamlessly integrate into the EVO-RL closed-loop reinforcement learning workflow. This guide will walk you through the entire process: from initial hardware configuration, multi-view camera mounting, and expert data collection, to Value Function training, Advantage-Conditioned Policy (ACP) fine-tuning, and finally, model evaluation and deployment with a "Human-in-the-loop" mechanism.
+
+> **Applicable Hardware:** The Theseus S1 robotic arm currently uses **V2** version **USB serial** communication. **V1 / V2 Differences:** The V1 version used CAN interface for the main arm, while the V2 version uses USB serial. We have fully transitioned to the V2 version; the V1 version is no longer supported.
+>
+> **Hardware Calibration Note:** The Theseus S1 robotic arm is pre-calibrated at the underlying SDK level. Therefore, when using the EVO-RL framework, **no secondary calibration is required at the framework level** (you will see that the `--robot.require_calibration=false` and `--teleop.require_calibration=false` parameters have been explicitly set to `false` in all subsequent startup commands).
+
+## Environment Setup
+
+1. **Clone the Project**
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/YHRG-Robotics/Evo-RL-theseus.git
+```
+
+```bash
+cd Evo-RL-theseus
+```
+
+2. **Install Build Toolchain (Linux)**
+```bash
+sudo apt update
+sudo apt install cmake build-essential
+```
+
+3. **Create Virtual Environment**
+```bash
+conda create -y -n evo-rl python=3.10
+conda activate evo-rl
+```
+
+4. **Clone and Install SDK**
+You can clone and run the installation script from any directory (it does not have to be inside this project folder):
+```bash
+git clone https://github.com/YHRG-Robotics/S1_SDK_V2.git
+cd S1_SDK_V2
+./install.sh
+```
+
+5. **Install Project Dependencies**
+Return to the `Evo-RL-theseus` folder and install the dependencies for the model you wish to train:
+```bash
+# For example, if you want to train SmolVLA
+pip install -e ".[smolvla]"
+
+# Or, if you want to train the pi05 model
+pip install -e ".[pi]"
+```
+
+For more model support, please check:
+For setup details and platform-specific dependencies, follow the[official LeRobot configuration guide](https://huggingface.co/docs/lerobot/installation).
+
+## Hardware Setup
+
+### S1 Series (V1 / V2) Version Differences
+
+> **[!] Critical Version Differences:**
+> 
+> - **V1 Version**: Uses **CAN** interface for communication (Legacy version, no longer in use).
+>     
+> - **V2 Version**: Uses **USB** serial for communication (e.g., `/dev/ttyUSB0`, `/dev/ttyUSB1`). All commands below are based on V2.
+
+### Hardware Types and Configuration
+
+The Theseus S1 hardware is categorized into three types:
+- **leader**: The master arm, used by human operators for teleoperation.
+- **follower**: The slave arm, the entity that executes tasks.
+- **mix**: A combo arm (integrated master-slave).
+
+#### Compatibility and End-Effector (`end_effector`) Configuration:
+
+1. **Master-Slave Mode (Leader + Follower)**:
+   - When using **leader** as the master arm, it can be paired with either a **follower** or a **mix** arm as the slave.
+   - If the slave arm is a **follower**, its `end_effector` must be set to `gripper`.
+   - If the slave arm is a **mix** arm, its `end_effector` must be set to `mix`.
+
+2. **Combo Arm Scheme (Integrated Master-Slave)**:
+   - Uses only the combo arm for operation (i.e., "one arm does it all," no extra leader arm required).
+   - In this setup, the `end_effector` for both `robot` (robot side) and `teleop` (teleoperation side) must be set to `mix`.
+
+> [!NOTE]
+> **Robotic Arm Connection Order:** After unplugging all four arms, please plug their USBs into the computer in the following order: **left follower, right follower, left leader, right leader**. The system default mappings are **USB0, USB1, USB2, USB3**, respectively (i.e., left follower = `/dev/ttyUSB0`, right follower = `/dev/ttyUSB1`, left leader = `/dev/ttyUSB2`, right leader = `/dev/ttyUSB3`).
+
+### System Environment and Device Check
+
+Before running any commands, you must grant appropriate read/write permissions to the USB/Video ports:
+
+```Bash
+# Check if devices are mounted successfully
+ls -l /dev/ttyUSB*
+ls -l /dev/video*
+
+# Grant permissions for serial ports and cameras
+sudo chmod 666 /dev/ttyUSB*
+sudo chmod 666 /dev/video*
+```
+
+**Parameter Notes:**
+- `<LEFT_FOLLOWER_USB_PORT>` / `<RIGHT_FOLLOWER_USB_PORT>`: The corresponding USB serial device name (e.g., `/dev/ttyUSB0`, `/dev/ttyUSB1`).
+- For additional USB master devices, use the same `/dev/ttyUSB*` device naming convention.
+
+### Camera Configuration and Testing
+
+Before data collection, verify the camera index numbers. You can use the following command to find and test your cameras:
+
+Install the Intel RealSense camera driver first:
+```bash
+sudo apt install librealsense2-dkms librealsense2-utils
+```
+```bash
+pip install pyrealsense2
+```
+Then run the following command to view the camera feeds:
+```Bash
+lerobot-find-cameras realsense --output-dir=./outputs/cam_test_rs
+```
+
+Retrieve the **Id** (12-digit serial number, e.g., `352122272634`) from the console output.
+To verify the physical position associated with the ID, inspect the images exported in the directory (e.g., `./outputs/cam_test_rs/realsense_XXXX.png`) and identify the left arm, right arm, and global cameras, then fill them into the placeholders in the subsequent commands.
+
+**Parameter Notes:**
+- `--output-dir`: The output directory for the tested camera images.
+
+> **Camera Assignment Strategy (Dual-Arm Mode):**
+> - `left` (Left arm view): Mount under `--robot.left_arm_config.cameras`.
+> - `right` (Right arm view) and `middle` (Global view): Mount under `--robot.right_arm_config.cameras`.
+
+> **Camera Assignment Strategy (Single-Arm Mode):**
+> - `wrist` (Single arm view) and `middle` (Global view): Mount under `--robot.cameras`.
+
+# Leader + Follower Scenarios
+## Architecture Overview
+
+Hardware configurations available for dual-arm and single-arm scenarios:
+- **Dual-Arm Scenarios**
+  - Two followers + two leaders
+  - Two mix arms + two leaders (In this case, the mix arm acts temporarily as a follower)
+- **Single-Arm Scenarios**
+  - One follower + one leader
+  - One mix arm + one leader (In this case, the mix arm acts temporarily as a follower)
+
+## Teleoperation
+
+### Dual-Arm Scenarios
+
+Two followers + two leaders
+```Bash
+lerobot-teleoperate \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=gripper \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=gripper \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+If using a combination of two mix arms + two leaders, please use the following command instead:
+
+```Bash
+lerobot-teleoperate \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader_mix \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+**Parameter Notes:**
+- `--robot.left_arm_config.*` / `--robot.right_arm_config.*`: Use the `left/right` prefix to specify configurations for each arm in a dual-arm setup (e.g., communication port `dev`, protocol `version`, end-effector `end_effector`, etc.). The master side operates similarly (using `--teleop.left_arm_config.*`, etc.).
+- `--robot.left_arm_config.cameras` / `--robot.right_arm_config.cameras`: Camera configuration in JSON format. `type` is the camera backend (e.g., `intelrealsense`), specify the unique serial number via `serial_number_or_name`, and configure resolution, frame rate, and warm-up time (`warmup_s`). Keys in the command must be `left`, `middle`, `right`.
+- `--display_data`: Whether to render camera feeds and teleoperation progress panels on screen in real-time.
+
+### Single-Arm Scenarios
+
+If you are using a single-arm environment, run the following command to verify teleoperation:
+
+One follower + one leader
+
+```Bash
+lerobot-teleoperate \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=gripper \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<TELEOP_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+If using a combination of one mix arm + one leader, use the following command instead:
+
+```Bash
+lerobot-teleoperate \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<TELEOP_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+**Parameter Notes:**
+- `--robot.type` / `--teleop.type`: Specify the overall configuration type (e.g., `s1_follower` for a single-arm slave, `s1_leader` for a single-arm master).
+- `--robot.dev` / `--teleop.dev`: Communication ports, using V2 USB serial ports `<FOLLOWER_USB_PORT>` / `<TELEOP_USB_PORT>`.
+- `--robot.end_effector` / `--teleop.end_effector`: End-effector type (slaves use `gripper` or `mix`, masters use `teach`).
+- `--robot.version` / `--teleop.version`: Hardware protocol version.
+- `--robot.id` / `--teleop.id`: User-defined unique device identifier.
+- `--robot.require_calibration` / `--teleop.require_calibration`: Tells the framework if calibration is required. Since S1 supports absolute value calibration at the hardware level, this is set to `false`.
+- `--display_data`: Whether to render real-time camera views and teleoperation data.
+
+## 1. Data Collection
+
+Use `lerobot-human-inloop-record` to collect the first round of reinforcement learning data.
+
+> [!IMPORTANT]
+> - At the end of each episode, you must press the shortcut key **s** (for success) or **f** (for failure). If no key is pressed, it defaults to task failure, which will invalidate subsequent training.
+> - For the first round of data, as no model has been trained yet, you must perform full manual control. Therefore, theoretically, all episodes should be marked as successful (press **s** for every episode).
+
+### Dual-Arm Scenarios
+
+Two followers + two leaders
+
+```Bash
+lerobot-human-inloop-record \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=gripper \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=gripper \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.num_image_writer_processes=3 \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+If using a combination of two mix arms + two leaders, use the following command instead:
+
+```Bash
+lerobot-human-inloop-record \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader_mix \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.num_image_writer_processes=3 \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+**Parameter Notes:**
+- `--dataset.repo_id`: Dataset storage name, including the `local/` prefix (e.g., `local/<DATASET_NAME>`) to save data locally.
+- `--dataset.single_task`: A short text description of the collection task, e.g., `"Pick up the block"`.
+- `--dataset.num_episodes`: Total number of episodes planned for collection.
+- `--dataset.episode_time_s`: Maximum recording time for a single episode (seconds).
+- `--dataset.reset_time_s`: Time reserved between episodes for resetting the robotic arm or manual adjustment (seconds).
+- `--dataset.num_image_writer_processes`: Number of background processes for writing images to disk; increasing this can improve saving speed.
+- `--dataset.push_to_hub`: Whether to automatically push the dataset to Hugging Face Hub after recording (set to `false` for local collection).
+- `--play_sounds`: Whether to play notification sounds during stage transitions (e.g., start, end, failure).
+
+**Shortcut Key Table:**
+
+| Key | Function |
+| :--- | :--- |
+| **i** | Toggle **Intervention Mode** (switch between "Model Auto-Control" and "Manual Takeover") |
+| **s** | Mark as **Success** and end the current episode |
+| **f** | Mark as **Failure** and end the current episode |
+| **→** (Right Arrow) | End the current cycle early (save and move to next episode) |
+| **←** (Left Arrow) | End and **Re-record** the current episode (discard data) |
+| **Esc** | Stop and exit the entire recording session |
+
+### Single-Arm Scenarios
+
+One follower + one leader
+
+```Bash
+lerobot-human-inloop-record \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=gripper \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+If using a mix + leader combination, use the following command instead:
+
+```Bash
+lerobot-human-inloop-record \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+## 2. Check Data
+
+```Bash
+lerobot-dataset-report --dataset local/<DATASET_NAME>
+```
+
+**Parameter Notes:**
+- `--dataset`: The local path or Hub ID of the dataset to analyze and check.
+
+## 3. Value Function Training
+
+After collecting the data, you need to train a Value Function.
+
+```Bash
+lerobot-value-train \
+    --dataset.repo_id=<DATASET_PATH> \
+    --dataset.video_backend=pyav \
+    --value.type=pistar06 \
+    --value.dtype=bfloat16 \
+    --batch_size=4 \
+    --num_workers=0 \
+    --output_dir=outputs/value_train/<RUN_NAME> \
+    --job_name=<JOB_NAME> \
+    --wandb.enable=false
+```
+
+**Parameter Notes:**
+- `--dataset.video_backend`: Video processing backend, `pyav` is recommended for better performance.
+- `--value.type`: The value function model type to use (currently supports codes like `pistar06`).
+- `--value.dtype`: Data precision for training and inference; `bfloat16` can significantly reduce VRAM usage.
+- `--batch_size`: Batch size per training iteration.
+- `--num_workers`: Number of data loading threads. To avoid interference between multi-threading and hardware communication, setting this to `0` for main-thread synchronization is safer.
+- `--output_dir`: Directory to save logs, model checkpoints, etc.
+- `--job_name`: A recognizable name for the current training task.
+- `--wandb.enable`: Whether to enable Weights & Biases (WandB) tracking; can be turned off to save resources.
+
+### Multi-GPU Training
+
+If you have multiple GPUs, you can use `accelerate` to speed up training:
+
+```bash
+CUDA_VISIBLE_DEVICES=<GPU_ID_LIST> accelerate launch \
+  --multi_gpu \
+  --num_processes=<NUM_GPUS> \
+  --mixed_precision=bf16 \
+  $(which lerobot-value-train) \
+  --batch_size=32/<NUM_GPUS> \
+  <VALUE_TRAIN_ARGS>
+```
+
+**Multi-GPU Training Parameters:**
+- `CUDA_VISIBLE_DEVICES`: Specify visible GPUs (e.g., `0,1,2,3`).
+- `--num_processes`: Specify the number of GPUs to parallelize.
+- `--mixed_precision`: Mixed-precision training mode, `bf16` is recommended.
+- `--batch_size`: Batch size **per GPU**. To maintain a total batch size of 32, it is recommended to set this to `32 / <NUM_GPUS>`.
+
+## 4. Value Function Inference
+
+Once training is complete, use Value Inference to tag the dataset with ACP (Advantage-Conditioned Tags):
+
+```Bash
+lerobot-value-infer \
+    --dataset.repo_id=<DATASET_PATH> \
+    --dataset.video_backend=pyav \
+    --inference.checkpoint_path=outputs/value_train/<RUN_NAME>/checkpoints/last/pretrained_model \
+    --runtime.device=cuda \
+    --runtime.batch_size=4 \
+    --acp.enable=true \
+    --acp.n_step=10 \
+    --acp.positive_ratio=0.1 \
+    --acp.value_field=complementary_info.value \
+    --acp.advantage_field=complementary_info.advantage \
+    --acp.indicator_field=complementary_info.acp_indicator \
+    --output_dir=outputs/value_infer/<RUN_NAME> \
+    --job_name=<INFER_JOB_NAME>
+```
+
+**Parameter Notes:**
+- `--inference.checkpoint_path`: Path to the value model checkpoint used for inferring labels.
+- `--runtime.device`: Device for inference (e.g., `cuda`).
+- `--runtime.batch_size`: Batch size for batched inference.
+- `--acp.enable`: Whether to enable the Advantage-Conditioned Policies (ACP) calculation and helper tagging module.
+- `--acp.n_step`: Time window length for calculating cumulative N-step returns.
+- `--acp.positive_ratio`: Threshold ratio for marking data as "Advantage-Conditioned". Setting to `0.1`, for instance, tags the top 10% of expert data as "preferred positive".
+- `--acp.value_field` / `--acp.advantage_field` / `--acp.indicator_field`: Specifies the column field names in the dataset for inferred value (Value), relative advantage absolute difference (Advantage), and the final confirmed ACP indicator flag.
+
+**Check if labels were successfully applied:**
+
+You can use a short Python script to check the `.parquet` file and verify if `complementary_info` fields have been generated:
+
+```Bash
+python -c "
+import pandas as pd; 
+df = pd.read_parquet('<DATASET_PATH>/data/chunk-000/file-000.parquet'); 
+print('The dataset contains the following fields:'); 
+print(df.columns.tolist())
+"
+# Expected to see new fields: 'complementary_info.value', 'complementary_info.advantage', 'complementary_info.acp_indicator'
+```
+
+## 5. Model Training
+
+Based on the labeled dataset, train an ACT model (other models are also supported):
+
+```Bash
+lerobot-train \
+  --dataset.repo_id=<DATASET_PATH> \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --acp.enable=true \
+  --acp.indicator_field=complementary_info.acp_indicator \
+  --acp.indicator_dropout_prob=0.3 \
+  --batch_size=8 \
+  --steps=5000 \
+  --output_dir=outputs/train/<POLICY_RUN_NAME> \
+  --job_name=<POLICY_JOB_NAME> \
+  --wandb.enable=false \
+  --policy.push_to_hub=false
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during training.
+
+**Parameter Notes:**
+- `--policy.type`: Specify the policy architecture (e.g., `act` for Action Chunking with Transformers).
+- `--policy.device`: Device for training (e.g., `cuda`).
+- `--acp.indicator_dropout_prob`: Probability of randomly dropping the expert ACP indicator during training (set to `0.3`). This helps prevent the model from over-relying on perfect condition labels, enhancing robustness and recovery in real-world scenarios where optimal labels might not be available.
+- `--steps`: Total number of iteration steps.
+- `--policy.push_to_hub`: Whether to upload the final validation model to Hugging Face Hub (set to `false` for local training).
+
+## 6. RL Closed-Loop + Next Round Data Collection (Human-in-the-loop)
+
+After training is complete, use `lerobot-human-inloop-record` to enter the next round of reinforcement learning data collection, which involves both model and human intervention.
+
+> [!IMPORTANT]
+> - When the model makes a mistake, press the **i** key to enter human intervention mode, take control to correct the behavior.
+> - For the second round and beyond, because a trained model exists, the data consists of model actions + human-corrected actions.
+> - You still need to press **s** or **f** at the end of every episode to indicate task success. Failing to press a key defaults to failure, which invalidates subsequent training.
+
+### Dual-Arm Scenarios
+
+Two followers + two leaders
+
+```Bash
+lerobot-human-inloop-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=gripper \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=gripper \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If using a combination of two mix arms + two leaders, use the following command instead:
+
+```Bash
+lerobot-human-inloop-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.left_arm_config.version=V2 \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.right_arm_config.version=V2 \
+  --teleop.id=my_bi_s1_leader_mix \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+**Parameter Notes:**
+- `--policy.path`: Policy checkpoint file path.
+- `--acp_inference.enable`: **(Optional)** Whether to enable Advantage-Conditioned Inference (ACP). When `false` (default), the model runs at baseline. If `true`, the system automatically appends "Advantage: positive" to prompts, guiding the model to output high-quality actions based on the best expert data.
+- `--acp_inference.use_cfg`: **(Optional)** Whether to enable Classifier-Free Guidance (CFG). Requires `--acp_inference.enable=true`. It runs both labeled and unlabeled inference simultaneously and extrapolates, significantly improving precision. **Note:** Since calculation volume doubles, it increases latency; suitable for high-performance deployment scenarios.
+- `--acp_inference.cfg_beta`: **(Optional)** Guidance scale factor for CFG. Default is `1.0`. Recommended range is `1.0 ~ 3.0`; increasing this can amplify high-advantage signals, but setting it too high may cause trajectory instability.
+
+**Shortcut Key Table:**
+
+| Key | Function |
+| :--- | :--- |
+| **i** | Toggle **Intervention Mode** (switch between "Model Auto-Control" and "Manual Takeover") |
+| **s** | Mark as **Success** and end the current episode |
+| **f** | Mark as **Failure** and end the current episode |
+| **→** (Right Arrow) | End the current cycle early (save and move to next episode) |
+| **←** (Left Arrow) | End and **Re-record** the current episode (discard data) |
+| **Esc** | Stop and exit the entire recording session |
+
+> [!NOTE]
+> **Intervention Mode Principles (bi_s1_direct_teleop)**
+>
+> - **Policy Control (Default)**: `[set_manual_control(False)]` — The action generated by the policy controls the arm movement via `robot.send_action()`, while `teleop.send_feedback()` makes the arm follow the policy.
+> - **Human Intervention (Press i)**: `[set_manual_control(True)]` — The teleop calls `gravity()`, allowing manual dragging for correction; the action comes from the current pose read by the teleop.
+
+Return to Step 2 to enter the next round of RL training.
+
+### Single-Arm Scenarios
+
+One follower + one leader
+
+```bash
+lerobot-human-inloop-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=gripper \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --dataset.num_image_writer_processes=3 \
+  --display_data=true
+```
+
+>[!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If using a mix + leader combination, use the following command instead:
+
+```bash
+lerobot-human-inloop-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.version=V2 \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --dataset.num_image_writer_processes=3 \
+  --display_data=true
+```
+
+If you want to clear the local cache data generated by this evaluation recording, run:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/local/eval_<DATASET_NAME>
+```
+
+## Model Inference
+
+Perform model inference on the model trained through multiple rounds of reinforcement learning.
+
+### Dual-Arm Scenarios
+
+Two followers + two leaders
+```Bash
+lerobot-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=gripper \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=gripper \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.id=my_bi_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If using a combination of two mix arms + two leaders, use the following command instead:
+
+```Bash
+lerobot-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=bi_s1_follower \
+  --robot.left_arm_config.dev=<LEFT_FOLLOWER_USB_PORT> \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=<RIGHT_FOLLOWER_USB_PORT> \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_leader \
+  --teleop.left_arm_config.dev=<LEFT_LEADER_USB_PORT> \
+  --teleop.left_arm_config.end_effector=teach \
+  --teleop.right_arm_config.dev=<RIGHT_LEADER_USB_PORT> \
+  --teleop.right_arm_config.end_effector=teach \
+  --teleop.id=my_bi_s1_leader_mix \
+  --robot.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+**Parameter Notes:**
+- `--dataset.fps`: Defines the frame rate for time-slicing and action deduction recording during environment interaction (fixed at 30 fps here).
+
+_Tip: To clean up unnecessary local cache datasets generated during evaluation, use `rm -rf ~/.cache/huggingface/lerobot/local/<DATASET_NAME>`._
+
+### Single-Arm Scenarios
+
+One follower + one leader
+
+```bash
+lerobot-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=gripper \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+If using a mix arm, use the following command instead:
+
+```bash
+lerobot-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_follower \
+  --robot.dev=<FOLLOWER_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_follower_mix \
+  --robot.require_calibration=false \
+  --teleop.type=s1_leader \
+  --teleop.dev=<LEADER_USB_PORT> \
+  --teleop.end_effector=teach \
+  --teleop.id=my_s1_leader \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If you want to clear the local cache data generated during inference, run:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/local/eval_<DATASET_NAME>
+```
+
+## Device Safe Disconnection
+
+If you encounter blockages, program crashes, or situations requiring hardware reset during operation, it is recommended to run the following Python script to safely disconnect all nodes:
+
+### Dual-Arm Scenarios
+
+Two followers + two leaders
+```Bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_follower.config_s1_follower import S1FollowerConfig
+from lerobot.robots.s1_follower.s1_follower import S1Follower
+from lerobot.teleoperators.s1_leader.config_s1_leader import S1LeaderConfig
+from lerobot.teleoperators.s1_leader.s1_leader import S1Leader
+
+# Process left follower (V2, USB)
+robot_left = S1Follower(S1FollowerConfig(dev="<LEFT_FOLLOWER_USB_PORT>", version="V2", end_effector="gripper"))
+robot_left.connect()
+robot_left.disconnect()
+
+# Process right follower (V2, USB)
+robot_right = S1Follower(S1FollowerConfig(dev="<RIGHT_FOLLOWER_USB_PORT>", version="V2", end_effector="gripper"))
+robot_right.connect()
+robot_right.disconnect()
+
+# Process left leader (V2, USB)
+teleop_left = S1Leader(S1LeaderConfig(dev="<LEFT_LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop_left.connect()
+teleop_left.disconnect()
+
+# Process right leader (V2, USB)
+teleop_right = S1Leader(S1LeaderConfig(dev="<RIGHT_LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop_right.connect()
+teleop_right.disconnect()
+print("All S1 devices disconnected successfully.")
+'
+```
+
+If using a combination of two mix arms + two leaders, use the following script instead:
+
+```bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_follower.config_s1_follower import S1FollowerConfig
+from lerobot.robots.s1_follower.s1_follower import S1Follower
+from lerobot.teleoperators.s1_leader.config_s1_leader import S1LeaderConfig
+from lerobot.teleoperators.s1_leader.s1_leader import S1Leader
+
+# Process left follower (V2, USB, mix)
+robot_left = S1Follower(S1FollowerConfig(dev="<LEFT_FOLLOWER_USB_PORT>", version="V2", end_effector="mix"))
+robot_left.connect()
+robot_left.disconnect()
+
+# Process right follower (V2, USB, mix)
+robot_right = S1Follower(S1FollowerConfig(dev="<RIGHT_FOLLOWER_USB_PORT>", version="V2", end_effector="mix"))
+robot_right.connect()
+robot_right.disconnect()
+
+# Process left leader (V2, USB)
+teleop_left = S1Leader(S1LeaderConfig(dev="<LEFT_LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop_left.connect()
+teleop_left.disconnect()
+
+# Process right leader (V2, USB)
+teleop_right = S1Leader(S1LeaderConfig(dev="<RIGHT_LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop_right.connect()
+teleop_right.disconnect()
+print("All S1 mix + leader devices disconnected successfully.")
+'
+```
+### Single-Arm Scenarios
+
+One follower + one leader
+```bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_follower.config_s1_follower import S1FollowerConfig
+from lerobot.robots.s1_follower.s1_follower import S1Follower
+from lerobot.teleoperators.s1_leader.config_s1_leader import S1LeaderConfig
+from lerobot.teleoperators.s1_leader.s1_leader import S1Leader
+
+# Process follower
+robot = S1Follower(S1FollowerConfig(dev="<FOLLOWER_USB_PORT>", version="V2", end_effector="gripper"))
+robot.connect()
+robot.disconnect()
+
+# Process leader
+teleop = S1Leader(S1LeaderConfig(dev="<LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop.connect()
+teleop.disconnect()
+print("S1 single arm devices disconnected successfully.")
+'
+```
+
+If using a mix arm, use the following script instead:
+
+```bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_follower.config_s1_follower import S1FollowerConfig
+from lerobot.robots.s1_follower.s1_follower import S1Follower
+from lerobot.teleoperators.s1_leader.config_s1_leader import S1LeaderConfig
+from lerobot.teleoperators.s1_leader.s1_leader import S1Leader
+
+# Process follower (mix)
+robot = S1Follower(S1FollowerConfig(dev="<FOLLOWER_USB_PORT>", version="V2", end_effector="mix"))
+robot.connect()
+robot.disconnect()
+
+# Process leader
+teleop = S1Leader(S1LeaderConfig(dev="<LEADER_USB_PORT>", version="V2", end_effector="teach"))
+teleop.connect()
+teleop.disconnect()
+print("S1 single arm (mix) devices disconnected successfully.")
+'
+```
+
+# Combo Arm Scenarios
+
+## Architecture Overview
+
+Under the combo arm scheme, hardware configurations available for dual-arm and single-arm scenarios:
+- Only two mix arms (Combo gripper data collection, combo arms)
+- Only one mix arm (Combo gripper data collection, combo arms)
+
+> [!IMPORTANT]
+> In the combo arm scheme, no extra leader arm is needed for data collection / teleoperation! Just drag the two combo arms directly.
+
+> [!NOTE]
+> **Robotic Arm Connection Order:** After unplugging both combo robotic arms, please plug their USBs into the computer in the order of **left combo arm, right combo arm**. The system default mappings are **USB0, USB1**, i.e., left combo arm = `USB0`, right combo arm = `USB1`.
+
+> [!NOTE] The device paths and camera serial numbers in the commands below are **example placeholders**, please replace them according to your actual hardware connection:
+>
+> - Left combo arm serial: `/dev/ttyUSB0`, right combo arm serial: `/dev/ttyUSB1`
+> - Camera serial numbers: `left=352122271174`, `right=352122272634`, `middle=352122271611`
+>
+> Camera assignment notes:
+>
+> - `left` (Left arm view camera) mounted under **left_arm_config**
+> - `right` (Right arm view camera) + `middle` (Global view camera) mounted under **right_arm_config**
+
+## Teleoperation
+
+> [!TIP]
+> The `dev` path for teleop **must** be exactly the same as the robot side; teleop will not open a new serial connection but will instead locate the existing shared arm instance via the `dev` string.
+
+### Dual-Arm Scenarios
+
+Two mix arms (Combo arms)
+
+```bash
+lerobot-teleoperate \
+  --robot.type=bi_s1_direct \
+  --robot.left_arm_config.dev=/dev/ttyUSB0 \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=/dev/ttyUSB1 \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_direct_teleop \
+  --teleop.left_arm_config.dev=/dev/ttyUSB0 \
+  --teleop.left_arm_config.end_effector=mix \
+  --teleop.right_arm_config.dev=/dev/ttyUSB1 \
+  --teleop.right_arm_config.end_effector=mix \
+  --teleop.id=my_bi_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+### Single-Arm Scenarios
+
+One mix arm (Combo arm)
+
+```bash
+lerobot-teleoperate \
+  --robot.type=s1_direct \
+  --robot.dev=<DIRECT_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=s1_direct_teleop \
+  --teleop.dev=<DIRECT_USB_PORT> \
+  --teleop.end_effector=mix \
+  --teleop.id=my_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --display_data=true
+```
+
+---
+
+## 1. Data Collection
+
+> [!IMPORTANT]
+> - At the end of each episode, you must press the shortcut key **s** (for success) or **f** (for failure). If no key is pressed, it defaults to task failure, which will invalidate subsequent training.
+> - For the first round of data, as no model has been trained yet, you must perform full manual control. Therefore, theoretically, all episodes should be marked as successful (press **s** for every episode).
+### Dual-Arm Scenarios
+
+Two mix arms (Combo arms)
+
+```bash
+lerobot-human-inloop-record \
+  --robot.type=bi_s1_direct \
+  --robot.left_arm_config.dev=/dev/ttyUSB0 \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=/dev/ttyUSB1 \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_direct_teleop \
+  --teleop.left_arm_config.dev=/dev/ttyUSB0 \
+  --teleop.left_arm_config.end_effector=mix \
+  --teleop.right_arm_config.dev=/dev/ttyUSB1 \
+  --teleop.right_arm_config.end_effector=mix \
+  --teleop.id=my_bi_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.num_image_writer_processes=3 \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+**Shortcut Key Table:**
+
+| Key | Function |
+| :--- | :--- |
+| **i** | Toggle **Intervention Mode** (switch between "Model Auto-Control" and "Manual Takeover") |
+| **s** | Mark as **Success** and end the current episode |
+| **f** | Mark as **Failure** and end the current episode |
+| **→** (Right Arrow) | End the current cycle early (save and move to next episode) |
+| **←** (Left Arrow) | End and **Re-record** the current episode (discard data) |
+| **Esc** | Stop and exit the entire recording session |
+
+If you want to clear the local cache data generated by this recording, you can run:
+
+```bash
+rm -rf /home/wyb/.cache/huggingface/lerobot/local/<DATASET_NAME>
+```
+
+### Single-Arm Scenarios
+
+One mix arm (Combo arm)
+
+```bash
+lerobot-human-inloop-record \
+  --robot.type=s1_direct \
+  --robot.dev=<DIRECT_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=s1_direct_teleop \
+  --teleop.dev=<DIRECT_USB_PORT> \
+  --teleop.end_effector=mix \
+  --teleop.id=my_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+If you want to clear the local cache data generated by this recording, you can run:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/local/<DATASET_NAME>
+```
+## 2. Check Data
+
+```bash
+lerobot-dataset-report --dataset local/<DATASET_NAME>
+```
+
+## 3. Value Function Training
+
+```bash
+lerobot-value-train \
+    --dataset.repo_id=<DATASET_PATH> \
+    --dataset.video_backend=pyav \
+    --value.type=pistar06 \
+    --value.dtype=bfloat16 \
+    --batch_size=4 \
+    --num_workers=0 \
+    --output_dir=outputs/value_train/<RUN_NAME> \
+    --job_name=bi_s1_direct_value \
+    --wandb.enable=false
+
+### Multi-GPU Training
+
+If you have multiple GPUs, you can use `accelerate` to speed up training:
+
+```bash
+CUDA_VISIBLE_DEVICES=<GPU_ID_LIST> accelerate launch \
+  --multi_gpu \
+  --num_processes=<NUM_GPUS> \
+  --mixed_precision=bf16 \
+  $(which lerobot-value-train) \
+  --batch_size=32/<NUM_GPUS> \
+  <VALUE_TRAIN_ARGS>
+```
+
+**Multi-GPU Training Parameters:**
+- `CUDA_VISIBLE_DEVICES`: Specify visible GPUs (e.g., `0,1,2,3`).
+- `--num_processes`: Specify the number of GPUs to parallelize (e.g., 4).
+- `--mixed_precision`: Mixed-precision training mode, `bf16` recommended.
+- `--batch_size`: Batch size **per GPU**. For example, target a total batch size of 32, with 4 GPUs, set it to 8.
+
+
+## 4. Value Function Inference
+
+```bash
+lerobot-value-infer \
+    --dataset.repo_id=<DATASET_PATH> \
+    --dataset.video_backend=pyav \
+    --inference.checkpoint_path=outputs/value_train/<RUN_NAME>/checkpoints/last/pretrained_model \
+    --runtime.device=cuda \
+    --runtime.batch_size=4 \
+    --acp.enable=true \
+    --acp.n_step=10 \
+    --acp.positive_ratio=0.1 \
+    --acp.value_field=complementary_info.value \
+    --acp.advantage_field=complementary_info.advantage \
+    --acp.indicator_field=complementary_info.acp_indicator \
+    --output_dir=outputs/value_infer/<RUN_NAME> \
+    --job_name=s1-direct-value.infer
+```
+
+**Check if labels were successfully applied:**
+
+```bash
+python -c "
+import pandas as pd; 
+df = pd.read_parquet('<DATASET_PATH>/data/chunk-000/file-000.parquet'); 
+print('The dataset contains the following fields:'); 
+print(df.columns.tolist())
+"
+```
+
+```
+# Expected: 'complementary_info.value', 'complementary_info.advantage', 'complementary_info.acp_indicator'
+```
+
+## 5. Model Training
+
+```bash
+lerobot-train \
+  --dataset.repo_id=<DATASET_PATH> \
+  --dataset.video_backend=pyav \
+  --policy.type=act \
+  --policy.device=cuda \
+  --acp.enable=true \
+  --acp.indicator_field=complementary_info.acp_indicator \
+  --acp.indicator_dropout_prob=0.3 \
+  --batch_size=8 \
+  --steps=5000 \
+  --output_dir=outputs/train/<MODEL_NAME> \
+  --job_name=<RUN_NAME> \
+  --wandb.enable=false \
+  --policy.push_to_hub=false
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during training.
+
+## 6. RL Closed-Loop + Next Round Data Collection
+
+After training is complete, use `lerobot-human-inloop-record` to enter the next round of reinforcement learning data collection, which involves both model and human intervention.
+
+> [!IMPORTANT]
+> - When the model makes a mistake, press the **i** key to enter human intervention mode, take control to correct the behavior.
+> - For the second round and beyond, because a trained model exists, the data consists of model actions + human-corrected actions.
+> - You still need to press **s** or **f** at the end of every episode to indicate task success. Failing to press a key defaults to failure, which invalidates subsequent training.
+
+### Dual-Arm Scenarios
+
+Two mix arms (Combo arms)
+
+```bash
+lerobot-human-inloop-record \
+  --policy.path=/home/wyb/workspace/pretrain_models/dual-s1/pretrained_model \
+  --policy.device=cuda \
+  --robot.type=bi_s1_direct \
+  --robot.left_arm_config.dev=/dev/ttyUSB0 \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=/dev/ttyUSB1 \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_direct_teleop \
+  --teleop.left_arm_config.dev=/dev/ttyUSB0 \
+  --teleop.left_arm_config.end_effector=mix \
+  --teleop.right_arm_config.dev=/dev/ttyUSB1 \
+  --teleop.right_arm_config.end_effector=mix \
+  --teleop.id=my_bi_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true \
+  --play_sounds=false
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If you want to clear the local cache data generated by this recording, you can run:
+
+```bash
+rm -rf /home/wyb/.cache/huggingface/lerobot/local/<DATASET_NAME>
+```
+
+**Shortcut Key Table:**
+
+| Key | Function |
+| :--- | :--- |
+| **i** | Toggle **Intervention Mode** (switch between "Model Auto-Control" and "Manual Takeover") |
+| **s** | Mark as **Success** and end the current episode |
+| **f** | Mark as **Failure** and end the current episode |
+| **→** (Right Arrow) | End the current cycle early (save and move to next episode) |
+| **←** (Left Arrow) | End and **Re-record** the current episode (discard data) |
+| **Esc** | Stop and exit the entire recording session |
+
+> [!NOTE]
+> **Intervention Mode Principles (bi_s1_direct_teleop)**
+>
+> - **Policy Control (Default)**: `[set_manual_control(False)]` — The action generated by the policy controls the arm movement via `robot.send_action()`, while `teleop.send_feedback()` makes the arm follow the policy.
+> - **Human Intervention (Press i)**: `[set_manual_control(True)]` — The teleop calls `gravity()`, allowing manual dragging for correction; the action comes from the current pose read by the teleop.
+
+### Single-Arm Scenarios
+
+One mix arm (Combo arm)
+
+```bash
+lerobot-human-inloop-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_direct \
+  --robot.dev=<DIRECT_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=s1_direct_teleop \
+  --teleop.dev=<DIRECT_USB_PORT> \
+  --teleop.end_effector=mix \
+  --teleop.id=my_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.reset_time_s=<RESET_SECONDS> \
+  --dataset.push_to_hub=false \
+  --dataset.num_image_writer_processes=3 \
+  --display_data=true \
+  --play_sounds=false
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If you want to clear the local cache data generated by this evaluation, run:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/local/eval_<DATASET_NAME>
+```
+## Model Inference
+### Dual-Arm Scenarios
+
+Two mix arms (Combo arms)
+```bash
+lerobot-record \
+  --policy.path=outputs/train/<MODEL_NAME>/checkpoints/last/pretrained_model \
+  --policy.device=cuda \
+  --robot.type=bi_s1_direct \
+  --robot.left_arm_config.dev=/dev/ttyUSB0 \
+  --robot.left_arm_config.end_effector=mix \
+  --robot.left_arm_config.version=V2 \
+  --robot.left_arm_config.cameras='{"left": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.right_arm_config.dev=/dev/ttyUSB1 \
+  --robot.right_arm_config.end_effector=mix \
+  --robot.right_arm_config.version=V2 \
+  --robot.right_arm_config.cameras='{"right": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_bi_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=bi_s1_direct_teleop \
+  --teleop.left_arm_config.dev=/dev/ttyUSB0 \
+  --teleop.left_arm_config.end_effector=mix \
+  --teleop.right_arm_config.dev=/dev/ttyUSB1 \
+  --teleop.right_arm_config.end_effector=mix \
+  --teleop.id=my_bi_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=<NUM_EPISODES> \
+  --dataset.episode_time_s=<EPISODE_SECONDS> \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If you want to clear the local cache data generated during inference, run:
+
+```bash
+rm -rf /home/wyb/.cache/huggingface/lerobot/local/eval_<DATASET_NAME>
+```
+### Single-Arm Scenarios
+
+One mix arm (Combo arm)
+
+```bash
+lerobot-record \
+  --policy.path=<POLICY_CHECKPOINT_PATH> \
+  --policy.device=cuda \
+  --robot.type=s1_direct \
+  --robot.dev=<DIRECT_USB_PORT> \
+  --robot.end_effector=mix \
+  --robot.version=V2 \
+  --robot.cameras='{"wrist": {"type": "intelrealsense", "serial_number_or_name": "<WRIST_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}, "middle": {"type": "intelrealsense", "serial_number_or_name": "<MIDDLE_CAM_SERIAL>", "width": 640, "height": 480, "fps": 30, "warmup_s": 3}}' \
+  --robot.id=my_s1_direct \
+  --robot.require_calibration=false \
+  --teleop.type=s1_direct_teleop \
+  --teleop.dev=<DIRECT_USB_PORT> \
+  --teleop.end_effector=mix \
+  --teleop.id=my_s1_direct_teleop \
+  --teleop.require_calibration=false \
+  --dataset.repo_id=local/eval_<DATASET_NAME> \
+  --dataset.single_task="<YOUR_TASK_DESCRIPTION>" \
+  --dataset.fps=30 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.push_to_hub=false \
+  --display_data=true
+```
+
+> [!NOTE]
+> If training a SmolVLA model, add extra camera renaming parameters: use `--dataset.rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.middle": "observation.images.camera2", "observation.images.right": "observation.images.camera3"}'` during validation/inference.
+
+If you want to clear the local cache data generated during inference, run:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/local/eval_<DATASET_NAME>
+```
+## Device Safe Disconnection
+### Dual-Arm Scenarios
+
+Two mix arms (Combo arms)
+```
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_direct.config_s1_direct import S1DirectConfig
+from lerobot.robots.s1_direct.s1_direct import S1Direct
+
+# Process left combo arm (direct)
+print("Connecting Left S1Direct (mix)...")
+robot_left = S1Direct(S1DirectConfig(dev="/dev/ttyUSB0", version="V2", end_effector="mix"))
+robot_left.connect()
+robot_left.disconnect()
+
+# Process right combo arm (direct)
+print("Connecting Right S1Direct (mix)...")
+robot_right = S1Direct(S1DirectConfig(dev="/dev/ttyUSB1", version="V2", end_effector="mix"))
+robot_right.connect()
+robot_right.disconnect()
+
+print("Successfully disconnected both combo arms")
+'
+```
+### Single-Arm Scenarios
+
+One mix arm (Combo arm)
+```bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src && python -c '
+from lerobot.robots.s1_direct.config_s1_direct import S1DirectConfig
+from lerobot.robots.s1_direct.s1_direct import S1Direct
+
+# Process single combo arm (direct)
+print("Connecting S1Direct (mix)...")
+robot = S1Direct(S1DirectConfig(dev="<DIRECT_USB_PORT>", version="V2", end_effector="mix"))
+robot.connect()
+robot.disconnect()
+
+print("Successfully disconnected single combo arm")
+'
+```
+## Comparison between Combo Arm and Leader+Follower Schemes
+
+| Feature | Leader+Follower Scheme | Combo Arm Scheme |
+| :--- | :--- | :--- |
+| Hardware count | 4 arms (2 leader + 2 follower) | 2 arms (one arm two-use) |
+| Teleop type | `bi_s1_leader` | `bi_s1_direct_teleop` |
+| Robot type | `bi_s1_follower` | `bi_s1_direct` |
+| Teaching method | Drag leader | Direct drag combo arm (gravity compensation) |
+| Intervention mode | Leader takeover → follower follow | Direct drag combo arm |
+| Data format | Identical | Identical |
+| Policy compatibility | Identical | Identical |
+

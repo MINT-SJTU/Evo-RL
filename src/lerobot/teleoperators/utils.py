@@ -107,6 +107,14 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> "Teleoperator":
         from .bi_openarm_leader import BiOpenArmLeader
 
         return BiOpenArmLeader(config)
+    elif config.type == "s1_leader":
+        from .s1_leader import S1Leader
+
+        return S1Leader(config)
+    elif config.type == "bi_s1_leader":
+        from .bi_s1_leader import BiS1Leader
+
+        return BiS1Leader(config)
     else:
         try:
             return cast("Teleoperator", make_device_from_device_class(config))
