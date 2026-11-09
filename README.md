@@ -541,7 +541,6 @@ Iterative training loop (abstract):
 
 ## Model & Dataset
 
-- Hugging Face model release: coming soon
 - Hugging Face dataset: [MINT-SJTU/RW-RL-Dataset](https://huggingface.co/datasets/MINT-SJTU/RW-RL-Dataset)
 
 **RW-RL Dataset** is the companion real-world reinforcement learning dataset for Evo-RL. It is organized around iterative policy improvement on real robots, including teleoperation demonstrations, human-in-the-loop intervention data, policy rollout traces, episode-level success/failure labels, intervention states, and complementary signals used for value/reward modeling.
